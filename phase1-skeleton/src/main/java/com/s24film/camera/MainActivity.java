@@ -24,7 +24,9 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.RelativeLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
@@ -118,6 +120,27 @@ public class MainActivity extends Activity implements
     private final Button[] formatButtons = new Button[4];
     private Button btnSaveRaw;
     private TextView modePhoto, modeVideo;
+    private FilmUi filmUi;
+    private boolean testRunning = false;
+    private int testStep = 0;
+    private int testWaitToken = 0;
+    private static final String[] TEST_CAMS = {"2", "0", "6", "1"};
+    private static final String[] TEST_CAM_TAGS = {"UW", "Wide", "Tele", "Front"};
+    private static final int[] TEST_STOCKS = {0, 1, 2, 3, 4, 6, 9};
+    private FilmFx fx;
+    private int uiTheme = 1;          // 0 = modern, 1 = black SLR, 2 = silver rangefinder
+    private boolean cocked = true;    // shutter cocked by the wind lever
+    private boolean motorDrive = false;
+    private final Button[] themeButtons = new Button[3];
+    private View topBar, bottomBar;
+    private FrameLayout filmRoot;
+    private static final long[] SPEED_NS = {0L, 1000000L, 2000000L, 4000000L, 8000000L, 16666667L, 33333333L,
+        66666667L, 125000000L, 250000000L, 500000000L, 1000000000L, -1L};
+    private final Button[] pushButtons = new Button[6];   // -2 .. +3 stops
+    private Button btnFilmIso, btnAutoGain, btnPushFix;
+    private View warnBar;
+    private TextView tvWarning;
+    private float lastUnderEv = 0f;
     private ImageView btnGallery;
     private boolean videoMode = false;
     private float modeTouchDownX = 0f;
@@ -201,6 +224,21 @@ public class MainActivity extends Activity implements
             formatButtons[i].setOnClickListener(this);
         }
         btnSaveRaw = findViewById(R.id.btn_save_raw);
+        int[] pushIds = {R.id.btn_pushm2, R.id.btn_pushm1, R.id.btn_push0,
+                         R.id.btn_push1, R.id.btn_push2, R.id.btn_push3};
+        for (int i = 0; i < 6; i++) {
+            pushButtons[i] = findViewById(pushIds[i]);
+            pushButtons[i].setOnClickListener(this);
+        }
+        btnFilmIso = findViewById(R.id.btn_film_iso);
+        btnAutoGain = findViewById(R.id.btn_auto_gain);
+        btnPushFix = findViewById(R.id.btn_push_fix);
+        warnBar = findViewById(R.id.warn_bar);
+        tvWarning = findViewById(R.id.tv_warning);
+        btnFilmIso.setOnClickListener(this);
+        btnAutoGain.setOnClickListener(this);
+        btnPushFix.setOnClickListener(this);
+        findViewById(R.id.btn_test_series).setOnClickListener(this);
         modePhoto = findViewById(R.id.mode_photo);
         modeVideo = findViewById(R.id.mode_video);
         btnGallery = findViewById(R.id.btn_gallery);
@@ -239,7 +277,19 @@ public class MainActivity extends Activity implements
         videoRecorder = new CinemaVideoRecorder(this, imuTelemetry);
         cameraEngine = new CameraEngine(this, dngSaver, imuTelemetry, this);
 
+        topBar = findViewById(R.id.top_bar);
+        bottomBar = findViewById(R.id.bottom_bar);
+        filmRoot = findViewById(R.id.film_root);
+        int[] themeIds = {R.id.btn_theme_0, R.id.btn_theme_1, R.id.btn_theme_2};
+        for (int i = 0; i < 3; i++) {
+            themeButtons[i] = findViewById(themeIds[i]);
+            themeButtons[i].setOnClickListener(this);
+        }
+        fx = new FilmFx(this);
+        filmUi = new FilmUi(this, filmRoot, new FilmCallbacks(this), fx);
+        uiTheme = getSharedPreferences("ui", 0).getInt("theme", 1);
         setMode(false);
+        applyTheme(uiTheme);
         loadLatestThumbnail();
         checkPermissions();
     }
@@ -294,9 +344,25 @@ public class MainActivity extends Activity implements
         for (int i = 0; i < formatButtons.length; i++) {
             formatButtons[i].setSelected(i == filmFormat);
         }
+        if (cameraEngine != null) {
+            for (int i = 0; i < pushButtons.length; i++) {
+                pushButtons[i].setSelected(cameraEngine.getPushStops() == i - 2);
+            }
+            btnFilmIso.setSelected(cameraEngine.isFilmIsoMode());
+            btnFilmIso.setText(cameraEngine.isFilmIsoMode() ? "Film ISO: On" : "Film ISO: Off");
+            btnAutoGain.setSelected(cameraEngine.isAutoGain());
+            btnAutoGain.setText(cameraEngine.isAutoGain() ? "Auto Gain: On" : "Auto Gain: Off");
+        }
         boolean saveRaw = DngSaver.isSaveDng();
         btnSaveRaw.setSelected(saveRaw);
         btnSaveRaw.setText(saveRaw ? "Save RAW: On" : "Save RAW: Off");
+        if (filmUi != null) {
+            int li = "2".equals(currentCameraId) ? 0 : ("0".equals(currentCameraId) ? 1
+                : ("6".equals(currentCameraId) ? 2 : 3));
+            filmUi.setActiveLens(li);
+            filmUi.setCanister(activeStockIndex, activeLookLabel());
+            filmUi.setMovie(videoMode);
+        }
         btn06x.setSelected("2".equals(currentCameraId));
         btn1x.setSelected("0".equals(currentCameraId));
         btn3x.setSelected("6".equals(currentCameraId));
@@ -324,6 +390,18 @@ public class MainActivity extends Activity implements
         pinPill(hudOverlay, target, false);
     }
 
+    // Low-light banner: shows when the film-exposure logic is underexposing.
+    private void updateExposureUi() {
+        refreshFilmData();
+        boolean show = lastUnderEv > 0.2f;
+        if (show) {
+            tvWarning.setText(String.format(Locale.US,
+                "Not enough light, underexposing by %.1f stops", lastUnderEv));
+        }
+        int vis = show ? View.VISIBLE : View.GONE;
+        if (warnBar.getVisibility() != vis) warnBar.setVisibility(vis);
+    }
+
     // Rotates a pill about its centre, then shifts it so the pinned corner stays on screen.
     private void pinPill(TextView pill, int deg, boolean left) {
         pill.animate().rotation(deg).setDuration(220).start();
@@ -347,6 +425,216 @@ public class MainActivity extends Activity implements
             boolean sideways = (deg == 90 || deg == -90);
             pill.animate().translationX(sideways ? (left ? -shift : shift) : 0f)
                 .translationY(sideways ? shift : 0f).setDuration(220).start();
+        }
+    }
+
+    // Test series: every lens x a set of film stocks, one photo each, files tagged <Lens>_<Stock>.
+    private void startTestSeries() {
+        if (testRunning) return;
+        if (videoRecorder != null && videoRecorder.isRecording()) return;
+        setMode(false);
+        testRunning = true;
+        testStep = 0;
+        Toast.makeText(this, "Test series started: 4 lenses x " + TEST_STOCKS.length + " stocks", Toast.LENGTH_LONG).show();
+        mainHandler.post(new TestTask(this, 0, 0));
+    }
+
+    private void testAdvance() {
+        int total = TEST_CAMS.length * TEST_STOCKS.length;
+        if (testStep >= total) {
+            testRunning = false;
+            tvShutterStatus.setText("Test series done");
+            Toast.makeText(this, "Test series done: " + total + " photos in DCIM/S24Film", Toast.LENGTH_LONG).show();
+            return;
+        }
+        int cam = testStep / TEST_STOCKS.length;
+        int st = testStep % TEST_STOCKS.length;
+        if (st == 0 && !TEST_CAMS[cam].equals(currentCameraId)) {
+            switchCamera(TEST_CAMS[cam], TEST_CAM_TAGS[cam]);
+            mainHandler.postDelayed(new TestTask(this, 0, 0), 3500);
+            return;
+        }
+        activeStockIndex = TEST_STOCKS[st];
+        pickedLookIndex = -1;
+        syncLookToNative();
+        tvShutterStatus.setText("Test " + (testStep + 1) + "/" + total + "  " + TEST_CAM_TAGS[cam] + " " + STOCK_FILE_TAGS[activeStockIndex]);
+        mainHandler.postDelayed(new TestTask(this, 1, 0), 800);
+    }
+
+    private void testShoot() {
+        int cam = testStep / TEST_STOCKS.length;
+        testWaitToken++;
+        btnShutter.setEnabled(false);
+        cameraEngine.triggerCapture(TEST_CAM_TAGS[cam] + "_" + activeFileTag(), this);
+        testStep++;
+        mainHandler.postDelayed(new TestTask(this, 2, testWaitToken), 9000);
+    }
+
+    private void testShotFinished() {
+        if (!testRunning) return;
+        testWaitToken++;
+        mainHandler.postDelayed(new TestTask(this, 0, 0), 500);
+    }
+
+    static class TestTask implements Runnable {
+        private final MainActivity a;
+        private final int kind, token;
+
+        TestTask(MainActivity a, int kind, int token) {
+            this.a = a;
+            this.kind = kind;
+            this.token = token;
+        }
+
+        @Override
+        public void run() {
+            if (!a.testRunning) return;
+            if (kind == 0) a.testAdvance();
+            else if (kind == 1) a.testShoot();
+            else if (token == a.testWaitToken) {   // capture never reported back: move on
+                a.btnShutter.setEnabled(true);
+                a.testAdvance();
+            }
+        }
+    }
+
+    private int dpToPx(float v) {
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    // 0 = modern, 1 = black SLR, 2 = silver rangefinder.
+    private void applyTheme(int t) {
+        uiTheme = t;
+        getSharedPreferences("ui", 0).edit().putInt("theme", t).apply();
+        boolean film = (t != 0);
+        topBar.setVisibility(film ? View.GONE : View.VISIBLE);
+        bottomBar.setVisibility(film ? View.GONE : View.VISIBLE);
+        filmRoot.setVisibility(film ? View.VISIBLE : View.GONE);
+        if (film) filmUi.setTheme(t == 1 ? FilmUi.SLR : FilmUi.RF);
+        RelativeLayout.LayoutParams lp = (RelativeLayout.LayoutParams) darkroomDrawer.getLayoutParams();
+        lp.bottomMargin = dpToPx(film ? 170 : 300);
+        darkroomDrawer.setLayoutParams(lp);
+        warnBar.setTranslationY(film ? dpToPx(54) : 0f);
+        for (int i = 0; i < 3; i++) themeButtons[i].setSelected(i == t);
+        refreshSelection();
+        refreshFilmData();
+    }
+
+    private static String fmtSpeed(long ns) {
+        if (ns <= 0) return "--";
+        if (ns >= 950000000L) return String.format(Locale.US, "%.0f\"", ns / 1e9);
+        return "1/" + Math.round(1e9 / ns);
+    }
+
+    private void refreshFilmData() {
+        if (filmUi == null || cameraEngine == null) return;
+        int si = filmUi.speedIndex();
+        String speed = (si == 0) ? ("A " + fmtSpeed(cameraEngine.getCurrentShutterNs())) : FilmUi.SPEED_SHOWN[si];
+        int ei = cameraEngine.getEffectiveEi();
+        filmUi.setData(speed, FilmUi.APERTURE_LABELS[filmUi.apertureIndex()], ei > 0 ? ("EI " + ei) : "",
+            rollFrameCounter, cocked, cameraEngine.getMeterEv());
+    }
+
+    // The release: blocks until the lever is wound, then fires the whole mechanical sequence.
+    private void filmRelease() {
+        if (videoMode) {
+            fx.click();
+            btnRecordVideo.performClick();
+            return;
+        }
+        if (!cocked) {
+            fx.dead();
+            filmUi.flashNeedWind();
+            return;
+        }
+        if (!btnShutter.isEnabled()) return;
+        int si = filmUi.speedIndex();
+        long holdMs = (si == 0) ? Math.max(8L, cameraEngine.getCurrentShutterNs() / 1000000L) : FilmUi.SPEED_MS[si];
+        fx.shutterOpen();
+        fx.iris();
+        filmUi.playShot(holdMs, FilmUi.APERTURE_F[filmUi.apertureIndex()]);
+        cocked = false;
+        btnShutter.performClick();
+        mainHandler.postDelayed(new MechTask(this, 0), 90 + holdMs);
+        if (motorDrive) mainHandler.postDelayed(new MechTask(this, 1), 1100 + holdMs);
+        refreshFilmData();
+    }
+
+    static class MechTask implements Runnable {
+        private final MainActivity a;
+        private final int kind;
+
+        MechTask(MainActivity a, int kind) {
+            this.a = a;
+            this.kind = kind;
+        }
+
+        @Override
+        public void run() {
+            if (kind == 0) {
+                a.fx.shutterClose();
+            } else {
+                a.fx.advance();
+                a.cocked = true;
+                a.refreshFilmData();
+            }
+        }
+    }
+
+    static class FilmCallbacks implements FilmUi.Callbacks {
+        private final MainActivity a;
+
+        FilmCallbacks(MainActivity a) {
+            this.a = a;
+        }
+
+        @Override public void onRelease() { a.filmRelease(); }
+
+        @Override public void onWound() {
+            a.cocked = true;
+            a.refreshFilmData();
+        }
+
+        @Override public void onRewind() {
+            a.rollFrameCounter = 1;
+            a.cocked = true;
+            a.refreshFilmData();
+            Toast.makeText(a, "Roll rewound - fresh film loaded", Toast.LENGTH_SHORT).show();
+        }
+
+        @Override public void onStockTap() {
+            a.stockButtons[(a.activeStockIndex + 1) % 12].performClick();
+        }
+
+        @Override public void onStockLong() { a.onLongClick(a.stockButtons[0]); }
+
+        @Override public void onLens(int index) {
+            Button[] b = {a.btn06x, a.btn1x, a.btn3x, a.btnFront};
+            b[index].performClick();
+        }
+
+        @Override public void onMenu() { a.toggleSheet(); }
+
+        @Override public void onMode(boolean movie) {
+            a.setMode(movie);
+            a.refreshSelection();
+        }
+
+        @Override public void onMotor(boolean on) {
+            a.motorDrive = on;
+            a.filmUi.setMotor(on);
+        }
+
+        @Override public void onSpeed(int index) {
+            long ns = SPEED_NS[index];
+            if (ns < 0) ns = a.cameraEngine.getDeviceMaxShutterNs();
+            a.cameraEngine.setManualShutterNs(ns);
+            a.refreshFilmData();
+        }
+
+        @Override public void onAperture(int index) {
+            a.cameraEngine.setVirtualAperture(FilmUi.APERTURE_F[index]);
+            a.refreshFilmData();
         }
     }
 
@@ -560,6 +848,26 @@ public class MainActivity extends Activity implements
             filmFormat = (id == R.id.btn_fmt_0) ? 0 : (id == R.id.btn_fmt_1 ? 1 : (id == R.id.btn_fmt_2 ? 2 : 3));
             VulkanRenderer.nativeSetFilmFormat(filmFormat);
             refreshSelection();
+        } else if (id == R.id.btn_test_series) {
+            startTestSeries();
+        } else if (id == R.id.btn_theme_0 || id == R.id.btn_theme_1 || id == R.id.btn_theme_2) {
+            applyTheme(id == R.id.btn_theme_0 ? 0 : (id == R.id.btn_theme_1 ? 1 : 2));
+        } else if (id == R.id.btn_film_iso) {
+            cameraEngine.setFilmIsoMode(!cameraEngine.isFilmIsoMode());
+            refreshSelection();
+        } else if (id == R.id.btn_auto_gain) {
+            cameraEngine.setAutoGain(!cameraEngine.isAutoGain());
+            refreshSelection();
+        } else if (id == R.id.btn_push_fix) {
+            int add = (int) Math.ceil(lastUnderEv);
+            cameraEngine.setPushStops(cameraEngine.getPushStops() + Math.max(1, add));
+            refreshSelection();
+        } else if (id == R.id.btn_pushm2 || id == R.id.btn_pushm1 || id == R.id.btn_push0
+                   || id == R.id.btn_push1 || id == R.id.btn_push2 || id == R.id.btn_push3) {
+            int stops = (id == R.id.btn_pushm2) ? -2 : (id == R.id.btn_pushm1) ? -1 : (id == R.id.btn_push0) ? 0
+                      : (id == R.id.btn_push1) ? 1 : (id == R.id.btn_push2) ? 2 : 3;
+            cameraEngine.setPushStops(stops);
+            refreshSelection();
         } else if (id == R.id.mode_photo) {
             setMode(false);
         } else if (id == R.id.mode_video) {
@@ -722,6 +1030,7 @@ public class MainActivity extends Activity implements
         public void run() {
             hudOverlay.setText(text);
             ((MainActivity) hudOverlay.getContext()).applyUiRotation();
+            ((MainActivity) hudOverlay.getContext()).updateExposureUi();
         }
     }
 
@@ -739,10 +1048,13 @@ public class MainActivity extends Activity implements
         final String cfaName = (cfa == 0) ? "RGGB" : (cfa == 1 ? "GRBG" : (cfa == 2 ? "GBRG" : "BGGR"));
         final boolean rec = (videoRecorder != null && videoRecorder.isRecording());
 
+        final int ei = cameraEngine.getEffectiveEi();
+        final float underEv = cameraEngine.getUnderexposureEv();
         String hudText = String.format(Locale.US,
-            "%s%.0f fps  %.1f ms\n%s  %.0f\u00b0C",
+            "%s%.0f fps  %.1f ms\n%s  %.0f\u00b0C%s",
             rec ? "\u25cf REC  " : "", cameraFps, vulkanMs,
-            cfaName, batteryTempC);
+            cfaName, batteryTempC, ei > 0 ? ("\nEI " + ei) : "");
+        lastUnderEv = underEv;
 
         mainHandler.post(new UpdateHudTask(hudOverlay, hudText));
     }
@@ -752,6 +1064,7 @@ public class MainActivity extends Activity implements
     public void onCaptureSaved(String dngPath, String jpgPath, long dngBytes, long jpgBytes) {
         btnShutter.setEnabled(true);
         rollFrameCounter = (rollFrameCounter % 36) + 1;
+        testShotFinished();
         long dngMb = dngBytes / (1024 * 1024);
         long jpgKb = jpgBytes / 1024;
         String msg = (dngBytes > 0)
@@ -765,6 +1078,7 @@ public class MainActivity extends Activity implements
     @Override
     public void onDngError(String message) {
         btnShutter.setEnabled(true);
+        testShotFinished();
         tvShutterStatus.setText("Capture Failed: " + message);
         Toast.makeText(this, "Capture Error: " + message, Toast.LENGTH_LONG).show();
     }

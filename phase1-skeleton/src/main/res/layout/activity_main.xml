@@ -65,6 +65,40 @@
             android:text="starting" />
     </RelativeLayout>
 
+    <!-- Low-light warning with one-tap Push -->
+    <LinearLayout
+        android:id="@+id/warn_bar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/top_bar"
+        android:layout_centerHorizontal="true"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/bg_pill"
+        android:paddingStart="12dp"
+        android:paddingEnd="6dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp"
+        android:visibility="gone">
+        <TextView
+            android:id="@+id/tv_warning"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:maxWidth="230dp"
+            android:textColor="@color/accent"
+            android:textSize="12sp"
+            android:fontFamily="sans-serif-medium"
+            android:text="Not enough light" />
+        <Button
+            android:id="@+id/btn_push_fix"
+            style="@style/Chip"
+            android:layout_height="30dp"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="0dp"
+            android:text="Push" />
+    </LinearLayout>
+
     <!-- Bottom: sheet, zoom pills, film labels, mode strip, shutter row -->
     <LinearLayout
         android:id="@+id/bottom_bar"
@@ -80,67 +114,6 @@
         android:paddingStart="10dp"
         android:paddingEnd="10dp"
         android:gravity="center_horizontal">
-
-        <!-- Slide-up sheet: film format, shooting options, darkroom sliders -->
-        <LinearLayout
-            android:id="@+id/darkroom_drawer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bg_panel"
-            android:padding="16dp"
-            android:layout_marginBottom="10dp"
-            android:visibility="gone">
-
-            <TextView style="@style/SliderLabel" android:text="FILM FORMAT" android:layout_marginTop="0dp" />
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:scrollbars="none"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="12dp">
-                <LinearLayout
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-                    <Button android:id="@+id/btn_fmt_0" style="@style/Chip" android:text="35mm" />
-                    <Button android:id="@+id/btn_fmt_1" style="@style/Chip" android:text="16mm" />
-                    <Button android:id="@+id/btn_fmt_2" style="@style/Chip" android:text="Super 8" />
-                    <Button android:id="@+id/btn_fmt_3" style="@style/Chip" android:text="6×7" />
-                    <Button android:id="@+id/btn_save_raw" style="@style/Chip" android:text="Save RAW: Off" android:layout_marginStart="12dp" />
-                </LinearLayout>
-            </HorizontalScrollView>
-
-            <TextView style="@style/SliderLabel" android:text="CAMERA" android:layout_marginTop="0dp" />
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:scrollbars="none"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="4dp">
-                <LinearLayout
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-                    <Button android:id="@+id/btn_lens" style="@style/Chip" android:text="Lens: Clean" />
-                    <Button android:id="@+id/btn_anamorphic" style="@style/Chip" android:text="Desqueeze: 1.0x" />
-                    <Button android:id="@+id/btn_gate" style="@style/Chip" android:text="Gate: 3:4" />
-                    <Button android:id="@+id/btn_step_print" style="@style/Chip" android:text="24fps Normal" />
-                    <Button android:id="@+id/btn_burst" style="@style/Chip" android:text="4F Burst" />
-                    <Button android:id="@+id/btn_wb" style="@style/Chip" android:text="WB: Auto" />
-                    <Button android:id="@+id/btn_rotate" style="@style/Chip" android:text="ROT +0°" />
-                </LinearLayout>
-            </HorizontalScrollView>
-
-            <TextView android:id="@+id/tv_ev_label" style="@style/SliderLabel" android:text="EXPOSURE / PUSH-PULL: +0.0 EV" />
-            <SeekBar android:id="@+id/seek_ev" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="40" android:progress="20" />
-
-            <TextView android:id="@+id/tv_grain_label" style="@style/SliderLabel" android:text="SILVER GRAIN INTENSITY: 100%" />
-            <SeekBar android:id="@+id/seek_grain" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="250" android:progress="100" />
-
-            <TextView android:id="@+id/tv_hal_label" style="@style/SliderLabel" android:text="TIR HALATION &amp; BLOOM: 100%" />
-            <SeekBar android:id="@+id/seek_halation" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="250" android:progress="100" />
-        </LinearLayout>
 
         <!-- Zoom pills, floating at the bottom edge of the preview -->
         <LinearLayout
@@ -249,4 +222,108 @@
                 android:text="" />
         </RelativeLayout>
     </LinearLayout>
+    <!-- Film-camera themes are built into this container by FilmUi -->
+    <FrameLayout
+        android:id="@+id/film_root"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipChildren="false"
+        android:visibility="gone" />
+
+        <LinearLayout
+            android:id="@+id/darkroom_drawer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_alignParentBottom="true"
+            android:layout_marginStart="10dp"
+            android:layout_marginEnd="10dp"
+            android:layout_marginBottom="300dp"
+            android:orientation="vertical"
+            android:background="@drawable/bg_panel"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <TextView style="@style/SliderLabel" android:text="INTERFACE" android:layout_marginTop="0dp" />
+            <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content" android:scrollbars="none" android:layout_marginTop="6dp" android:layout_marginBottom="12dp">
+                <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                    <Button android:id="@+id/btn_theme_0" style="@style/Chip" android:text="Modern" />
+                    <Button android:id="@+id/btn_theme_1" style="@style/Chip" android:text="Black SLR" />
+                    <Button android:id="@+id/btn_theme_2" style="@style/Chip" android:text="Silver Rangefinder" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <TextView style="@style/SliderLabel" android:text="FILM FORMAT" android:layout_marginTop="0dp" />
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="12dp">
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <Button android:id="@+id/btn_fmt_0" style="@style/Chip" android:text="35mm" />
+                    <Button android:id="@+id/btn_fmt_1" style="@style/Chip" android:text="16mm" />
+                    <Button android:id="@+id/btn_fmt_2" style="@style/Chip" android:text="Super 8" />
+                    <Button android:id="@+id/btn_fmt_3" style="@style/Chip" android:text="6×7" />
+                    <Button android:id="@+id/btn_save_raw" style="@style/Chip" android:text="Save RAW: Off" android:layout_marginStart="12dp" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <TextView style="@style/SliderLabel" android:text="CAMERA" android:layout_marginTop="0dp" />
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="4dp">
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <Button android:id="@+id/btn_lens" style="@style/Chip" android:text="Lens: Clean" />
+                    <Button android:id="@+id/btn_anamorphic" style="@style/Chip" android:text="Desqueeze: 1.0x" />
+                    <Button android:id="@+id/btn_gate" style="@style/Chip" android:text="Gate: 3:4" />
+                    <Button android:id="@+id/btn_step_print" style="@style/Chip" android:text="24fps Normal" />
+                    <Button android:id="@+id/btn_burst" style="@style/Chip" android:text="4F Burst" />
+                    <Button android:id="@+id/btn_wb" style="@style/Chip" android:text="WB: Auto" />
+                    <Button android:id="@+id/btn_rotate" style="@style/Chip" android:text="ROT +0°" />
+                    <Button android:id="@+id/btn_test_series" style="@style/Chip" android:text="Test: all lenses × stocks" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <TextView style="@style/SliderLabel" android:text="FILM EXPOSURE" />
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="4dp">
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <Button android:id="@+id/btn_pushm2" style="@style/Chip" android:text="−2" />
+                    <Button android:id="@+id/btn_pushm1" style="@style/Chip" android:text="−1" />
+                    <Button android:id="@+id/btn_push0" style="@style/Chip" android:text="Push 0" />
+                    <Button android:id="@+id/btn_push1" style="@style/Chip" android:text="+1" />
+                    <Button android:id="@+id/btn_push2" style="@style/Chip" android:text="+2" />
+                    <Button android:id="@+id/btn_push3" style="@style/Chip" android:text="+3" />
+                    <Button android:id="@+id/btn_film_iso" style="@style/Chip" android:text="Film ISO: On" android:layout_marginStart="12dp" />
+                    <Button android:id="@+id/btn_auto_gain" style="@style/Chip" android:text="Auto Gain: Off" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <TextView android:id="@+id/tv_ev_label" style="@style/SliderLabel" android:text="EXPOSURE / PUSH-PULL: +0.0 EV" />
+            <SeekBar android:id="@+id/seek_ev" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="40" android:progress="20" />
+
+            <TextView android:id="@+id/tv_grain_label" style="@style/SliderLabel" android:text="SILVER GRAIN INTENSITY: 100%" />
+            <SeekBar android:id="@+id/seek_grain" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="250" android:progress="100" />
+
+            <TextView android:id="@+id/tv_hal_label" style="@style/SliderLabel" android:text="TIR HALATION &amp; BLOOM: 100%" />
+            <SeekBar android:id="@+id/seek_halation" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="250" android:progress="100" />
+        </LinearLayout>
+
+
 </RelativeLayout>
