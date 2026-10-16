@@ -1,0 +1,182 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+
+// Phase 0 Verified Xclipse 940 Rules:
+// - 16x16 workgroup = 256 threads = 8 Wave32 wavefronts (enforced via VK_EXT_subgroup_size_control)
+// - Shared memory (LDS) strictly <= 32 KB (this kernel uses 24 * 25 * 4 = 2,400 bytes)
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer RawInputBuffer {
+    uint16_t raw_pixels[];
+} u_RawIn;
+
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D u_LinearBayerOut;
+
+layout(std140, set = 0, binding = 2) uniform LensShadingUBO {
+    // 17x13 lens shading map (4 channels: R, Gr, Gb, B packed as vec4)
+    vec4 lsc_map[17 * 13];
+} u_LSC;
+
+layout(push_constant) uniform PreprocessPC {
+    uint width;
+    uint height;
+    uint rowStridePixels; // rowStrideBytes / 2 (Fixes Bug B3 row padding)
+    uint cfaPhase;        // 0=RGGB (Cam 2), 1=GRBG (Cam 1/3), 2=GBRG (Cam 0 & Tele), 3=BGGR
+    vec4 blackLevel;      // [R, Gr, Gb, B] dynamic black level
+    float whiteLevel;     // 1023.0 on S24+ RAW_SENSOR
+    float noiseA;         // Poisson shot noise scale 'a' from SENSOR_NOISE_PROFILE
+    float noiseB;         // Gaussian read noise variance 'b' from SENSOR_NOISE_PROFILE
+    float dpcThreshold;   // Default 0.15 Airy-disk point-source protection
+} pc;
+
+// Universal branchless CFA channel resolver (Fixes Bug B3 across all 4 cameras)
+// Returns canonical channel: 0 = R, 1 = Gr (Green on R row), 2 = Gb (Green on B row), 3 = B
+uint getCfaChannel(ivec2 p, uint cfaPhase) {
+    uint phase = ((uint(p.y) & 1u) << 1u) | (uint(p.x) & 1u);
+    return phase ^ cfaPhase;
+}
+
+float fetchNormalizedRaw(ivec2 p) {
+    ivec2 c = clamp(p, ivec2(0), ivec2(int(pc.width) - 1, int(pc.height) - 1));
+    // Clamp to same CFA parity when clamping near edges
+    c.x = (c.x & ~1) | (p.x & 1);
+    c.y = (c.y & ~1) | (p.y & 1);
+    uint idx = uint(c.y) * pc.rowStridePixels + uint(c.x);
+    float raw_val = float(uint(u_RawIn.raw_pixels[idx]));
+    uint ch = getCfaChannel(c, pc.cfaPhase);
+    float bl = pc.blackLevel[ch];
+    return clamp((raw_val - bl) / max(pc.whiteLevel - bl, 1.0), 0.0, 1.0);
+}
+
+// C1 Catmull-Rom cubic weights
+vec4 catmullRomWeights(float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return 0.5 * vec4(
+        -t3 + 2.0 * t2 - t,
+         3.0 * t3 - 5.0 * t2 + 2.0,
+        -3.0 * t3 + 4.0 * t2 + t,
+         t3 - t2
+    );
+}
+
+float evaluateBicubicLSC(vec2 uv, uint ch) {
+    vec2 gridPos = uv * vec2(16.0, 12.0);
+    ivec2 base = ivec2(floor(gridPos));
+    vec2 fracPart = gridPos - vec2(base);
+    vec4 wx = catmullRomWeights(fracPart.x);
+    vec4 wy = catmullRomWeights(fracPart.y);
+
+    float sum = 0.0;
+    for (int dy = -1; dy <= 2; ++dy) {
+        int gy = clamp(base.y + dy, 0, 12);
+        float rowSum = 0.0;
+        for (int dx = -1; dx <= 2; ++dx) {
+            int gx = clamp(base.x + dx, 0, 16);
+            float gain = u_LSC.lsc_map[gy * 17 + gx][ch];
+            rowSum += gain * wx[dx + 1];
+        }
+        sum += rowSum * wy[dy + 1];
+    }
+    return max(sum, 1.0);
+}
+
+// Forward Generalized Anscombe Transform (GAT)
+float forwardGAT(float z, float a, float b) {
+    float arg = max(z + (3.0 / 8.0) * a + (b / max(a, 1e-7)), 0.0);
+    return (2.0 / sqrt(max(a, 1e-7))) * sqrt(arg);
+}
+
+// Mäkitalo-Foi Closed-Form Exact Unbiased Inverse GAT
+float inverseGAT(float D, float a, float b) {
+    float D_clamped = max(D, 1.0);
+    float D2 = D_clamped * D_clamped;
+    float D3 = D2 * D_clamped;
+    float term1 = 0.25 * D2;
+    float term2 = (sqrt(1.5) * 0.25) / D_clamped;
+    float term3 = -1.375 / D2;
+    float term4 = (5.0 * sqrt(1.5) * 0.125) / D3;
+    float z = a * (term1 + term2 + term3 + term4 - 0.375) - b / max(a, 1e-7);
+    return clamp(z, 0.0, 1.0);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+
+    uint ch = getCfaChannel(p, pc.cfaPhase);
+    float center = fetchNormalizedRaw(p);
+
+    // 1. Airy-Disk-Aware 5x5 Defective Pixel Correction (DPC)
+    float n[8];
+    n[0] = fetchNormalizedRaw(p + ivec2(-2, -2));
+    n[1] = fetchNormalizedRaw(p + ivec2( 0, -2));
+    n[2] = fetchNormalizedRaw(p + ivec2( 2, -2));
+    n[3] = fetchNormalizedRaw(p + ivec2(-2,  0));
+    n[4] = fetchNormalizedRaw(p + ivec2( 2,  0));
+    n[5] = fetchNormalizedRaw(p + ivec2(-2,  2));
+    n[6] = fetchNormalizedRaw(p + ivec2( 0,  2));
+    n[7] = fetchNormalizedRaw(p + ivec2( 2,  2));
+
+    // Partial insertion sort for rank-order p2, p4, p5, p7
+    for (int i = 1; i < 8; ++i) {
+        float key = n[i];
+        int j = i - 1;
+        while (j >= 0 && n[j] > key) {
+            n[j + 1] = n[j];
+            j--;
+        }
+        n[j + 1] = key;
+    }
+    float I_min = n[1];
+    float I_max = n[6];
+    float M_c   = 0.5 * (n[3] + n[4]);
+    float sigma = sqrt(max(pc.noiseA * M_c + pc.noiseB, 1e-7));
+
+    // Check 4 orthogonal cross-color neighbors at +/-1 for Airy disk energy
+    float crossSum = fetchNormalizedRaw(p + ivec2(-1, 0)) +
+                     fetchNormalizedRaw(p + ivec2( 1, 0)) +
+                     fetchNormalizedRaw(p + ivec2( 0,-1)) +
+                     fetchNormalizedRaw(p + ivec2( 0, 1));
+    float psi_spec = crossSum / (4.0 * M_c + 1e-5);
+
+    float val = center;
+    if ((center > I_max + 4.0 * sigma && psi_spec <= pc.dpcThreshold) ||
+        (center < I_min - 4.0 * sigma)) {
+        val = M_c;
+    }
+
+    // 2. Edge-Adaptive Gr/Gb Green Channel Equilibration (for ISOCELL GN3 DTI crosstalk)
+    if (ch == 1u || ch == 2u) {
+        float g0 = fetchNormalizedRaw(p + ivec2(-1, -1));
+        float g1 = fetchNormalizedRaw(p + ivec2( 1, -1));
+        float g2 = fetchNormalizedRaw(p + ivec2(-1,  1));
+        float g3 = fetchNormalizedRaw(p + ivec2( 1,  1));
+        float g_opp = 0.25 * (g0 + g1 + g2 + g3);
+        float ratio = clamp(g_opp / max(val, 1e-4), 0.85, 1.15);
+        val *= mix(1.0, sqrt(ratio), 0.5);
+    }
+
+    // 3. Stage 3 Fast Same-Parity GAT Bilateral Denoising (Preserves authentic photon grain)
+    float a = max(pc.noiseA, 1e-6);
+    float b = max(pc.noiseB, 1e-7);
+    float d_center = forwardGAT(val, a, b);
+    float w_sum = 1.0;
+    float d_sum = d_center;
+    for (int i = 0; i < 8; ++i) {
+        float d_nb = forwardGAT(n[i], a, b);
+        float diff = d_nb - d_center;
+        float w = exp(-0.5 * diff * diff / 2.25); // sigma_GAT = 1.0
+        d_sum += w * d_nb;
+        w_sum += w;
+    }
+    float denoised = inverseGAT(d_sum / w_sum, a, b);
+
+    // 4. C1 Bicubic Catmull-Rom Lens Shading Correction
+    vec2 uv = (vec2(p) + 0.5) / vec2(float(pc.width), float(pc.height));
+    float lsc_gain = evaluateBicubicLSC(uv, ch);
+    float final_bayer = clamp(denoised * lsc_gain, 0.0, 1.0);
+
+    imageStore(u_LinearBayerOut, p, vec4(final_bayer, 0.0, 0.0, 1.0));
+}

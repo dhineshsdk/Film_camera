@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- Vulkan Viewfinder SurfaceView -->
+    <SurfaceView
+        android:id="@+id/camera_surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_centerInParent="true" />
+
+    <!-- Live Performance, Roll/Magazine Counter & Telemetry HUD Overlay -->
+    <TextView
+        android:id="@+id/hud_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentTop="true"
+        android:background="#B3000000"
+        android:padding="10dp"
+        android:textColor="#00FF66"
+        android:textSize="11sp"
+        android:fontFamily="monospace"
+        android:text="S24+ Vulkan 1.3 RAW Film &amp; Cinema Darkroom (Phase 5)\nInitializing Wave32 pipeline..." />
+
+    <!-- Bottom Controls Container -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:orientation="vertical"
+        android:background="#D9080808"
+        android:padding="8dp"
+        android:gravity="center_horizontal">
+
+        <!-- Toggleable Darkroom Sliders Drawer (EV / Push-Pull, Grain, Halation) -->
+        <LinearLayout
+            android:id="@+id/darkroom_drawer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#1AFFFFFF"
+            android:padding="8dp"
+            android:layout_marginBottom="6dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tv_ev_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="EXPOSURE / PUSH-PULL: +0.0 EV"
+                android:textColor="#FFD54F"
+                android:textSize="10sp"
+                android:fontFamily="monospace" />
+            <SeekBar
+                android:id="@+id/seek_ev"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="40"
+                android:progress="20" />
+
+            <TextView
+                android:id="@+id/tv_grain_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="SILVER GRAIN INTENSITY: 100%"
+                android:textColor="#FFD54F"
+                android:textSize="10sp"
+                android:fontFamily="monospace" />
+            <SeekBar
+                android:id="@+id/seek_grain"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="250"
+                android:progress="100" />
+
+            <TextView
+                android:id="@+id/tv_hal_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="TIR HALATION &amp; BLOOM: 100%"
+                android:textColor="#FFD54F"
+                android:textSize="10sp"
+                android:fontFamily="monospace" />
+            <SeekBar
+                android:id="@+id/seek_halation"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="250"
+                android:progress="100" />
+        </LinearLayout>
+
+        <!-- Shutter Status, Roll Counter & 400ft Cinema Magazine Counter -->
+        <TextView
+            android:id="@+id/tv_shutter_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFD54F"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="4dp"
+            android:text="ROLL #1 [01/36] | MAG: 400 FT 00 FR | Portra 400" />
+
+        <!-- Row 1: Scrollable 12-Stock Film & Cinema Selector Bar -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none"
+            android:layout_marginBottom="4dp">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button android:id="@+id/btn_stock_0" android:layout_width="wrap_content" android:layout_height="34dp" android:text="ACEScg Ref" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_1" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Portra 400" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_2" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Ektar 100" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_3" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Tri-X 400" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_4" android:layout_width="wrap_content" android:layout_height="34dp" android:text="500T+2383" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_5" android:layout_width="wrap_content" android:layout_height="34dp" android:text="CineStill 800T" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_6" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Velvia 100" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_7" android:layout_width="wrap_content" android:layout_height="34dp" android:text="HP5+ 400" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_8" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Kodachrome 64" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_9" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Fuji Classic Neg" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_10" android:layout_width="wrap_content" android:layout_height="34dp" android:text="ARRI LogC4" android:textSize="10sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_stock_11" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Aerochrome IR" android:textSize="10sp" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- Row 2: Scrollable Optical, Cinema Gate, Anamorphic & Darkroom Controls Bar -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none"
+            android:layout_marginBottom="4dp">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button android:id="@+id/btn_lens" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Lens: Clean" android:textSize="9sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_anamorphic" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Desqueeze: 1.0x" android:textSize="9sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_gate" android:layout_width="wrap_content" android:layout_height="34dp" android:text="Gate: 3:4" android:textSize="9sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_step_print" android:layout_width="wrap_content" android:layout_height="34dp" android:text="24fps Normal" android:textSize="9sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_burst" android:layout_width="wrap_content" android:layout_height="34dp" android:text="4F Burst" android:textSize="9sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_wb" android:layout_width="wrap_content" android:layout_height="34dp" android:text="WB: Auto" android:textSize="9sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_rotate" android:layout_width="wrap_content" android:layout_height="34dp" android:text="ROT +0°" android:textSize="9sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btn_darkroom" android:layout_width="wrap_content" android:layout_height="34dp" android:text="SLIDERS" android:textSize="9sp" android:backgroundTint="#1E88E5" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- Row 3: Quartet Physical Lens Switcher -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginBottom="6dp">
+
+            <Button android:id="@+id/btn_06x" android:layout_width="wrap_content" android:layout_height="36dp" android:text="0.6x UW" android:textSize="11sp" android:layout_marginEnd="6dp" />
+            <Button android:id="@+id/btn_1x" android:layout_width="wrap_content" android:layout_height="36dp" android:text="1x Wide" android:textSize="11sp" android:layout_marginEnd="6dp" />
+            <Button android:id="@+id/btn_3x" android:layout_width="wrap_content" android:layout_height="36dp" android:text="3x Tele" android:textSize="11sp" android:layout_marginEnd="6dp" />
+            <Button android:id="@+id/btn_front" android:layout_width="wrap_content" android:layout_height="36dp" android:text="Front" android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Row 4: Dual Stills DNG+JPG Shutter & Cinema Video REC Button -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center">
+
+            <Button
+                android:id="@+id/btn_shutter"
+                android:layout_width="175dp"
+                android:layout_height="48dp"
+                android:text="PHOTO: DNG + JPG"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textSize="12sp"
+                android:backgroundTint="#D32F2F"
+                android:layout_marginEnd="8dp" />
+
+            <Button
+                android:id="@+id/btn_record_video"
+                android:layout_width="175dp"
+                android:layout_height="48dp"
+                android:text="REC FILM VIDEO"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textSize="12sp"
+                android:backgroundTint="#00897B" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+</RelativeLayout>

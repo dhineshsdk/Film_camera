@@ -1,0 +1,1051 @@
+#version 450
+
+// =============================================================================
+// S24+ Exynos 2400 (Xclipse 940 AMD RDNA 3) Wave32 Multi-Pass RAW ISP & Film Engine
+// Sprint 1: Split-Speed Multi-Pass Vulkan 1.3 Engine
+//
+// One SPIR-V module, five compute pipelines selected by specialization constant 0
+// (keeps the existing demosaic.comp -> demosaic_spv.h build step unchanged):
+//
+//   STAGE 0  PREP     sensor res   GAT + Makitalo-Foi inverse, 4-frame ring merge,
+//                                  17x13x4 lens shading -> clean Bayer buffer
+//   STAGE 1  ISP      output res   Hamilton-Adams demosaic, WB, Oklab highlight recovery,
+//                                  ForwardMatrix -> ACEScg, ACES RGC -> mLinearAcesImage mip 0
+//   STAGE 2  PYRAMID  per level    5-level Gaussian mip pyramid of mLinearAcesImage
+//   STAGE 3  BOKEH    half / full  Super 70mm (52.5 x 23 mm, 80 mm f/2.0) 64-tap gather
+//   STAGE 4  FILM     output res   TIR halation + Pro-Mist diffusion from the pyramid,
+//                                  120-look spectral matrix + 2D LUT, DIR couplers,
+//                                  Gabor tile grain (live) / Newson Boolean grain (master),
+//                                  print / scanner inversion, Ultra HDR gain in alpha (master)
+// =============================================================================
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint STAGE = 1u;
+
+const uint STAGE_PREP    = 0u;
+const uint STAGE_ISP     = 1u;
+const uint STAGE_PYRAMID = 2u;
+const uint STAGE_BOKEH   = 3u;
+const uint STAGE_FILM    = 4u;
+
+const uint FLAG_MASTER  = 1u;  // offline master still render
+const uint FLAG_SPATIAL = 2u;  // PREP: spatial Wiener shrinkage in the Anscombe domain
+const uint FLAG_GAT     = 4u;  // PREP: Generalized Anscombe Transform path
+const uint FLAG_LSC     = 8u;  // PREP: 17x13x4 lens shading correction
+
+// ---------------------------------------------------------------- shared resources
+layout(std430, binding = 0) readonly buffer RawInputBuffer {
+    uint u_raw_data[];          // 4-slot ring of packed uint16 RAW_SENSOR frames
+};
+
+layout(std430, binding = 1) buffer CleanBayerBuffer {
+    float u_clean[];            // rawW * rawH, black-subtracted, denoised, shading-corrected
+};
+
+layout(std430, binding = 2) readonly buffer LscBuffer {
+    float u_lsc[];              // kS24LensShadingGrids[4][884], [row][col][R,Geven,Godd,B]
+};
+
+layout(binding = 3) uniform sampler2D u_look_lut;    // 256 x 120 s24_master_120_looks.bin
+layout(binding = 4) uniform sampler2D u_grain_tile;  // 512 x 512 tileable Gabor noise (REPEAT)
+
+struct LookGpu {
+    vec4 dMax;      // rgb
+    vec4 gamma;     // rgb
+    vec4 dMid;      // rgb density at log10(E/0.18) = 0
+    vec4 m0;        // spectralMatrix row 0
+    vec4 m1;        // spectralMatrix row 1
+    vec4 m2;        // spectralMatrix row 2
+    vec4 misc;      // x=category, y=mode (0 negative, 1 transmission, 2 encoded), z=DIR boost, w=LUT row
+    vec4 misc2;     // x=LUT normalized (1) / absolute (0), y=halation, z=grain, w=unused
+    vec4 print0;    // xyz=printer-light logE offset per layer, w=print LUT row (< 0: no print stage)
+    vec4 print1;    // xyz=print paper D-min, w=print exposure scale
+    vec4 print2;    // xyz=rendered black (subtracted), w=mid-grey normalisation
+};
+
+layout(std430, binding = 5) readonly buffer LookBuffer {
+    LookGpu u_looks[];
+};
+
+layout(std140, binding = 6) uniform FrameParams {
+    vec4 f_noise;    // x=S, y=O (normalized to [0,1] after black), z=black level DN, w=temporal tolerance
+    vec4 f_lsc;      // x=enable, y=grid cols (17), z=grid rows (13), w=normalized RAW -> AP1 gain (noise scale)
+    vec4 f_look;     // x=look index (<0 = legacy GeneratedFilmDatabase path), y=DIR multiplier, z=print contrast, w=LUT logE min
+    vec4 f_look2;    // x=LUT logE max, y=LUT rows, z=LUT cols, w=spectral crosstalk strength
+    vec4 f_optics;   // x=halation threshold, y=halation strength, z=diffusion strength, w=diffusion threshold
+    vec4 f_halW;     // halation weights for mip 1..4
+    vec4 f_halW2;    // x=halation weight for mip 5, y=film format blur sigma (px), z=gate vignette
+    vec4 f_diffW;    // diffusion weights for mip 1..4
+    vec4 f_diffW2;   // x=diffusion weight for mip 5
+    vec4 f_bokeh;    // x=enable, y=CoC radius at infinity (output px), z=focus u, w=focus v
+    vec4 f_bokeh2;   // x=in-focus radius, y=falloff radius (fraction of height), z=push(+)/pull(-) stops, w=tap count
+    vec4 f_grain;    // x=luma sharpening amount, y=grain tile texel size in output px, z=strength, w=format grain gain
+    vec4 f_hdr;      // x=hdrSdrRatio, y=write gain to alpha, z=chroma NR strength, w=luma NR strength
+    vec4 f_lens;     // x=Petzval swirl, y=thorium warmth, z=W040 glow, w=cos4 vignette
+    vec4 f_fm0;      // CCT-interpolated ForwardMatrix rows (WB camera RGB -> XYZ D50); f_fm0.w = valid
+    vec4 f_fm1;
+    vec4 f_fm2;
+};
+
+// ---------------------------------------------------------------- per-target images
+layout(binding = 7, rgba16f) uniform image2D u_aces_base;            // mLinearAcesImage mip 0
+layout(binding = 8) uniform sampler2D u_aces_pyramid;                // all 6 mips
+layout(binding = 9,  rgba16f) writeonly uniform image2D u_pyr1;
+layout(binding = 10, rgba16f) writeonly uniform image2D u_pyr2;
+layout(binding = 11, rgba16f) writeonly uniform image2D u_pyr3;
+layout(binding = 12, rgba16f) writeonly uniform image2D u_pyr4;
+layout(binding = 13, rgba16f) writeonly uniform image2D u_pyr5;
+layout(binding = 14, rgba16f) writeonly uniform image2D u_bokeh_out;
+layout(binding = 15) uniform sampler2D u_bokeh_tex;
+layout(binding = 16, rgba8) writeonly uniform image2D u_out_rgba8;     // mMasterStorageImage
+layout(binding = 17, rgba16f) writeonly uniform image2D u_out_rgba16;  // live viewfinder image
+
+layout(push_constant) uniform PushConstants {
+    uint u_width;              // 0   raw width
+    uint u_height;             // 4   raw height
+    uint u_stride;             // 8   (in uint16 elements)
+    uint u_cfa_phase;          // 12  (0=RGGB, 1=GRBG, 2=GBRG, 3=BGGR)
+    float u_white_level;       // 16
+    float u_gain_r;            // 20
+    float u_gain_g;            // 24
+    float u_gain_b;            // 28
+    uint u_sensor_orientation; // 32
+    uint u_stock_type;         // 36  legacy GeneratedFilmDatabase stock type
+    uint u_lens_type;          // 40  UI lens (0 Clean, 1 Helios, 2 Summilux, 3 Takumar, 4 Panavision, 5 Super 70mm)
+    uint u_frame_seed;         // 44
+    float u_dmax_r;            // 48
+    float u_dmax_g;            // 52
+    float u_dmax_b;            // 56
+    float u_nu;                // 60
+    float u_gamma_r;           // 64
+    float u_gamma_g;           // 68
+    float u_gamma_b;           // 72
+    float u_dir_sat_boost;     // 76
+    float u_print_gamma_r;     // 80
+    float u_print_gamma_g;     // 84
+    float u_print_gamma_b;     // 88
+    float u_grain_strength;    // 92
+    float u_halation_strength; // 96
+    float u_exposure_scale;    // 100
+    uint u_cam_matrix_idx;     // 104 (0=Wide, 1=Front, 2=UW, 3=Tele)
+    uint u_packed_ring_info;   // 108 (bits 0..1 slot, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave)
+    uint u_level;              // 112 PYRAMID destination level (1..5)
+    uint u_flags;              // 116 FLAG_*
+    uint u_reserved0;          // 120
+    uint u_reserved1;          // 124
+};
+
+// =============================================================================
+// Utilities
+// =============================================================================
+uvec3 pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+
+vec3 hash3f(uvec3 s) {
+    return vec3(pcg3d(s)) * (1.0 / 4294967295.0);
+}
+
+float luminanceAP1(vec3 c) {
+    return dot(c, vec3(0.2722287, 0.6740818, 0.0536895));
+}
+
+float luminanceRec709(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+uint getCfaChannel(int x, int y) {
+    uint phase = ((uint(y) & 1u) << 1u) | (uint(x) & 1u);
+    return phase ^ u_cfa_phase;   // 0=R, 1=G on R row, 2=G on B row, 3=B
+}
+
+ivec2 clampBayer(int x, int y) {
+    int cx = clamp(x, 0, int(u_width) - 1);
+    int cy = clamp(y, 0, int(u_height) - 1);
+    cx = (cx & ~1) | (x & 1);
+    cy = (cy & ~1) | (y & 1);
+    return ivec2(cx, cy);
+}
+
+// =============================================================================
+// STAGE 0: PREP (GAT + Makitalo-Foi, ring merge, 17x13x4 LSC)
+// =============================================================================
+float rawDN(int x, int y, uint slot) {
+    ivec2 c = clampBayer(x, y);
+    uint framePitch16 = u_stride * u_height;
+    uint idx16 = (slot & 3u) * framePitch16 + uint(c.y) * u_stride + uint(c.x);
+    uint word = u_raw_data[idx16 >> 1u];
+    uint val16 = ((idx16 & 1u) != 0u) ? (word >> 16u) : (word & 0xFFFFu);
+    return float(val16);
+}
+
+float rawNorm(int x, int y, uint slot) {
+    float bl = f_noise.z;
+    return (rawDN(x, y, slot) - bl) / max(u_white_level - bl, 1.0);
+}
+
+// Forward GAT for var(x) = S*x + O (Camera2 SENSOR_NOISE_PROFILE convention):
+//   z = 2 * sqrt(x/S + 3/8 + O/S^2)   ==   (2/S) * sqrt(S*x + 3/8*S^2 + O)
+float gatForward(float x, float alpha, float s2) {
+    return 2.0 * sqrt(max(x / alpha + 0.375 + s2, 0.0));
+}
+
+// Closed-form approximation of the exact unbiased inverse (Makitalo & Foi 2013).
+float gatInverse(float z, float alpha, float s2) {
+    float I;
+    if (z < 1.0) {
+        I = 0.25 * z * z - 0.375 - s2;   // algebraic inverse near black (closed form diverges)
+    } else {
+        const float k = 1.2247448714;    // sqrt(3/2)
+        float zi = 1.0 / z;
+        I = 0.25 * z * z + 0.25 * k * zi - 1.375 * zi * zi + 0.625 * k * zi * zi * zi - 0.125 - s2;
+    }
+    return I * alpha;
+}
+
+float lscGainAt(vec2 pos, uint ch) {
+    float cols = f_lsc.y;
+    float rows = f_lsc.z;
+    vec2 g = (pos + 0.5) / vec2(float(u_width), float(u_height)) * vec2(cols - 1.0, rows - 1.0);
+    ivec2 g0 = clamp(ivec2(floor(g)), ivec2(0), ivec2(int(cols) - 2, int(rows) - 2));
+    vec2 f = clamp(g - vec2(g0), vec2(0.0), vec2(1.0));
+    uint base = min(u_cam_matrix_idx, 3u) * 884u;
+    uint icols = uint(cols);
+    uint i00 = base + (uint(g0.y) * icols + uint(g0.x)) * 4u + ch;
+    uint i10 = i00 + 4u;
+    uint i01 = i00 + icols * 4u;
+    uint i11 = i01 + 4u;
+    return mix(mix(u_lsc[i00], u_lsc[i10], f.x), mix(u_lsc[i01], u_lsc[i11], f.x), f.y);
+}
+
+void stagePrep() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(u_width) || p.y >= int(u_height)) return;
+
+    uint activeSlot = u_packed_ring_info & 3u;
+    uint burstCount = max((u_packed_ring_info >> 8u) & 0xFFu, 1u);
+    float xRef = rawNorm(p.x, p.y, activeSlot);
+    float outVal = xRef;
+
+    if ((u_flags & FLAG_GAT) != 0u) {
+        float alpha = max(f_noise.x, 1e-7);
+        float s2 = max(f_noise.y, 0.0) / (alpha * alpha);
+        float tol = max(f_noise.w, 0.5);
+
+        // Temporal ring merge in the variance-stabilized domain (unit noise variance).
+        float zRef = gatForward(xRef, alpha, s2);
+        float zSum = zRef;
+        float wSum = 1.0;
+        float w2Sum = 1.0;
+        for (uint s = 1u; s < burstCount; ++s) {
+            float z = gatForward(rawNorm(p.x, p.y, (activeSlot + s) & 3u), alpha, s2);
+            float d = z - zRef;
+            float w = exp(-(d * d) / (4.0 * tol * tol));   // diff of two unit-variance samples: var 2
+            zSum += w * z;
+            wSum += w;
+            w2Sum += w * w;
+        }
+        float zT = zSum / wSum;
+        float residualVar = w2Sum / (wSum * wSum);
+
+        // Spatial Wiener shrinkage over the 3x3 same-colour neighbourhood (master only).
+        if ((u_flags & FLAG_SPATIAL) != 0u) {
+            float m = 0.0;
+            float m2 = 0.0;
+            for (int dy = -2; dy <= 2; dy += 2) {
+                for (int dx = -2; dx <= 2; dx += 2) {
+                    float zn = (dx == 0 && dy == 0) ? zT
+                             : gatForward(rawNorm(p.x + dx, p.y + dy, activeSlot), alpha, s2);
+                    m += zn;
+                    m2 += zn * zn;
+                }
+            }
+            m *= (1.0 / 9.0);
+            float v = max(m2 * (1.0 / 9.0) - m * m, 0.0);
+            float gain = max(v - 1.0, 0.0) / max(v, 1e-4);
+            float zW = m + gain * (zT - m);
+            zT = mix(zT, zW, clamp(residualVar, 0.0, 1.0));
+        }
+
+        outVal = gatInverse(zT, alpha, s2);
+    }
+
+    if ((u_flags & FLAG_LSC) != 0u && f_lsc.x > 0.5) {
+        outVal *= lscGainAt(vec2(p), getCfaChannel(p.x, p.y));
+    }
+
+    u_clean[uint(p.y) * u_width + uint(p.x)] = outVal;
+}
+
+// =============================================================================
+// STAGE 1: ISP (Hamilton-Adams, Oklab highlight recovery, ForwardMatrix -> ACEScg, RGC)
+// =============================================================================
+float fetchClean(int x, int y) {
+    ivec2 c = clampBayer(x, y);
+    return u_clean[uint(c.y) * u_width + uint(c.x)];
+}
+
+// Directional Hamilton-Adams green: gradient + Laplacian-corrected estimate per direction,
+// blended by inverse gradient strength.
+float greenAt(int x, int y) {
+    uint ch = getCfaChannel(x, y);
+    float c = fetchClean(x, y);
+    if (ch == 1u || ch == 2u) return c;
+
+    float n0 = fetchClean(x - 2, y);
+    float n1 = fetchClean(x + 2, y);
+    float n2 = fetchClean(x, y - 2);
+    float n3 = fetchClean(x, y + 2);
+    float gW = fetchClean(x - 1, y);
+    float gE = fetchClean(x + 1, y);
+    float gN = fetchClean(x, y - 1);
+    float gS = fetchClean(x, y + 1);
+
+    float dH = abs(gW - gE) + abs(2.0 * c - n0 - n1);
+    float dV = abs(gN - gS) + abs(2.0 * c - n2 - n3);
+    float gH = 0.5 * (gW + gE) + 0.25 * (2.0 * c - n0 - n1);
+    float gV = 0.5 * (gN + gS) + 0.25 * (2.0 * c - n2 - n3);
+    float wH = 1.0 / (dH + 1e-4);
+    float wV = 1.0 / (dV + 1e-4);
+    return max((wH * gH + wV * gV) / (wH + wV), 0.0);
+}
+
+vec3 demosaicHA(int x, int y) {
+    uint ch = getCfaChannel(x, y);
+    float c = fetchClean(x, y);
+
+    if (ch == 0u || ch == 3u) {
+        // Isolated hot/specular pixel suppression on R/B sites.
+        float n0 = fetchClean(x - 2, y);
+        float n1 = fetchClean(x + 2, y);
+        float n2 = fetchClean(x, y - 2);
+        float n3 = fetchClean(x, y + 2);
+        float maxN = max(max(n0, n1), max(n2, n3));
+        float avgN = 0.25 * (n0 + n1 + n2 + n3);
+        float psi = (fetchClean(x - 1, y) + fetchClean(x + 1, y) +
+                     fetchClean(x, y - 1) + fetchClean(x, y + 1)) / (4.0 * avgN + 1e-4);
+        if (c > maxN + 0.14 && psi < 0.15) c = avgN;
+
+        float G = greenAt(x, y);
+        float diffSum = 0.0;
+        diffSum += fetchClean(x - 1, y - 1) - greenAt(x - 1, y - 1);
+        diffSum += fetchClean(x + 1, y - 1) - greenAt(x + 1, y - 1);
+        diffSum += fetchClean(x - 1, y + 1) - greenAt(x - 1, y + 1);
+        diffSum += fetchClean(x + 1, y + 1) - greenAt(x + 1, y + 1);
+        float opp = max(G + 0.25 * diffSum, 0.0);
+        return (ch == 0u) ? vec3(c, G, opp) : vec3(opp, G, c);
+    }
+
+    // Green site: colour-difference interpolation along each axis.
+    float hDiff = 0.5 * ((fetchClean(x - 1, y) - greenAt(x - 1, y)) +
+                         (fetchClean(x + 1, y) - greenAt(x + 1, y)));
+    float vDiff = 0.5 * ((fetchClean(x, y - 1) - greenAt(x, y - 1)) +
+                         (fetchClean(x, y + 1) - greenAt(x, y + 1)));
+    float hVal = max(c + hDiff, 0.0);
+    float vVal = max(c + vDiff, 0.0);
+    return (ch == 1u) ? vec3(hVal, c, vVal) : vec3(vVal, c, hVal);
+}
+
+vec3 cameraRgbToACEScg(vec3 wbRgb) {
+    mat3 fm;
+    if (f_fm0.w > 0.5) {
+        // Per-frame matrix from CameraCharacteristics, interpolated by scene CCT (DNG method).
+        fm = transpose(mat3(f_fm0.xyz, f_fm1.xyz, f_fm2.xyz));
+    } else if (u_cam_matrix_idx == 1u) {
+        fm = transpose(mat3(
+             0.6951,  0.0156,  0.2535,
+             0.2695,  0.6885,  0.0420,
+             0.0033, -0.3702,  1.1918
+        ));
+    } else if (u_cam_matrix_idx == 2u) {
+        fm = transpose(mat3(
+             0.6553,  0.2451,  0.0635,
+             0.2393,  0.9141, -0.1533,
+             0.0391, -0.4316,  1.2188
+        ));
+    } else if (u_cam_matrix_idx == 3u) {
+        fm = transpose(mat3(
+             0.5967,  0.2734,  0.0938,
+             0.2178,  0.8975, -0.1162,
+             0.0225, -0.3535,  1.1553
+        ));
+    } else {
+        fm = transpose(mat3(
+             0.6240,  0.2520,  0.0889,
+             0.2168,  0.8779, -0.0947,
+             0.0117, -0.4023,  1.2148
+        ));
+    }
+
+    // XYZ (D50) -> ACEScg with Bradford D50 -> ACES white: D50 maps exactly to (1,1,1).
+    const mat3 M_XYZ_D50_to_ACEScg = transpose(mat3(
+         1.5927052, -0.3517755, -0.2229041,
+        -0.6759128,  1.6392606,  0.0151090,
+         0.0199491, -0.0225402,  1.2158177
+    ));
+    return max(M_XYZ_D50_to_ACEScg * (fm * wbRgb), vec3(0.0));
+}
+
+// ACES Reference Gamut Compression (ACES 1.3 RGC parameters).
+vec3 applyACESGamutCompression(vec3 rgb) {
+    float ach = max(max(rgb.r, rgb.g), rgb.b);
+    if (ach <= 1e-5) return rgb;
+    vec3 dist = (ach - rgb) / ach;
+    const vec3 t = vec3(0.815, 0.803, 0.880);
+    const vec3 l = vec3(1.147, 1.264, 1.312);
+    const float p = 1.20;
+    vec3 comp;
+    for (int i = 0; i < 3; ++i) {
+        float v = dist[i];
+        if (v < t[i]) {
+            comp[i] = v;
+        } else {
+            float s = (l[i] - t[i]) * pow(pow((1.0 - t[i]) / (l[i] - t[i]), -p) - 1.0, -1.0 / p);
+            float x = (v - t[i]) / s;
+            comp[i] = t[i] + s * (x / pow(1.0 + pow(x, p), 1.0 / p));
+        }
+    }
+    return ach * (1.0 - comp);
+}
+
+const mat3 M_AP1_to_sRGB = mat3(
+     1.7050515, -0.1302564, -0.0240033,
+    -0.6217921,  1.1408048, -0.1289690,
+    -0.0832594, -0.0105484,  1.1529723
+);  // column-major (== transpose of the row-major table)
+
+const mat3 M_sRGB_to_AP1 = mat3(
+     0.6130974, 0.0701937, 0.0206156,
+     0.3395231, 0.9163539, 0.1095698,
+     0.0473795, 0.0134524, 0.8698151
+);  // column-major
+
+float cbrtSigned(float v) {
+    return sign(v) * pow(abs(v), 1.0 / 3.0);
+}
+
+vec3 linearSrgbToOklab(vec3 c) {
+    float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+    float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+    float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+    l = cbrtSigned(l); m = cbrtSigned(m); s = cbrtSigned(s);
+    return vec3(0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+                1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+                0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s);
+}
+
+vec3 oklabToLinearSrgb(vec3 lab) {
+    float l = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+    float m = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+    float s = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+    l = l * l * l; m = m * m * m; s = s * s * s;
+    return vec3( 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+                -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+                -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+}
+
+void stageIsp() {
+    ivec2 outCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outSize = imageSize(u_aces_base);
+    if (outCoord.x >= outSize.x || outCoord.y >= outSize.y) return;
+
+    uint anamorphicMode = (u_packed_ring_info >> 17u) & 3u;
+    uint cinemaGate     = (u_packed_ring_info >> 19u) & 3u;
+    bool gateWeave      = ((u_packed_ring_info >> 21u) & 1u) != 0u;
+
+    float targetHeight = float(outSize.x) * (4.0 / 3.0);
+    if (cinemaGate == 1u) {
+        targetHeight = float(outSize.x) * (9.0 / 16.0);
+    } else if (cinemaGate == 2u) {
+        targetHeight = float(outSize.x) / 2.39;
+    }
+
+    float yMargin = max(0.0, (float(outSize.y) - targetHeight) * 0.5);
+    if (float(outCoord.y) < yMargin || float(outCoord.y) >= float(outSize.y) - yMargin) {
+        imageStore(u_aces_base, outCoord, vec4(0.0));   // alpha 0 marks the letterbox
+        return;
+    }
+
+    float u_norm = (float(outCoord.x) + 0.5) / float(outSize.x);
+    float v_norm = (float(outCoord.y) - yMargin + 0.5) / targetHeight;
+
+    if (gateWeave) {
+        vec3 j = hash3f(uvec3(u_frame_seed, 17u, 53u)) - 0.5;
+        u_norm = clamp(u_norm + j.x * 0.0014, 0.0, 1.0);
+        v_norm = clamp(v_norm + j.y * 0.0014, 0.0, 1.0);
+    }
+
+    float desqueeze = (anamorphicMode == 1u) ? 1.33 : ((anamorphicMode == 2u) ? 2.0 : 1.0);
+    if (desqueeze > 1.01) {
+        v_norm = clamp(0.5 + (v_norm - 0.5) / desqueeze, 0.0, 1.0);
+    }
+
+    // Petzval field swirl (lens archetype swirlPetzval).
+    if (f_lens.x > 0.0) {
+        vec2 centered = (vec2(u_norm, v_norm) - 0.5) * vec2(1.0, 4.0 / 3.0);
+        float r2 = dot(centered, centered);
+        float swirl = f_lens.x * 0.9 * r2;
+        u_norm = clamp(u_norm - centered.y * swirl, 0.0, 1.0);
+        v_norm = clamp(v_norm + centered.x * swirl, 0.0, 1.0);
+    }
+
+    float cropW = float(u_height) * 0.75;
+    float cropMarginX = max(0.0, (float(u_width) - cropW) * 0.5);
+
+    int rawX, rawY;
+    bool mirrorFront = ((u_packed_ring_info >> 16u) & 1u) != 0u;
+    float u_eff = mirrorFront ? (1.0 - u_norm) : u_norm;
+
+    if (u_sensor_orientation == 180u) {
+        rawX = int(cropMarginX + (1.0 - u_eff) * cropW);
+        rawY = int(float(u_height - 1u) - v_norm * float(u_height - 1u));
+    } else if (u_sensor_orientation == 270u) {
+        rawX = int(float(u_width - 1u) - v_norm * float(u_width - 1u));
+        rawY = int(u_eff * float(u_height - 1u));
+    } else if (u_sensor_orientation == 90u) {
+        rawX = int(v_norm * float(u_width - 1u));
+        rawY = int((1.0 - u_eff) * float(u_height - 1u));
+    } else {
+        rawX = int(cropMarginX + u_eff * cropW);
+        rawY = int(v_norm * float(u_height - 1u));
+    }
+    rawX = clamp(rawX, 0, int(u_width) - 1);
+    rawY = clamp(rawY, 0, int(u_height) - 1);
+
+    vec3 camRgb = demosaicHA(rawX, rawY);
+
+    // Clip detection must account for the shading gain already applied in PREP.
+    vec3 clipLevel = vec3(1.0);
+    if (f_lsc.x > 0.5) {
+        vec2 pos = vec2(float(rawX), float(rawY));
+        clipLevel = vec3(lscGainAt(pos, 0u),
+                         0.5 * (lscGainAt(pos, 1u) + lscGainAt(pos, 2u)),
+                         lscGainAt(pos, 3u));
+    }
+    vec3 clipFrac = camRgb / (clipLevel * 0.985);
+    bool gClipped = clipFrac.g >= 1.0;
+
+    vec3 wbRgb = camRgb * vec3(u_gain_r, u_gain_g, u_gain_b);
+    if (gClipped && (clipFrac.r < 1.0 || clipFrac.b < 1.0)) {
+        wbRgb.g = max(wbRgb.g, 0.5 * (wbRgb.r + wbRgb.b));
+    }
+
+    vec3 acescg = cameraRgbToACEScg(wbRgb) * u_exposure_scale;
+    acescg = applyACESGamutCompression(acescg);
+
+    // Oklab highlight recovery: hue-preserving chroma roll-off as channels approach clip.
+    float clipT = smoothstep(0.88, 1.0, max(max(clipFrac.r, clipFrac.g), clipFrac.b));
+    if (clipT > 0.0) {
+        vec3 lin = M_AP1_to_sRGB * acescg;
+        vec3 lab = linearSrgbToOklab(lin);
+        lab.yz *= (1.0 - 0.85 * clipT);
+        acescg = max(M_sRGB_to_AP1 * oklabToLinearSrgb(lab), vec3(0.0));
+    }
+
+    imageStore(u_aces_base, outCoord, vec4(acescg, 1.0));
+}
+
+// =============================================================================
+// STAGE 2: 5-level Gaussian mip pyramid
+// =============================================================================
+void stagePyramid() {
+    int L = int(u_level);
+    ivec2 dstSize = textureSize(u_aces_pyramid, L);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= dstSize.x || p.y >= dstSize.y) return;
+
+    float srcLod = float(L - 1);
+    vec2 srcTexel = 1.0 / vec2(textureSize(u_aces_pyramid, L - 1));
+    vec2 uv = (vec2(p) + 0.5) / vec2(dstSize);
+
+    // 4 bilinear taps at +-0.75 source texels approximate a separable Gaussian (sigma ~ 1 dst texel).
+    vec4 c = textureLod(u_aces_pyramid, uv + vec2(-0.75, -0.75) * srcTexel, srcLod)
+           + textureLod(u_aces_pyramid, uv + vec2( 0.75, -0.75) * srcTexel, srcLod)
+           + textureLod(u_aces_pyramid, uv + vec2(-0.75,  0.75) * srcTexel, srcLod)
+           + textureLod(u_aces_pyramid, uv + vec2( 0.75,  0.75) * srcTexel, srcLod);
+    c *= 0.25;
+
+    if (L == 1) imageStore(u_pyr1, p, c);
+    else if (L == 2) imageStore(u_pyr2, p, c);
+    else if (L == 3) imageStore(u_pyr3, p, c);
+    else if (L == 4) imageStore(u_pyr4, p, c);
+    else imageStore(u_pyr5, p, c);
+}
+
+// =============================================================================
+// STAGE 3: Super 70mm IMAX shallow bokeh gather (CoC in output pixels)
+// =============================================================================
+float cocAt(vec2 uv, vec2 outSize) {
+    vec2 d = (uv - f_bokeh.zw) * vec2(outSize.x / outSize.y, 1.0);
+    float r = length(d);
+    return smoothstep(f_bokeh2.x, f_bokeh2.y, r) * f_bokeh.y;
+}
+
+void stageBokeh() {
+    ivec2 bSize = imageSize(u_bokeh_out);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= bSize.x || p.y >= bSize.y) return;
+
+    vec2 outSize = vec2(textureSize(u_aces_pyramid, 0));
+    vec2 uv = (vec2(p) + 0.5) / vec2(bSize);
+    float coc = cocAt(uv, outSize);
+    if (coc < 0.75) {
+        imageStore(u_bokeh_out, p, vec4(textureLod(u_aces_pyramid, uv, 0.0).rgb, coc));
+        return;
+    }
+
+    int taps = int(f_bokeh2.w);
+    float lod = clamp(log2(max(coc * 1.7725 / sqrt(float(taps)), 1.0)), 0.0, 5.0);
+    const float GOLDEN_ANGLE = 2.39996323;
+
+    vec3 acc = vec3(0.0);
+    float wAcc = 0.0;
+    for (int i = 0; i < taps; ++i) {
+        float rr = sqrt((float(i) + 0.5) / float(taps));
+        float th = float(i) * GOLDEN_ANGLE;
+        vec2 tuv = uv + rr * vec2(cos(th), sin(th)) * coc / outSize;
+        vec4 s = textureLod(u_aces_pyramid, tuv, lod);
+        float tcoc = cocAt(tuv, outSize);
+        float reach = clamp(tcoc - rr * coc + 1.0, 0.0, 1.0);
+        float lum = luminanceAP1(s.rgb);
+        float w = reach * s.a * (1.0 + 3.0 * max(lum - 1.0, 0.0));
+        acc += s.rgb * w;
+        wAcc += w;
+    }
+    vec3 center = textureLod(u_aces_pyramid, uv, 0.0).rgb;
+    vec3 result = (wAcc > 1e-4) ? acc / wAcc : center;
+    imageStore(u_bokeh_out, p, vec4(result, coc));
+}
+
+// =============================================================================
+// STAGE 4: FILM (optics composite, 120-look emulsion, grain, print, HDR gain)
+// =============================================================================
+vec3 evaluateRichardsHD(vec3 logE, vec3 dMax, vec3 gamma, float nuVal, float polarityS) {
+    float n = max(nuVal, 0.1);
+    vec3 D;
+    for (int c = 0; c < 3; ++c) {
+        float span = max(dMax[c], 0.1);
+        float k = (gamma[c] / span) * pow(1.0 + n, (1.0 + n) / n);
+        float arg = clamp(-polarityS * k * logE[c], -35.0, 35.0);
+        D[c] = span / pow(1.0 + n * exp(arg), 1.0 / n);
+    }
+    return D;
+}
+
+vec3 applyDensityGrain(vec2 coord, vec3 D, vec3 dMax, float strength) {
+    if (strength <= 0.001) return D;
+    vec3 normD = clamp(D / max(dMax, vec3(0.1)), 0.0, 1.0);
+    vec3 env = 4.0 * normD * (1.0 - normD) + 0.14;
+    vec3 noise = vec3(0.0);
+    float freq = 0.52;
+    float amp = 0.75;
+    for (int oct = 0; oct < 2; ++oct) {
+        uvec3 seed = uvec3(uint(coord.x * freq), uint(coord.y * freq), u_frame_seed + uint(oct * 73));
+        noise += (hash3f(seed) * 2.0 - 1.0) * amp;
+        freq *= 2.0;
+        amp *= 0.50;
+    }
+    return clamp(D + noise * env * (strength * 0.20), vec3(0.0), dMax);
+}
+
+// Film grain from the tileable noise texture (unit variance per channel). R is shared across
+// the dye layers (luminance grain), G/B/A add a smaller independent part per layer. Amplitude
+// is in density units and peaks in the mid-tones, like real emulsion granularity.
+vec3 filmGrain(vec2 coord, vec3 D, vec3 dMax, float strength, bool mono) {
+    if (strength <= 0.001) return D;
+    vec2 jitter = hash3f(uvec3(u_frame_seed, 911u, 3571u)).xy * 512.0;
+    vec4 n = textureLod(u_grain_tile, (coord / max(f_grain.y, 1.0) + jitter) / 512.0, 0.0);
+    vec3 g = mono ? vec3(n.r) : (0.88 * vec3(n.r) + 0.47 * n.gba);
+    vec3 normD = clamp(D / max(dMax, vec3(0.1)), 0.0, 1.0);
+    vec3 env = 0.35 + 2.6 * normD * (1.0 - normD);
+    return D + g * env * (strength * 0.045 * max(f_grain.w, 0.1));
+}
+
+// ARRI LogC4 Curve
+vec3 linearToArriLogC4(vec3 x) {
+    const float a = 278.506786;
+    const float b = 0.90713587;
+    const float c = 0.092864125;
+    const float s = 0.1135972;
+    const float t = -0.018056996;
+    vec3 v = max(x, vec3(t));
+    vec3 logPart = (log2(a * v + 64.0) - 6.0) / 14.0 * b + c;
+    vec3 linPart = (v - t) / s;
+    return mix(linPart, logPart, greaterThanEqual(v, vec3(t)));
+}
+
+vec3 acesFilmicODT(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+vec3 sampleLookLut(float row, vec3 logE) {
+    float lmin = f_look.w;
+    float lmax = f_look2.x;
+    float cols = f_look2.z;
+    vec3 col = clamp((logE - lmin) / (lmax - lmin), 0.0, 1.0) * (cols - 1.0);
+    float v = (row + 0.5) / f_look2.y;
+    return vec3(textureLod(u_look_lut, vec2((col.r + 0.5) / cols, v), 0.0).r,
+                textureLod(u_look_lut, vec2((col.g + 0.5) / cols, v), 0.0).g,
+                textureLod(u_look_lut, vec2((col.b + 0.5) / cols, v), 0.0).b);
+}
+
+// 120-look spectral emulsion + print. Returns scene-linear AP1 unless 'encoded' is set,
+// in which case the value is already display-encoded and bypasses the ODT.
+// Prints negative densities Dn onto the look's print stock; returns paper reflectance
+// relative to paper white, black removed.
+vec3 printNegative(LookGpu L, vec3 Dn) {
+    vec3 logEp = -(Dn - L.dMid.rgb) / max(L.gamma.rgb, vec3(0.2)) * 0.5 * L.print1.w + L.print0.xyz;
+    vec3 Dp = sampleLookLut(L.print0.w, logEp);
+    return max(pow(vec3(10.0), -(Dp - L.print1.xyz)) - L.print2.xyz, vec3(0.0));
+}
+
+vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, out bool printed) {
+    LookGpu L = u_looks[idx];
+    encoded = false;
+    printed = false;
+
+    // The look's spectral crosstalk matrix, applied in AP1, drifts reds to orange at full
+    // strength; f_look2.w blends it toward identity.
+    mat3 M_look = transpose(mat3(L.m0.xyz, L.m1.xyz, L.m2.xyz));
+    M_look = mat3(1.0) + clamp(f_look2.w, 0.0, 1.0) * (M_look - mat3(1.0));
+    vec3 e = max(M_look * scene, vec3(1e-6));
+    vec3 logE = log2(e / 0.18) * 0.30102999566 + L.misc2.w;   // misc2.w: slide exposure offset
+
+    vec3 D = sampleLookLut(L.misc.w, logE);
+    int mode = int(L.misc.y + 0.5);
+    if (mode == 2) {
+        encoded = true;
+        return clamp(D, 0.0, 1.0);
+    }
+    if (L.misc2.x > 0.5) D *= L.dMax.rgb;
+
+    bool mono = int(L.misc.x + 0.5) == 3;
+    vec3 dMax = max(L.dMax.rgb, vec3(0.1));
+    vec3 dMid = L.dMid.rgb;
+
+    // DIR coupler inter-image effect: neutral-preserving cross-channel density boost.
+    float s = 1.0 + L.misc.z * f_look.y;
+    float off = (1.0 - s) * 0.5;
+    mat3 M_dir = mat3(s, off, off,
+                      off, s, off,
+                      off, off, s);
+    D = dMid + M_dir * (D - dMid);
+
+    // Black point of this look: the density an unexposed frame develops to (LUT logE min),
+    // through the same DIR matrix. Its scanned value is subtracted so film base / fog renders
+    // as true black instead of a lifted grey, while mid grey stays at 0.18.
+    vec3 D0 = sampleLookLut(L.misc.w, vec3(f_look.w));
+    if (L.misc2.x > 0.5) D0 *= L.dMax.rgb;
+    vec3 Dfloor = dMid + M_dir * (D0 - dMid);
+
+    // Push / pull development: longer development raises contrast and grain, pull lowers both.
+    float push = f_bokeh2.z;
+    float devContrast = 1.0 + 0.12 * push;
+    D = dMid + (D - dMid) * devContrast;
+    float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+
+    if (mode == 0 && !mono && L.print0.w >= 0.0) {
+        vec3 lin = printNegative(L, D);
+        // Keep the grey axis neutral at every exposure: render this pixel's own grey (same
+        // luminance) and divide out the layer imbalance, so the print only shapes colours.
+        float logEg = log2(max(luminanceAP1(scene), 1e-6) / 0.18) * 0.30102999566;
+        vec3 Dg = sampleLookLut(L.misc.w, vec3(logEg));
+        if (L.misc2.x > 0.5) Dg *= L.dMax.rgb;
+        vec3 g = printNegative(L, dMid + devContrast * (M_dir * (Dg - dMid)));
+        vec3 corr = vec3((g.r + g.g + g.b) * (1.0 / 3.0) + 1e-5) / (g + 1e-5);
+        lin *= corr * L.print2.w;
+        lin += 0.004 * vec3(1.0, 0.97, 0.90) * (1.0 - lin);   // paper black, slightly warm
+        printed = true;
+        return lin;
+    }
+
+    vec3 lin;
+    vec3 linFloor;
+    if (mode == 0) {
+        // Negative / print paper: scanner inversion normalised by the stock's gamma.
+        vec3 k = f_look.z / max(L.gamma.rgb, vec3(0.2));
+        lin = 0.18 * pow(vec3(10.0), k * (D - dMid));
+        linFloor = 0.18 * pow(vec3(10.0), k * (Dfloor - dMid));
+    } else {
+        // Reversal / transmission: viewed density (logE already shifted so mid grey sits on the
+        // straight line of the slide curve, misc2.w). Grey axis kept neutral like the print path.
+        lin = 0.18 * pow(vec3(10.0), -(D - dMid));
+        linFloor = 0.18 * pow(vec3(10.0), -(Dfloor - dMid));
+        float logEg = log2(max(luminanceAP1(scene), 1e-6) / 0.18) * 0.30102999566 + L.misc2.w;
+        vec3 Dg = sampleLookLut(L.misc.w, vec3(logEg));
+        if (L.misc2.x > 0.5) Dg *= L.dMax.rgb;
+        vec3 g = 0.18 * pow(vec3(10.0), -devContrast * (M_dir * (Dg - dMid)));
+        lin *= vec3((g.r + g.g + g.b) * (1.0 / 3.0) + 1e-5) / (g + 1e-5);
+    }
+    linFloor = min(linFloor, vec3(0.05));
+    lin = max(lin - linFloor, vec3(0.0)) * (0.18 / (0.18 - linFloor));
+    if (mono) lin = vec3(lin.g);
+    return lin;
+}
+
+vec3 legacyEmulsion(vec3 acescg, ivec2 outCoord) {
+    vec3 linearOut = acescg;
+    if (u_stock_type == 0u) return linearOut;
+
+    vec3 dMax = vec3(u_dmax_r, u_dmax_g, u_dmax_b);
+    vec3 gamma = vec3(u_gamma_r, u_gamma_g, u_gamma_b);
+    vec3 pGamma = vec3(u_print_gamma_r, u_print_gamma_g, u_print_gamma_b);
+
+    if (u_stock_type == 5u) {
+        float ndvi = clamp((acescg.g - 0.65 * acescg.r) / max(acescg.g + 0.65 * acescg.r, 1e-4), 0.0, 1.0);
+        float nir = acescg.g * (1.0 + 1.8 * ndvi);
+        acescg = vec3(0.10 * acescg.r + 0.90 * nir, 0.88 * acescg.r + 0.12 * acescg.g, 0.15 * acescg.r + 0.85 * acescg.b);
+    }
+
+    if (u_stock_type == 2u) {
+        float bwE = max(dot(acescg, vec3(0.245, 0.612, 0.143)), 1e-5);
+        vec3 logE = vec3(log(bwE / 0.18) * 0.4342944819);
+        vec3 dNeg = evaluateRichardsHD(logE, dMax, gamma, u_nu, 1.0);
+        vec3 dMid = evaluateRichardsHD(vec3(0.0), dMax, gamma, u_nu, 1.0);
+        dNeg = applyDensityGrain(vec2(outCoord), dNeg, dMax, u_grain_strength);
+        vec3 pos = 0.18 * pow(vec3(10.0), pGamma * (dNeg - dMid));
+        linearOut = vec3(pos.g);
+    } else if (u_stock_type == 4u) {
+        vec3 logE = log(max(acescg / 0.18, vec3(1e-5))) * 0.4342944819;
+        vec3 dSlide = evaluateRichardsHD(logE, dMax, gamma * 0.45, u_nu, -1.0);
+        vec3 dMid   = evaluateRichardsHD(vec3(0.0), dMax, gamma * 0.45, u_nu, -1.0);
+        dSlide = applyDensityGrain(vec2(outCoord), dSlide, dMax, u_grain_strength);
+        linearOut = 0.18 * pow(vec3(10.0), -(dSlide - dMid));
+    } else {
+        vec3 logE = log(max(acescg / 0.18, vec3(1e-5))) * 0.4342944819;
+        vec3 dNeg = evaluateRichardsHD(logE, dMax, gamma, u_nu, 1.0);
+        vec3 dMid = evaluateRichardsHD(vec3(0.0), dMax, gamma, u_nu, 1.0);
+        dNeg = applyDensityGrain(vec2(outCoord), dNeg, dMax, u_grain_strength);
+
+        vec3 deltaD = dNeg - dMid;
+        float s = u_dir_sat_boost;
+        float off = (1.0 - s) * 0.5;
+        mat3 M_dir = transpose(mat3(
+            s,   off, off,
+            off, s,   off,
+            off, off, s
+        ));
+        deltaD = M_dir * deltaD;
+        linearOut = 0.18 * pow(vec3(10.0), pGamma * deltaD);
+
+        if (u_stock_type == 1u) {
+            linearOut = mix(linearOut, linearOut * vec3(1.05, 1.00, 0.94), 0.55);
+        } else if (u_stock_type == 3u) {
+            float luma = dot(linearOut, vec3(0.2722, 0.6741, 0.0537));
+            float sh = clamp(1.0 - luma * 3.0, 0.0, 1.0);
+            linearOut = linearOut * (1.0 - 0.18 * sh) + sh * vec3(0.005, 0.018, 0.028);
+        }
+    }
+    return linearOut;
+}
+
+// Edge-aware noise reduction on scene-linear AP1, using the Gaussian pyramid that already
+// exists for halation. Luminance: Wiener shrinkage toward mip 1 scaled by the sensor noise
+// model. Colour: chroma taken from mips 1-3 wherever their luminance agrees with this pixel
+// (colour noise is low frequency after demosaicing), full-res luminance kept.
+vec3 denoiseScene(vec3 c0, vec2 uv) {
+    vec3 c1 = textureLod(u_aces_pyramid, uv, 1.0).rgb;
+    vec3 c2 = textureLod(u_aces_pyramid, uv, 2.0).rgb;
+    vec3 c3 = textureLod(u_aces_pyramid, uv, 3.0).rgb;
+    float Y0 = luminanceAP1(c0);
+    float Y1 = max(luminanceAP1(c1), 0.0);
+    float Y2 = max(luminanceAP1(c2), 0.0);
+    float Y3 = max(luminanceAP1(c3), 0.0);
+
+    float g = max(f_lsc.w, 1e-3);
+    float var = max(f_noise.x * g * Y1 + f_noise.y * g * g, 1e-9);
+    float sig = sqrt(var);
+
+    float d = Y0 - Y1;
+    float k = var / (var + d * d);
+    float Yd = max(Y0 - f_hdr.w * k * d, 0.0);
+    // Luminance unsharp mask on edges only (k ~ 1 where the difference is just noise).
+    Yd = max(Yd + f_grain.x * (1.0 - k) * (Yd - Y1), 0.0);
+
+    vec3 col = (Y0 > 1e-5) ? c0 * (Yd / Y0) : c1;
+    float tol = 3.0 * sig + 0.06 * Yd;
+    float w1 = exp(-0.5 * (Y1 - Yd) * (Y1 - Yd) / (tol * tol));
+    float w2 = w1 * exp(-0.5 * (Y2 - Yd) * (Y2 - Yd) / (tol * tol));
+    float w3 = w2 * exp(-0.5 * (Y3 - Yd) * (Y3 - Yd) / (tol * tol));
+    float s = clamp(f_hdr.z, 0.0, 1.0);
+    col = mix(col, c1 * (Yd / max(Y1, 1e-5)), s * w1);
+    col = mix(col, c2 * (Yd / max(Y2, 1e-5)), s * w2);
+    col = mix(col, c3 * (Yd / max(Y3, 1e-5)), s * w3);
+
+    // The sensor clips RAW at black 0, so read noise rectifies into a positive bias that the
+    // WB gains turn into blue/magenta shadows. Fade chroma out near the noise floor.
+    float tDark = 0.25 * sqrt(max(f_noise.x * g, 1e-8));
+    float keep = smoothstep(0.3 * tDark, tDark, Yd);
+    col = mix(vec3(Yd), col, mix(1.0, keep, s));
+    return max(col, vec3(0.0));
+}
+
+vec3 srgbOetf(vec3 x) {
+    x = clamp(x, 0.0, 1.0);
+    return mix(12.92 * x, 1.055 * pow(x, vec3(1.0 / 2.4)) - 0.055, greaterThan(x, vec3(0.0031308)));
+}
+
+void stageFilm() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(u_aces_base);
+    if (p.x >= size.x || p.y >= size.y) return;
+
+    bool master = (u_flags & FLAG_MASTER) != 0u;
+    vec4 base = imageLoad(u_aces_base, p);
+    if (base.a < 0.5) {
+        if (master) imageStore(u_out_rgba8, p, vec4(0.0, 0.0, 0.0, 0.0));
+        else imageStore(u_out_rgba16, p, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    vec3 scene = base.rgb;
+    if (f_hdr.z > 0.0 || f_hdr.w > 0.0) scene = denoiseScene(scene, uv);
+
+    // Film gauge resolution: blur toward the pyramid levels (mip k ~ Gaussian 1.0 / 2.2 / 4.6 px).
+    float fsig = f_halW2.y;
+    if (fsig > 0.6) {
+        vec3 b1 = textureLod(u_aces_pyramid, uv, 1.0).rgb;
+        if (fsig <= 1.0) {
+            scene = mix(scene, b1, fsig);
+        } else {
+            vec3 b2 = textureLod(u_aces_pyramid, uv, 2.0).rgb;
+            if (fsig <= 2.2) {
+                scene = mix(b1, b2, (fsig - 1.0) / 1.2);
+            } else {
+                vec3 b3 = textureLod(u_aces_pyramid, uv, 3.0).rgb;
+                scene = mix(b2, b3, clamp((fsig - 2.2) / 2.4, 0.0, 1.0));
+            }
+        }
+    }
+
+    // Stage 8: Super 70mm bokeh composite (half-res live, full-res master).
+    if (f_bokeh.x > 0.5) {
+        vec4 b = textureLod(u_bokeh_tex, uv, 0.0);
+        float t = smoothstep(0.75, 2.0, b.a);
+        scene = mix(scene, b.rgb, t);
+    }
+
+    // Stage 7: TIR halation sampled across the 5 pyramid levels.
+    vec3 m1 = textureLod(u_aces_pyramid, uv, 1.0).rgb;
+    vec3 m2 = textureLod(u_aces_pyramid, uv, 2.0).rgb;
+    vec3 m3 = textureLod(u_aces_pyramid, uv, 3.0).rgb;
+    vec3 m4 = textureLod(u_aces_pyramid, uv, 4.0).rgb;
+    vec3 m5 = textureLod(u_aces_pyramid, uv, 5.0).rgb;
+
+    float thr = f_optics.x;
+    vec3 halSrc = f_halW.x * max(m1 - thr, 0.0) + f_halW.y * max(m2 - thr, 0.0)
+                + f_halW.z * max(m3 - thr, 0.0) + f_halW.w * max(m4 - thr, 0.0)
+                + f_halW2.x * max(m5 - thr, 0.0);
+    if (f_optics.y > 0.0) {
+        const mat3 M_hal = transpose(mat3(
+            1.35, 0.12, 0.00,
+            0.25, 0.40, 0.00,
+            0.00, 0.00, 0.00
+        ));
+        scene += (M_hal * halSrc) * f_optics.y;
+    }
+    if (u_lens_type == 4u) {
+        scene += max(halSrc.r, halSrc.g) * vec3(0.06, 0.25, 0.92) * 0.6;
+    }
+
+    // Pro-Mist Mie diffusion: wide forward-scatter glow + slight shadow lift.
+    if (f_optics.z > 0.001) {
+        vec3 glow = f_diffW.x * m1 + f_diffW.y * m2 + f_diffW.z * m3 + f_diffW.w * m4 + f_diffW2.x * m5;
+        scene = mix(scene, glow, 0.12 * f_optics.z) + f_optics.z * 0.5 * max(glow - f_optics.w, 0.0);
+    }
+
+    if (f_lens.y > 0.0) {
+        scene *= mix(vec3(1.0), vec3(1.06, 1.00, 0.80), f_lens.y);
+    }
+
+    // Stage 9-12: emulsion & print.
+    int lookIdx = int(floor(f_look.x + 0.5));
+    bool encoded = false;
+    bool printed = false;
+    vec3 linearOut;
+    if (lookIdx >= 0) {
+        linearOut = emulsion120(lookIdx, scene, p, master, encoded, printed);
+    } else {
+        linearOut = legacyEmulsion(scene, p);
+    }
+
+    float hdrRatio = max(f_hdr.x, 1.0);
+    float gainEnc = 0.0;
+    vec3 graded;
+
+    if (encoded) {
+        graded = linearOut;
+    } else {
+        vec2 centered = (vec2(p) + 0.5 - vec2(size) * 0.5) / float(size.x);
+        float r2 = dot(centered, centered);
+        float vigK = ((f_lens.w > 0.0) ? f_lens.w * 0.8 : 0.12) + f_halW2.z;
+        float vig = 1.0 / (1.0 + vigK * r2);
+        linearOut *= (vig * vig);
+
+        vec3 srgbLin = max(M_AP1_to_sRGB * linearOut, vec3(0.0));
+        float lumLin;
+        float lumSdr;
+        if (printed) {
+            // Print reflectance is display-referred already (paper white = 1).
+            vec3 sdrLin = clamp(linearOut, 0.0, 1.0);
+            graded = srgbOetf(sdrLin);
+            lumSdr = luminanceRec709(sdrLin);
+            lumLin = luminanceAP1(scene) * (vig * vig) * 0.92;   // scene-linear, mid grey ~ print mid grey
+        } else if (lookIdx < 0 && u_stock_type == 0u) {
+            vec3 x = srgbLin * 1.35;
+            vec3 sdrLin = acesFilmicODT(x);
+            graded = srgbOetf(sdrLin);
+            lumLin = luminanceRec709(x);
+            lumSdr = luminanceRec709(sdrLin);
+        } else if (lookIdx < 0 && u_stock_type == 6u) {
+            graded = clamp(linearToArriLogC4(srgbLin), 0.0, 1.0);
+            lumLin = 0.0;
+            lumSdr = 1.0;
+        } else {
+            vec3 shoulder = clamp(srgbLin / (vec3(1.0) + srgbLin * 0.22), 0.0, 1.0);
+            graded = srgbOetf(shoulder);
+            lumLin = luminanceRec709(srgbLin);
+            lumSdr = luminanceRec709(shoulder);
+        }
+
+        // Ultra HDR gain: SDR is untouched below diffuse white, highlights extend up to hdrRatio.
+        if (master && f_hdr.y > 0.5 && hdrRatio > 1.001) {
+            float t = smoothstep(0.5, 1.0, lumSdr);
+            float target = lumSdr + max(lumLin - lumSdr, 0.0) * t;
+            float g = clamp(target / max(lumSdr, 1e-4), 1.0, hdrRatio);
+            gainEnc = log2(g) / log2(hdrRatio);
+        }
+    }
+
+    if (master) {
+        imageStore(u_out_rgba8, p, vec4(graded, gainEnc));
+    } else {
+        imageStore(u_out_rgba16, p, vec4(graded, 1.0));
+    }
+}
+
+void main() {
+    if (STAGE == STAGE_PREP) {
+        stagePrep();
+    } else if (STAGE == STAGE_ISP) {
+        stageIsp();
+    } else if (STAGE == STAGE_PYRAMID) {
+        stagePyramid();
+    } else if (STAGE == STAGE_BOKEH) {
+        stageBokeh();
+    } else {
+        stageFilm();
+    }
+}

@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- Vulkan Viewfinder SurfaceView -->
+    <SurfaceView
+        android:id="@+id/camera_surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_centerInParent="true" />
+
+    <!-- Live Performance, Color Science & Telemetry HUD Overlay -->
+    <TextView
+        android:id="@+id/hud_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentTop="true"
+        android:background="#B3000000"
+        android:padding="10dp"
+        android:textColor="#00FF66"
+        android:textSize="11sp"
+        android:fontFamily="monospace"
+        android:text="S24+ Vulkan 1.3 RAW Film Darkroom\nInitializing Phase 2 &amp; Phase 3 pipeline..." />
+
+    <!-- Bottom Controls Container -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:orientation="vertical"
+        android:background="#CC080808"
+        android:padding="10dp"
+        android:gravity="center_horizontal">
+
+        <!-- Shutter Status Message -->
+        <TextView
+            android:id="@+id/tv_shutter_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFD54F"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:layout_marginBottom="6dp"
+            android:text="Stock: Kodak Portra 400 | Ready to capture DNG + Film JPG" />
+
+        <!-- Row 1: Scrollable Film Stock Selector Bar -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none"
+            android:layout_marginBottom="6dp">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_stock_0"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="ACEScg Ref"
+                    android:textSize="10sp"
+                    android:layout_marginEnd="4dp" />
+
+                <Button
+                    android:id="@+id/btn_stock_1"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="Portra 400"
+                    android:textSize="10sp"
+                    android:layout_marginEnd="4dp" />
+
+                <Button
+                    android:id="@+id/btn_stock_2"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="Ektar 100"
+                    android:textSize="10sp"
+                    android:layout_marginEnd="4dp" />
+
+                <Button
+                    android:id="@+id/btn_stock_3"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="Tri-X 400"
+                    android:textSize="10sp"
+                    android:layout_marginEnd="4dp" />
+
+                <Button
+                    android:id="@+id/btn_stock_4"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="500T+2383"
+                    android:textSize="10sp"
+                    android:layout_marginEnd="4dp" />
+
+                <Button
+                    android:id="@+id/btn_stock_5"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="CineStill 800T"
+                    android:textSize="10sp"
+                    android:layout_marginEnd="4dp" />
+
+                <Button
+                    android:id="@+id/btn_stock_6"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="Velvia 100"
+                    android:textSize="10sp"
+                    android:layout_marginEnd="4dp" />
+
+                <Button
+                    android:id="@+id/btn_stock_7"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="HP5+ 400"
+                    android:textSize="10sp" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- Row 2: Lens Archetype, 4-Frame Burst Merge & White Balance Mode -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginBottom="6dp">
+
+            <Button
+                android:id="@+id/btn_lens"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="Lens: Clean"
+                android:textSize="10sp"
+                android:layout_marginEnd="6dp" />
+
+            <Button
+                android:id="@+id/btn_burst"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="Burst: 4F ON"
+                android:textSize="10sp"
+                android:layout_marginEnd="6dp" />
+
+            <Button
+                android:id="@+id/btn_wb"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="WB: Auto"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <!-- Row 3: Quartet Physical Lens Switcher -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginBottom="8dp">
+
+            <Button
+                android:id="@+id/btn_06x"
+                android:layout_width="wrap_content"
+                android:layout_height="38dp"
+                android:text="0.6x UW"
+                android:textSize="11sp"
+                android:layout_marginEnd="6dp" />
+
+            <Button
+                android:id="@+id/btn_1x"
+                android:layout_width="wrap_content"
+                android:layout_height="38dp"
+                android:text="1x Wide"
+                android:textSize="11sp"
+                android:layout_marginEnd="6dp" />
+
+            <Button
+                android:id="@+id/btn_3x"
+                android:layout_width="wrap_content"
+                android:layout_height="38dp"
+                android:text="3x Tele"
+                android:textSize="11sp"
+                android:layout_marginEnd="6dp" />
+
+            <Button
+                android:id="@+id/btn_front"
+                android:layout_width="wrap_content"
+                android:layout_height="38dp"
+                android:text="Front"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Row 4: Red Shutter Button (Saves Uncompressed DNG + Master Film JPG) -->
+        <Button
+            android:id="@+id/btn_shutter"
+            android:layout_width="250dp"
+            android:layout_height="52dp"
+            android:text="CAPTURE DNG + FILM JPG"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold"
+            android:textSize="13sp"
+            android:backgroundTint="#D32F2F" />
+
+    </LinearLayout>
+
+</RelativeLayout>

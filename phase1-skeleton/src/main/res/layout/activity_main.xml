@@ -1,0 +1,252 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipChildren="false"
+    android:background="#000000">
+
+    <SurfaceView
+        android:id="@+id/camera_surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Top bar: look name (left), sheet chevron (centre), telemetry (right) -->
+    <RelativeLayout
+        android:id="@+id/top_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentTop="true"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:paddingTop="40dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp">
+
+        <TextView
+            android:id="@+id/tv_shutter_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentStart="true"
+            android:layout_centerVertical="true"
+            android:maxWidth="150dp"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:background="@drawable/bg_pill"
+            android:paddingStart="10dp" android:paddingEnd="10dp"
+            android:paddingTop="5dp" android:paddingBottom="5dp"
+            android:textColor="@color/ink"
+            android:textSize="11sp"
+            android:fontFamily="sans-serif-medium"
+            android:text="Portra 400" />
+
+        <Button
+            android:id="@+id/btn_darkroom"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_centerHorizontal="true"
+            android:background="@drawable/bg_chevron"
+            android:minWidth="0dp" android:minHeight="0dp"
+            android:stateListAnimator="@null"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/hud_overlay"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentEnd="true"
+            android:layout_centerVertical="true"
+            android:maxWidth="110dp"
+            android:background="@drawable/bg_pill"
+            android:paddingStart="10dp" android:paddingEnd="10dp"
+            android:paddingTop="5dp" android:paddingBottom="5dp"
+            android:textColor="@color/ink_dim"
+            android:textSize="10sp"
+            android:fontFamily="monospace"
+            android:text="starting" />
+    </RelativeLayout>
+
+    <!-- Bottom: sheet, zoom pills, film labels, mode strip, shutter row -->
+    <LinearLayout
+        android:id="@+id/bottom_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:orientation="vertical"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:background="@drawable/bg_bottom_fade"
+        android:paddingTop="24dp"
+        android:paddingBottom="22dp"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:gravity="center_horizontal">
+
+        <!-- Slide-up sheet: film format, shooting options, darkroom sliders -->
+        <LinearLayout
+            android:id="@+id/darkroom_drawer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_panel"
+            android:padding="16dp"
+            android:layout_marginBottom="10dp"
+            android:visibility="gone">
+
+            <TextView style="@style/SliderLabel" android:text="FILM FORMAT" android:layout_marginTop="0dp" />
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="12dp">
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <Button android:id="@+id/btn_fmt_0" style="@style/Chip" android:text="35mm" />
+                    <Button android:id="@+id/btn_fmt_1" style="@style/Chip" android:text="16mm" />
+                    <Button android:id="@+id/btn_fmt_2" style="@style/Chip" android:text="Super 8" />
+                    <Button android:id="@+id/btn_fmt_3" style="@style/Chip" android:text="6×7" />
+                    <Button android:id="@+id/btn_save_raw" style="@style/Chip" android:text="Save RAW: Off" android:layout_marginStart="12dp" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <TextView style="@style/SliderLabel" android:text="CAMERA" android:layout_marginTop="0dp" />
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="4dp">
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <Button android:id="@+id/btn_lens" style="@style/Chip" android:text="Lens: Clean" />
+                    <Button android:id="@+id/btn_anamorphic" style="@style/Chip" android:text="Desqueeze: 1.0x" />
+                    <Button android:id="@+id/btn_gate" style="@style/Chip" android:text="Gate: 3:4" />
+                    <Button android:id="@+id/btn_step_print" style="@style/Chip" android:text="24fps Normal" />
+                    <Button android:id="@+id/btn_burst" style="@style/Chip" android:text="4F Burst" />
+                    <Button android:id="@+id/btn_wb" style="@style/Chip" android:text="WB: Auto" />
+                    <Button android:id="@+id/btn_rotate" style="@style/Chip" android:text="ROT +0°" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <TextView android:id="@+id/tv_ev_label" style="@style/SliderLabel" android:text="EXPOSURE / PUSH-PULL: +0.0 EV" />
+            <SeekBar android:id="@+id/seek_ev" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="40" android:progress="20" />
+
+            <TextView android:id="@+id/tv_grain_label" style="@style/SliderLabel" android:text="SILVER GRAIN INTENSITY: 100%" />
+            <SeekBar android:id="@+id/seek_grain" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="250" android:progress="100" />
+
+            <TextView android:id="@+id/tv_hal_label" style="@style/SliderLabel" android:text="TIR HALATION &amp; BLOOM: 100%" />
+            <SeekBar android:id="@+id/seek_halation" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="250" android:progress="100" />
+        </LinearLayout>
+
+        <!-- Zoom pills, floating at the bottom edge of the preview -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginBottom="6dp">
+            <Button android:id="@+id/btn_06x" style="@style/LensBtn" android:text=".6" />
+            <Button android:id="@+id/btn_1x" style="@style/LensBtn" android:text="1×" />
+            <Button android:id="@+id/btn_3x" style="@style/LensBtn" android:text="3" />
+        </LinearLayout>
+
+        <!-- Film stock labels (long-press one for all 120 looks) -->
+        <HorizontalScrollView
+            android:id="@+id/strip_stocks"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:scrollbars="none"
+            android:clipChildren="false"
+            android:layout_marginBottom="4dp">
+            <LinearLayout
+                android:id="@+id/strip_stocks_row"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:clipChildren="false">
+                <Button android:id="@+id/btn_stock_0" style="@style/StockLabel" android:text="Ref" />
+                <Button android:id="@+id/btn_stock_1" style="@style/StockLabel" android:text="Portra 400" />
+                <Button android:id="@+id/btn_stock_2" style="@style/StockLabel" android:text="Ektar 100" />
+                <Button android:id="@+id/btn_stock_3" style="@style/StockLabel" android:text="Tri-X 400" />
+                <Button android:id="@+id/btn_stock_4" style="@style/StockLabel" android:text="500T" />
+                <Button android:id="@+id/btn_stock_5" style="@style/StockLabel" android:text="800T" />
+                <Button android:id="@+id/btn_stock_6" style="@style/StockLabel" android:text="Velvia" />
+                <Button android:id="@+id/btn_stock_7" style="@style/StockLabel" android:text="HP5" />
+                <Button android:id="@+id/btn_stock_8" style="@style/StockLabel" android:text="Kodachrome" />
+                <Button android:id="@+id/btn_stock_9" style="@style/StockLabel" android:text="Classic Neg" />
+                <Button android:id="@+id/btn_stock_10" style="@style/StockLabel" android:text="LogC4" />
+                <Button android:id="@+id/btn_stock_11" style="@style/StockLabel" android:text="Aero IR" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- Mode strip -->
+        <LinearLayout
+            android:id="@+id/mode_strip"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:clipChildren="false"
+            android:layout_marginBottom="8dp">
+            <TextView android:id="@+id/mode_photo" style="@style/ModeLabel" android:text="PHOTO" />
+            <TextView android:id="@+id/mode_video" style="@style/ModeLabel" android:text="VIDEO" />
+        </LinearLayout>
+
+        <!-- Shutter row: gallery | shutter | flip -->
+        <RelativeLayout
+            android:layout_width="match_parent"
+            android:layout_height="84dp"
+            android:clipChildren="false">
+
+            <ImageView
+                android:id="@+id/btn_gallery"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:layout_alignParentStart="true"
+                android:layout_centerVertical="true"
+                android:layout_marginStart="26dp"
+                android:background="@drawable/bg_thumb"
+                android:clipToOutline="true"
+                android:scaleType="centerCrop"
+                android:contentDescription="Gallery" />
+
+            <Button
+                android:id="@+id/btn_shutter"
+                android:layout_width="78dp"
+                android:layout_height="78dp"
+                android:layout_centerInParent="true"
+                android:background="@drawable/bg_shutter"
+                android:minWidth="0dp" android:minHeight="0dp"
+                android:stateListAnimator="@null"
+                android:text="" />
+
+            <Button
+                android:id="@+id/btn_record_video"
+                android:layout_width="78dp"
+                android:layout_height="78dp"
+                android:layout_centerInParent="true"
+                android:background="@drawable/bg_record"
+                android:minWidth="0dp" android:minHeight="0dp"
+                android:stateListAnimator="@null"
+                android:visibility="gone"
+                android:text="" />
+
+            <Button
+                android:id="@+id/btn_front"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:layout_alignParentEnd="true"
+                android:layout_centerVertical="true"
+                android:layout_marginEnd="26dp"
+                android:background="@drawable/bg_flip"
+                android:minWidth="0dp" android:minHeight="0dp"
+                android:stateListAnimator="@null"
+                android:text="" />
+        </RelativeLayout>
+    </LinearLayout>
+</RelativeLayout>

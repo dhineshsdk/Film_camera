@@ -1,0 +1,50 @@
+# Build outputs
+build/
+build_native/
+.gradle/
+.cxx/
+.externalNativeBuild/
+captures/
+*.apk
+*.aab
+*.o
+*.so
+*.class
+*.dex
+
+# Local config / secrets
+local.properties
+*.jks
+*.keystore
+*.pem
+.env*
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Captured test media
+*.dng
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.mov
+/s1_cmp/
+/s1_quality/
+/S24Film/
+
+# Archives and reference PDFs (large, regenerable / external)
+*.zip
+*.pdf
+
+# Large research datasets and device dumps
+/Claude-Project-Files/
+/Gemini project/
+phase0_dumpsys_camera.txt
+phase0_vulkan_caps.json
+phase0_lab_results.json
+/phase0-lab-bench/

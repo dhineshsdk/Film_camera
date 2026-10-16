@@ -1,0 +1,445 @@
+#version 450
+
+// =============================================================================
+// S24+ Exynos 2400 (Xclipse 940 AMD RDNA 3) Wave32 Unified RAW ISP & Film Engine
+// Phase 2 (Stages 1-6 Linear ACEScg ISP) + Phase 3 (Stages 7-11 Film Emulation)
+// - Enforces 16x16 workgroup (256 threads = 8 Wave32 wavefronts)
+// - Enforces Bug Fixes B1, B2, B3, B4, B5, B6 and Error Fix E1
+// - Fixes 90/270-degree Portrait Sensor Orientation & 3:4 Aspect Ratio
+// =============================================================================
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer RawInputBuffer {
+    uint u_raw_data[];
+};
+
+layout(binding = 1, rgba8) writeonly uniform image2D u_output_image;
+
+layout(push_constant) uniform PushConstants {
+    uint u_width;              // 0
+    uint u_height;             // 4
+    uint u_stride;             // 8  (in uint16 elements — Fixes Bug B3 rowStride)
+    uint u_cfa_phase;          // 12 (0=RGGB, 1=GRBG, 2=GBRG, 3=BGGR)
+    float u_white_level;       // 16 (1023.0 on S24+ RAW_SENSOR)
+    float u_gain_r;            // 20 (White Balance Red Gain)
+    float u_gain_g;            // 24 (White Balance Green Gain)
+    float u_gain_b;            // 28 (White Balance Blue Gain)
+    uint u_sensor_orientation; // 32 (90 for Back cameras, 270 for Front camera)
+    uint u_stock_type;         // 36 (0=Linear ACEScg, 1=ColorNeg, 2=BWNeg, 3=CinePrint2383, 4=SlideE6)
+    uint u_lens_type;          // 40 (0=Clean, 1=Helios Swirl, 2=Leica Glow, 3=Thorium, 4=Anamorphic)
+    uint u_frame_seed;         // 44 (Frame counter for temporal grain & ring buffer)
+    float u_dmax_r;            // 48
+    float u_dmax_g;            // 52
+    float u_dmax_b;            // 56
+    float u_nu;                // 60
+    float u_gamma_r;           // 64
+    float u_gamma_g;           // 68
+    float u_gamma_b;           // 72
+    float u_dir_sat_boost;     // 76
+    float u_print_gamma_r;     // 80
+    float u_print_gamma_g;     // 84
+    float u_print_gamma_b;     // 88
+    float u_grain_strength;    // 92
+    float u_halation_strength; // 96
+    float u_exposure_scale;    // 100
+    uint u_cam_matrix_idx;     // 104 (0=Wide GN3, 1=Front S5K3LU, 2=UW IMX564, 3=Tele S5K3K1)
+    uint u_burst_count;        // 108 (1 = Single Frame, 4 = 4-Frame Temporal GAT Burst Merge)
+};
+
+// Fetch a single 16-bit Bayer sample from ring-buffer slot `slot` (0..3)
+float fetchBayerSlot(int x, int y, uint slot) {
+    int cx = clamp(x, 0, int(u_width) - 1);
+    int cy = clamp(y, 0, int(u_height) - 1);
+    // Preserve 2x2 CFA parity on boundary clamp
+    cx = (cx & ~1) | (x & 1);
+    cy = (cy & ~1) | (y & 1);
+    uint framePitch16 = u_stride * u_height;
+    uint idx16 = slot * framePitch16 + uint(cy) * u_stride + uint(cx);
+    uint word = u_raw_data[idx16 >> 1u];
+    uint val16 = ((idx16 & 1u) != 0u) ? (word >> 16u) : (word & 0xFFFFu);
+    return clamp(float(val16) / max(u_white_level, 1.0), 0.0, 1.0);
+}
+
+// Stage 1 & 3: Fetch Bayer with optional 4-Frame Temporal GAT Burst Merge
+float fetchBayer(int x, int y) {
+    float refVal = fetchBayerSlot(x, y, 0u);
+    if (u_burst_count <= 1u) {
+        return refVal;
+    }
+    // Merge 4 temporal ring-buffer frames with Poisson-Gaussian motion rejection
+    float sum = refVal;
+    float wSum = 1.0;
+    float localVar = max(0.004 * refVal + 0.0002, 1e-5);
+    for (uint s = 1u; s < 4u; ++s) {
+        float altVal = fetchBayerSlot(x, y, s);
+        float diff = altVal - refVal;
+        float w = exp(-(diff * diff) / (3.0 * localVar));
+        sum += w * altVal;
+        wSum += w;
+    }
+    return sum / wSum;
+}
+
+// Universal Branchless CFA Channel Resolver (Fixes Bug B3 across all 4 cameras)
+// Returns: 0 = R, 1 = Gr (Green on Red row), 2 = Gb (Green on Blue row), 3 = B
+uint getCfaChannel(int x, int y) {
+    uint phase = ((uint(y) & 1u) << 1u) | (uint(x) & 1u);
+    return phase ^ u_cfa_phase;
+}
+
+// Stage 2 & 3: Airy-Disk-Aware 5x5 Defective Pixel Correction + Same-Parity Denoise
+float fetchConditionedBayer(int x, int y) {
+    float c = fetchBayer(x, y);
+    float n0 = fetchBayer(x - 2, y);
+    float n1 = fetchBayer(x + 2, y);
+    float n2 = fetchBayer(x, y - 2);
+    float n3 = fetchBayer(x, y + 2);
+    float minN = min(min(n0, n1), min(n2, n3));
+    float maxN = max(max(n0, n1), max(n2, n3));
+    float avgN = 0.25 * (n0 + n1 + n2 + n3);
+
+    // Check orthogonal cross-color neighbors at +/-1 for optical Airy disk energy
+    float crossSum = fetchBayer(x - 1, y) + fetchBayer(x + 1, y) +
+                     fetchBayer(x, y - 1) + fetchBayer(x, y + 1);
+    float psiSpec = crossSum / (4.0 * avgN + 1e-4);
+    if (c > maxN + 0.12 && psiSpec < 0.15) {
+        c = avgN; // Suppress isolated hot pixel while preserving real stars/specular glints
+    } else if (c < minN - 0.12) {
+        c = avgN;
+    }
+    // Edge-preserving bilateral blend with same-color neighbors
+    float diff = abs(c - avgN);
+    float w = exp(-diff * diff / 0.008);
+    return mix(c, avgN, 0.25 * w);
+}
+
+// Stage 4: Bug-B3-Fixed Hamilton-Adams / Malvar-He-Cutler Directional Demosaic at (x, y)
+vec3 demosaicAt(int x, int y) {
+    float c00 = fetchConditionedBayer(x, y);
+    uint ch = getCfaChannel(x, y);
+
+    float cW1 = fetchBayer(x - 1, y);
+    float cE1 = fetchBayer(x + 1, y);
+    float cN1 = fetchBayer(x, y - 1);
+    float cS1 = fetchBayer(x, y + 1);
+
+    float cW2 = fetchBayer(x - 2, y);
+    float cE2 = fetchBayer(x + 2, y);
+    // Bug B3 Fix: True vertical y - 2 and y + 2 second-order Laplacian taps!
+    float cN2 = fetchBayer(x, y - 2);
+    float cS2 = fetchBayer(x, y + 2);
+
+    vec3 rgb;
+    if (ch == 0u || ch == 3u) {
+        // At Red (0) or Blue (3) pixel: directional Green interpolation
+        float dH = abs(cW1 - cE1) + abs(2.0 * c00 - cW2 - cE2);
+        float dV = abs(cN1 - cS1) + abs(2.0 * c00 - cN2 - cS2);
+        float gH = 0.5 * (cW1 + cE1) + 0.25 * (2.0 * c00 - cW2 - cE2);
+        float gV = 0.5 * (cN1 + cS1) + 0.25 * (2.0 * c00 - cN2 - cS2);
+        float wH = 1.0 / (dH + 1e-4);
+        float wV = 1.0 / (dV + 1e-4);
+        float G = clamp((wH * gH + wV * gV) / (wH + wV), 0.0, 1.0);
+
+        float dNW = fetchBayer(x - 1, y - 1);
+        float dNE = fetchBayer(x + 1, y - 1);
+        float dSW = fetchBayer(x - 1, y + 1);
+        float dSE = fetchBayer(x + 1, y + 1);
+        float opp = clamp(0.25 * (dNW + dNE + dSW + dSE) + 0.25 * (4.0 * G - cW1 - cE1 - cN1 - cS1), 0.0, 1.0);
+        rgb = (ch == 0u) ? vec3(c00, G, opp) : vec3(opp, G, c00);
+    } else {
+        // At Green pixel: ch == 1 (Gr: R horizontal, B vertical) or ch == 2 (Gb: B horizontal, R vertical)
+        float G = c00;
+        // Gr/Gb crosstalk equilibration
+        float dNW = fetchBayer(x - 1, y - 1);
+        float dNE = fetchBayer(x + 1, y - 1);
+        float dSW = fetchBayer(x - 1, y + 1);
+        float dSE = fetchBayer(x + 1, y + 1);
+        float gOpp = 0.25 * (dNW + dNE + dSW + dSE);
+        G = mix(G, gOpp, 0.15);
+
+        float hVal = clamp(0.5 * (cW1 + cE1) + 0.25 * (2.0 * G - cW2 - cE2), 0.0, 1.0);
+        // Bug B3 Fix: Vertical interpolation uses cN2 and cS2!
+        float vVal = clamp(0.5 * (cN1 + cS1) + 0.25 * (2.0 * G - cN2 - cS2), 0.0, 1.0);
+        rgb = (ch == 1u) ? vec3(hVal, G, vVal) : vec3(vVal, G, hVal);
+    }
+    return rgb;
+}
+
+// Stage 6: Per-Camera Normalized ForwardMatrix -> CIE XYZ (D50) -> Bradford D60 -> Linear ACEScg (AP1)
+// (Fixes Bug B6 using transpose(mat3(...)) on row-major matrices)
+vec3 cameraRgbToACEScg(vec3 wbRgb) {
+    // Verified S24+ ForwardMatrices from Phase 0 hardware probe & DNG headers (normalized to D50 white)
+    mat3 fm;
+    if (u_cam_matrix_idx == 1u) {
+        // Cam 1/3 Front Selfie (ISOCELL S5K3LU)
+        fm = transpose(mat3(
+             0.6951,  0.0156,  0.2535,
+             0.2695,  0.6885,  0.0420,
+             0.0033, -0.3702,  1.1918
+        ));
+    } else if (u_cam_matrix_idx == 2u) {
+        // Cam 2 0.6x Ultrawide (Sony IMX564)
+        fm = transpose(mat3(
+             0.6553,  0.2451,  0.0635,
+             0.2393,  0.9141, -0.1533,
+             0.0391, -0.4316,  1.2188
+        ));
+    } else if (u_cam_matrix_idx == 3u) {
+        // Physical Cam 6 3x Telephoto (ISOCELL S5K3K1)
+        fm = transpose(mat3(
+             0.5967,  0.2734,  0.0938,
+             0.2178,  0.8975, -0.1162,
+             0.0225, -0.3535,  1.1553
+        ));
+    } else {
+        // Cam 0 1x Primary Wide (ISOCELL GN3)
+        fm = transpose(mat3(
+             0.6240,  0.2520,  0.0889,
+             0.2168,  0.8779, -0.0947,
+             0.0117, -0.4023,  1.2148
+        ));
+    }
+
+    // Official SMPTE ST 2065-1 / ACES: CIE XYZ (D50) -> Bradford D60 -> Linear ACEScg (AP1)
+    const mat3 M_XYZ_D50_to_ACEScg = transpose(mat3(
+         1.7048586, -0.3217799, -0.2367812,
+        -0.6723159,  1.6129003,  0.0177516,
+         0.0110566, -0.0082800,  0.9886214
+    ));
+
+    vec3 acescg = M_XYZ_D50_to_ACEScg * (fm * wbRgb);
+    return max(acescg, vec3(0.0));
+}
+
+// Error E1 Fix: ACES 2.0 Reference Gamut Compression (RGC) without NaN
+vec3 applyACESGamutCompression(vec3 rgb) {
+    float ach = max(max(rgb.r, rgb.g), rgb.b);
+    if (ach <= 1e-5) return rgb;
+    vec3 dist = (ach - rgb) / ach;
+    const vec3 t = vec3(0.815, 0.803, 0.880);
+    const vec3 l = vec3(1.147, 1.264, 1.312); // l > 1.0 prevents negative base in pow()
+    const float p = 1.20;
+    vec3 comp;
+    for (int i = 0; i < 3; ++i) {
+        float v = dist[i];
+        if (v < t[i]) {
+            comp[i] = v;
+        } else {
+            float s = (l[i] - t[i]) * pow(pow((1.0 - t[i]) / (l[i] - t[i]), -p) - 1.0, -1.0 / p);
+            float x = (v - t[i]) / s;
+            comp[i] = t[i] + s * (x / pow(1.0 + pow(x, p), 1.0 / p));
+        }
+    }
+    return ach * (1.0 - comp);
+}
+
+// Bug B1 Fix: Exact 5-Parameter Asymmetric Richards H&D Curve
+vec3 evaluateRichardsHD(vec3 logE, vec3 dMax, vec3 gamma, float nuVal, float polarityS) {
+    float n = max(nuVal, 0.1);
+    vec3 D;
+    for (int c = 0; c < 3; ++c) {
+        float span = max(dMax[c], 0.1);
+        float k = (gamma[c] / span) * pow(1.0 + n, (1.0 + n) / n);
+        float arg = clamp(-polarityS * k * logE[c], -35.0, 35.0);
+        D[c] = span / pow(1.0 + n * exp(arg), 1.0 / n);
+    }
+    return D;
+}
+
+// PCG3D hash for Weyl Blue-Noise Gabor Film Grain in Optical Density Space (Bug B5 Fix)
+uvec3 pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+
+vec3 hash3f(uvec3 s) {
+    return vec3(pcg3d(s)) * (1.0 / 4294967295.0);
+}
+
+vec3 applyDensityGrain(vec2 coord, vec3 D, vec3 dMax, float strength) {
+    if (strength <= 0.001) return D;
+    vec3 normD = clamp(D / max(dMax, vec3(0.1)), 0.0, 1.0);
+    vec3 env = 4.0 * normD * (1.0 - normD) + 0.08;
+    vec3 noise = vec3(0.0);
+    float freq = 0.75;
+    float amp = 0.60;
+    for (int oct = 0; oct < 3; ++oct) {
+        uvec3 seed = uvec3(uint(coord.x * freq), uint(coord.y * freq), u_frame_seed + uint(oct * 73));
+        noise += (hash3f(seed) * 2.0 - 1.0) * amp;
+        freq *= 1.95;
+        amp *= 0.60;
+    }
+    return clamp(D + noise * env * (strength * 0.065), vec3(0.0), dMax);
+}
+
+// ACES Filmic ODT Curve
+vec3 acesFilmicODT(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+void main() {
+    ivec2 outCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outSize = imageSize(u_output_image);
+    if (outCoord.x >= outSize.x || outCoord.y >= outSize.y) return;
+
+    // 1. Compute upright 3:4 Portrait Viewport inside the portrait screen swapchain
+    float targetHeight = float(outSize.x) * (4.0 / 3.0);
+    float yMargin = max(0.0, (float(outSize.y) - targetHeight) * 0.5);
+    if (float(outCoord.y) < yMargin || float(outCoord.y) >= float(outSize.y) - yMargin) {
+        imageStore(u_output_image, outCoord, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    float u_norm = (float(outCoord.x) + 0.5) / float(outSize.x);
+    float v_norm = (float(outCoord.y) - yMargin + 0.5) / targetHeight;
+
+    // 2. Stage 7 Lens Archetype Distortion / Swirl on normalized coordinates
+    vec2 centered = (vec2(u_norm, v_norm) - 0.5) * vec2(1.0, 4.0 / 3.0);
+    float r2 = dot(centered, centered);
+    if (u_lens_type == 1u) {
+        // Helios 44-2 58mm f/2 Biotar Vortex Swirl
+        float swirl = 0.025 * r2;
+        u_norm = clamp(u_norm - centered.y * swirl, 0.0, 1.0);
+        v_norm = clamp(v_norm + centered.x * swirl, 0.0, 1.0);
+    }
+
+    // 3. Map upright portrait (u_norm, v_norm) -> physical landscape sensor (rawX, rawY)
+    int rawX, rawY;
+    if (u_sensor_orientation == 270u) {
+        // Front camera (270 deg + horizontal mirror so moving left moves left on screen)
+        rawX = int((1.0 - v_norm) * float(u_width - 1));
+        rawY = int((1.0 - u_norm) * float(u_height - 1));
+    } else {
+        // Back cameras (0.6x, 1x, 3x: 90 deg clockwise rotation)
+        rawX = int(v_norm * float(u_width - 1));
+        rawY = int((1.0 - u_norm) * float(u_height - 1));
+    }
+
+    // 4. Stage 4-6: Demosaic & Transform to Linear ACEScg (AP1, D60)
+    vec3 camRgb = demosaicAt(rawX, rawY);
+
+    // Stage 5 Clipped Highlight Recovery
+    bool gClipped = (camRgb.g >= 0.985);
+    vec3 wbRgb = camRgb * vec3(u_gain_r, u_gain_g, u_gain_b);
+    if (gClipped && (camRgb.r < 0.985 || camRgb.b < 0.985)) {
+        wbRgb.g = max(wbRgb.g, 0.5 * (wbRgb.r + wbRgb.b));
+    }
+
+    vec3 acescg = cameraRgbToACEScg(wbRgb) * u_exposure_scale;
+    acescg = applyACESGamutCompression(acescg);
+
+    // 5. Stage 7 & 8: Vintage Lens Coatings & Bug-B4-Fixed Snell's Law TIR Halation
+    if (u_lens_type == 3u) {
+        // Super-Takumar 50mm f/1.4 Radioactive Thorium Glass Warmth
+        acescg *= vec3(1.05, 1.00, 0.82);
+    }
+    if (u_halation_strength > 0.01 || u_lens_type == 2u || u_lens_type == 4u) {
+        // Sample 8-tap wide ring in sensor space (~18 px radius) for halation / glow / anamorphic streak
+        vec3 ringSum = vec3(0.0);
+        const ivec2 offsets[8] = ivec2[8](
+            ivec2( 18,  0), ivec2(-18,  0), ivec2( 0,  18), ivec2( 0, -18),
+            ivec2( 13, 13), ivec2(-13, 13), ivec2(13, -13), ivec2(-13, -13)
+        );
+        for (int k = 0; k < 8; ++k) {
+            vec3 nbCam = demosaicAt(rawX + offsets[k].x, rawY + offsets[k].y) * vec3(u_gain_r, u_gain_g, u_gain_b);
+            vec3 nbAces = cameraRgbToACEScg(nbCam) * u_exposure_scale;
+            ringSum += max(nbAces - vec3(0.42), vec3(0.0));
+        }
+        ringSum *= 0.125;
+
+        if (u_halation_strength > 0.01) {
+            // Bug B4 Fix: Transposed column-major M_hal coupling Red & Green emulsion scatter
+            const mat3 M_hal = transpose(mat3(
+                0.88, 0.08, 0.00,
+                0.22, 0.35, 0.00,
+                0.00, 0.00, 0.00
+            ));
+            acescg += (M_hal * ringSum) * u_halation_strength;
+        }
+        if (u_lens_type == 2u) {
+            // Leica Summilux 35mm f/1.4 "Steel Rim" Glow
+            acescg += ringSum * 0.28;
+        } else if (u_lens_type == 4u) {
+            // Panavision C-Series 2x Anamorphic Blue Streak Flare (450 nm MgF2)
+            float streak = max(ringSum.r, max(ringSum.g, ringSum.b));
+            acescg += streak * vec3(0.06, 0.25, 0.90);
+        }
+    }
+
+    // 6. Stage 9, 10, 11: Photochemical Film Emulation (Datasheet-Fitted Richards H&D Curves)
+    vec3 linearOut = acescg;
+    if (u_stock_type > 0u) {
+        vec3 dMax = vec3(u_dmax_r, u_dmax_g, u_dmax_b);
+        vec3 gamma = vec3(u_gamma_r, u_gamma_g, u_gamma_b);
+        vec3 pGamma = vec3(u_print_gamma_r, u_print_gamma_g, u_print_gamma_b);
+
+        if (u_stock_type == 2u) {
+            // B&W Silver Halide Emulsion (Kodak Tri-X 400 / Ilford HP5 Plus 400)
+            float bwE = max(dot(acescg, vec3(0.245, 0.612, 0.143)), 1e-5);
+            vec3 logE = vec3(log(bwE / 0.18) * 0.4342944819);
+            vec3 dNeg = evaluateRichardsHD(logE, dMax, gamma, u_nu, 1.0);
+            vec3 dMid = evaluateRichardsHD(vec3(0.0), dMax, gamma, u_nu, 1.0);
+            dNeg = applyDensityGrain(vec2(outCoord), dNeg, dMax, u_grain_strength);
+            vec3 pos = 0.18 * pow(vec3(10.0), pGamma * (dNeg - dMid));
+            linearOut = vec3(pos.g);
+        } else if (u_stock_type == 4u) {
+            // Color Reversal Slide Film (Fujichrome Velvia 100 E-6)
+            vec3 logE = log(max(acescg / 0.18, vec3(1e-5))) * 0.4342944819;
+            vec3 dSlide = evaluateRichardsHD(logE, dMax, gamma * 0.45, u_nu, -1.0);
+            vec3 dMid   = evaluateRichardsHD(vec3(0.0), dMax, gamma * 0.45, u_nu, -1.0);
+            dSlide = applyDensityGrain(vec2(outCoord), dSlide, dMax, u_grain_strength);
+            linearOut = 0.18 * pow(vec3(10.0), -(dSlide - dMid));
+        } else {
+            // Color Negative (C-41 Portra 400 / Ektar 100 / ECN-2 Vision3 500T / CineStill 800T)
+            vec3 logE = log(max(acescg / 0.18, vec3(1e-5))) * 0.4342944819;
+            vec3 dNeg = evaluateRichardsHD(logE, dMax, gamma, u_nu, 1.0);
+            vec3 dMid = evaluateRichardsHD(vec3(0.0), dMax, gamma, u_nu, 1.0);
+            dNeg = applyDensityGrain(vec2(outCoord), dNeg, dMax, u_grain_strength);
+
+            vec3 deltaD = dNeg - dMid;
+            // Apply DIR Coupler Inter-Layer Saturation Matrix
+            float s = u_dir_sat_boost;
+            float off = (1.0 - s) * 0.5;
+            mat3 M_dir = transpose(mat3(
+                s,   off, off,
+                off, s,   off,
+                off, off, s
+            ));
+            deltaD = M_dir * deltaD;
+
+            // Print / Scanner Inversion (Bug B2 Fixed)
+            linearOut = 0.18 * pow(vec3(10.0), pGamma * deltaD);
+
+            if (u_stock_type == 3u) {
+                // Kodak 2383 Cinema Print Stock cyan-blue shadow split-toning
+                float luma = dot(linearOut, vec3(0.2722, 0.6741, 0.0537));
+                float sh = clamp(1.0 - luma * 3.5, 0.0, 1.0);
+                linearOut = linearOut * (1.0 - 0.14 * sh) + sh * vec3(0.003, 0.011, 0.019);
+            }
+        }
+    }
+
+    // Optical cos^4(theta) Vignette
+    float vig = 1.0 / (1.0 + 0.35 * r2);
+    linearOut *= (vig * vig);
+
+    // 7. Stage 12: Linear ACEScg (AP1) -> Display sRGB / P3 ODT (Bug B6 Fixed: transpose(mat3(...)))
+    const mat3 M_AP1_to_sRGB = transpose(mat3(
+         1.7050515, -0.6217921, -0.0832594,
+        -0.1302564,  1.1408048, -0.0105484,
+        -0.0240033, -0.1289690,  1.1529723
+    ));
+    vec3 srgbLin = max(M_AP1_to_sRGB * linearOut, vec3(0.0));
+    vec3 graded = pow(acesFilmicODT(srgbLin * 1.35), vec3(1.0 / 2.2));
+
+    imageStore(u_output_image, outCoord, vec4(graded, 1.0));
+}

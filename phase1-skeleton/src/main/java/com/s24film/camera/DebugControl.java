@@ -1,0 +1,92 @@
+package com.s24film.camera;
+
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.util.Log;
+
+/**
+ * adb test hooks, so captures can be scripted without touching the screen:
+ *   adb shell am broadcast -a com.s24film.camera.DEBUG --es cmd capture
+ *   ... --es cmd lens --es id 0|2|6|1        (1x, 0.6x, 3x, front)
+ *   ... --es cmd look --ei idx 24             (kMasterLooks120 index)
+ *   ... --es cmd format --ei idx 0..3         (35mm, 16mm, Super 8, 6x7)
+ *   ... --es cmd dng --ez on true|false       (keep the RAW DNG)
+ * Only acts while the app is running; the shell (adb) is the only sender that can reach it
+ * besides the app itself because the action is unique to this package.
+ */
+final class DebugControl extends BroadcastReceiver {
+    static final String ACTION = "com.s24film.camera.DEBUG";
+    private static final String TAG = "S24FilmDebug";
+
+    private final CameraEngine engine;
+    private int lookIdx = 24;
+
+    // Named class: the build's d8 step cannot take anonymous "$1" class files.
+    static class LogCallback implements DngSaver.Callback {
+        @Override public void onCaptureSaved(String dngPath, String jpgPath, long dngBytes, long jpgBytes) {
+            Log.i(TAG, "saved " + jpgPath + " (" + jpgBytes + " B) dng " + dngPath);
+        }
+
+        @Override public void onDngError(String message) {
+            Log.e(TAG, "save failed: " + message);
+        }
+    }
+
+    DebugControl(CameraEngine engine) {
+        this.engine = engine;
+    }
+
+    void register(Context context) {
+        context.registerReceiver(this, new IntentFilter(ACTION), Context.RECEIVER_EXPORTED);
+    }
+
+    void unregister(Context context) {
+        try {
+            context.unregisterReceiver(this);
+        } catch (IllegalArgumentException ignored) {
+        }
+    }
+
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        String cmd = intent.getStringExtra("cmd");
+        if (cmd == null) return;
+        Log.i(TAG, "cmd " + cmd);
+        switch (cmd) {
+            case "capture":
+                engine.triggerCapture("look" + lookIdx, new LogCallback());
+                break;
+            case "lens":
+                String id = intent.getStringExtra("id");
+                if (id != null) engine.openCamera(id);
+                break;
+            case "look":
+                lookIdx = intent.getIntExtra("idx", lookIdx);
+                VulkanRenderer.nativeSetMasterLook(lookIdx);
+                break;
+            case "format":
+                VulkanRenderer.nativeSetFilmFormat(intent.getIntExtra("idx", 0));
+                break;
+            case "push":
+                engine.setPushStops(intent.getIntExtra("stops", 0));
+                break;
+            case "autogain":
+                engine.setAutoGain(intent.getBooleanExtra("on", false));
+                break;
+            case "filmiso":
+                engine.setFilmIsoMode(intent.getBooleanExtra("on", true));
+                break;
+            case "status":
+                Log.i(TAG, "EI " + engine.getEffectiveEi() + " push " + engine.getPushStops()
+                    + " under " + engine.getUnderexposureEv() + " EV autoGain " + engine.isAutoGain());
+                break;
+            case "dng":
+                DngSaver.setSaveDng(intent.getBooleanExtra("on", false));
+                break;
+            default:
+                Log.w(TAG, "unknown cmd " + cmd);
+        }
+    }
+}

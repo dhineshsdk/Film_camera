@@ -1,0 +1,75 @@
+#version 450
+
+// Stage 4 Master Offline Demosaicer: Ratio Corrected Demosaicing (RCD) Directional Green + Chroma Pass
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, r32f) uniform readonly image2D u_BayerIn;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D u_DemosaicOut;
+
+layout(push_constant) uniform RcdPC {
+    uint width;
+    uint height;
+    uint cfaPhase;
+} pc;
+
+uint getCfaChannel(ivec2 p, uint cfaPhase) {
+    uint phase = ((uint(p.y) & 1u) << 1u) | (uint(p.x) & 1u);
+    return phase ^ cfaPhase;
+}
+
+float bayer(ivec2 p) {
+    ivec2 c = clamp(p, ivec2(0), ivec2(int(pc.width) - 1, int(pc.height) - 1));
+    c.x = (c.x & ~1) | (p.x & 1);
+    c.y = (c.y & ~1) | (p.y & 1);
+    return max(imageLoad(u_BayerIn, c).r, 1e-5);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+
+    uint ch = getCfaChannel(p, pc.cfaPhase);
+    float c0 = bayer(p);
+
+    // RCD 9-tap directional variance & ratio-corrected Green interpolation
+    float G = c0;
+    if (ch == 0u || ch == 3u) {
+        float gW = bayer(p + ivec2(-1, 0));
+        float gE = bayer(p + ivec2( 1, 0));
+        float gN = bayer(p + ivec2( 0,-1));
+        float gS = bayer(p + ivec2( 0, 1));
+        float cW2 = bayer(p + ivec2(-2, 0));
+        float cE2 = bayer(p + ivec2( 2, 0));
+        float cN2 = bayer(p + ivec2( 0,-2));
+        float cS2 = bayer(p + ivec2( 0, 2));
+
+        float dH = abs(gW - gE) + abs(2.0 * c0 - cW2 - cE2) + 1e-4;
+        float dV = abs(gN - gS) + abs(2.0 * c0 - cN2 - cS2) + 1e-4;
+
+        // Ratio-corrected directional estimates
+        float gH = 0.5 * (gW + gE) * (2.0 * c0 / (c0 + 0.5 * (cW2 + cE2)));
+        float gV = 0.5 * (gN + gS) * (2.0 * c0 / (c0 + 0.5 * (cN2 + cS2)));
+
+        float wH = 1.0 / (dH * dH);
+        float wV = 1.0 / (dV * dV);
+        G = clamp((wH * gH + wV * gV) / (wH + wV), 0.0, 1.0);
+    }
+
+    // Helper lambda via macro to estimate Green at neighbor offset
+    vec3 rgb;
+    if (ch == 0u || ch == 3u) {
+        float dNW = bayer(p + ivec2(-1,-1));
+        float dNE = bayer(p + ivec2( 1,-1));
+        float dSW = bayer(p + ivec2(-1, 1));
+        float dSE = bayer(p + ivec2( 1, 1));
+        float gAvg = 0.25 * (bayer(p + ivec2(-1,0)) + bayer(p + ivec2(1,0)) + bayer(p + ivec2(0,-1)) + bayer(p + ivec2(0,1)));
+        float opp = clamp(G * (0.25 * (dNW + dNE + dSW + dSE) / max(gAvg, 1e-4)), 0.0, 1.0);
+        rgb = (ch == 0u) ? vec3(c0, G, opp) : vec3(opp, G, c0);
+    } else {
+        float hAvg = 0.5 * (bayer(p + ivec2(-1, 0)) + bayer(p + ivec2(1, 0)));
+        float vAvg = 0.5 * (bayer(p + ivec2(0, -1)) + bayer(p + ivec2(0, 1)));
+        rgb = (ch == 1u) ? vec3(hAvg, G, vAvg) : vec3(vAvg, G, hAvg);
+    }
+
+    imageStore(u_DemosaicOut, p, vec4(rgb, 1.0));
+}

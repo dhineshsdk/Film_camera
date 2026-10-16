@@ -1,0 +1,55 @@
+package com.s24film.camera;
+
+import android.content.res.AssetManager;
+import android.hardware.HardwareBuffer;
+import android.view.Surface;
+
+public class VulkanRenderer {
+    static {
+        System.loadLibrary("s24film_vulkan");
+    }
+
+    // assetManager supplies assets/s24_master_120_looks.bin (256 x 120 RGBA32F LUT).
+    public static native boolean nativeInit(Surface surface, AssetManager assetManager);
+    public static native void nativeDestroy();
+    public static native void nativeSetFilmLook(int stockIndex, int lensIndex, boolean burstEnabled);
+    // lookIndex 0..119 selects kMasterLooks120; -1 keeps the legacy GeneratedFilmDatabase stock.
+    public static native void nativeSetMasterLook(int lookIndex);
+    public static native int nativeGetLookCount();
+    public static native String nativeGetLookName(int lookIndex);
+    public static native String nativeGetLookTag(int lookIndex);
+    public static native void nativeSetDarkroomSliders(float evStops, float grainMult, float halationMult);
+    public static native void nativeSetCinemaParams(int anamorphicMode, int cinemaGate, boolean gateWeave, boolean stepPrint8fps);
+    // noiseS / noiseO: SENSOR_NOISE_PROFILE (normalized), pass 0 to use the lab model.
+    public static native void nativeSetCaptureState(int iso, long exposureNs, float focusDiopters,
+                                                    float noiseS, float noiseO, float blackLevel);
+    // Row-major CCT-interpolated ForwardMatrix (camera WB RGB -> XYZ D50); null = built-in table.
+    public static native void nativeSetForwardMatrix(float[] forwardMatrix);
+    // 0 = 35mm, 1 = 16mm, 2 = Super 8, 3 = 6x7 medium format: grain, resolution and halation scale.
+    public static native void nativeSetFilmFormat(int formatIndex);
+    // Box speed (ISO) of a look; 0 for digital profiles / Fujifilm sims / print stocks.
+    public static native int nativeGetLookBoxIso(int lookIndex);
+    public static native int nativeGetActiveLookIndex();
+    // digitalGain = exposure index / sensor ISO; pushStops: +1..+3 push, -1..-2 pull.
+    public static native void nativeSetFilmExposure(float digitalGain, float pushStops);
+    public static native float nativeGetLastRawMean();
+    public static native boolean nativeSetEncoderSurface(Surface encoderSurface);
+    public static native float nativeRenderRaw(
+        HardwareBuffer buffer,
+        int width,
+        int height,
+        int stride,
+        int cfa,
+        float whiteLevel,
+        float gainR,
+        float gainG,
+        float gainB,
+        int sensorOrientation,
+        int camMatrixIdx
+    );
+    public static native byte[] nativeCaptureLastRgba(int[] outDims);
+    // Full-resolution offline master render of the last RAW frame (RGBA8, alpha = 255).
+    public static native byte[] nativeRenderMasterStill(int[] outDims);
+    // Ultra HDR gain plane from the last master render (log2(gain)/log2(3), 8-bit).
+    public static native byte[] nativeGetMasterGainmap(int[] outDims);
+}

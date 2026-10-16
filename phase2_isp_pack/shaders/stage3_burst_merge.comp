@@ -1,0 +1,54 @@
+#version 450
+
+// Stage 3: Multi-Frame GAT Spatiotemporal Burst Merge (seeded by 500 Hz LSM6DSVTR Gyro Homography)
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, r32f) uniform readonly image2D u_RefBayer;
+layout(set = 0, binding = 1, r32f) uniform readonly image2D u_AltBayer;
+layout(set = 0, binding = 2, r32f) uniform image2D u_AccumBayer;
+
+layout(push_constant) uniform BurstPC {
+    uint width;
+    uint height;
+    float noiseA;
+    float noiseB;
+    float robustnessK; // Default 2.5
+    float frameWeight; // 1.0 / (frameIndex + 1)
+    mat3 gyroHomography; // Column-major H mapping Ref -> Alt
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+
+    float refVal = imageLoad(u_RefBayer, p).r;
+    float accumVal = imageLoad(u_AccumBayer, p).r;
+
+    // Project pixel via 500Hz gyro homography and snap to same-parity CFA lattice (2-pixel quantum)
+    vec3 warped = pc.gyroHomography * vec3(float(p.x), float(p.y), 1.0);
+    ivec2 p_alt = ivec2(round(warped.xy / max(warped.z, 1e-5)));
+    p_alt.x = (p_alt.x & ~1) | (p.x & 1);
+    p_alt.y = (p_alt.y & ~1) | (p.y & 1);
+    p_alt = clamp(p_alt, ivec2(0), ivec2(int(pc.width) - 1, int(pc.height) - 1));
+
+    // Compute 3x3 same-parity patch distance for motion-ghost rejection
+    float patchDiff2 = 0.0;
+    for (int dy = -2; dy <= 2; dy += 2) {
+        for (int dx = -2; dx <= 2; dx += 2) {
+            ivec2 q_ref = clamp(p + ivec2(dx, dy), ivec2(0), ivec2(int(pc.width) - 1, int(pc.height) - 1));
+            ivec2 q_alt = clamp(p_alt + ivec2(dx, dy), ivec2(0), ivec2(int(pc.width) - 1, int(pc.height) - 1));
+            float d = imageLoad(u_RefBayer, q_ref).r - imageLoad(u_AltBayer, q_alt).r;
+            patchDiff2 += d * d;
+        }
+    }
+    patchDiff2 /= 9.0;
+
+    float localVar = max(pc.noiseA * refVal + pc.noiseB, 1e-6);
+    float w_temporal = exp(-patchDiff2 / (pc.robustnessK * localVar));
+
+    float altVal = imageLoad(u_AltBayer, p_alt).r;
+    float blendedAlt = mix(refVal, altVal, w_temporal);
+    float updatedAccum = mix(accumVal, blendedAlt, pc.frameWeight);
+
+    imageStore(u_AccumBayer, p, vec4(updatedAccum, 0.0, 0.0, 1.0));
+}
