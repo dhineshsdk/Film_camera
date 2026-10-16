@@ -78,9 +78,17 @@ final class DebugControl extends BroadcastReceiver {
             case "filmiso":
                 engine.setFilmIsoMode(intent.getBooleanExtra("on", true));
                 break;
+            case "shutter":
+                engine.setManualShutterNs(intent.getLongExtra("ns", 0L));
+                break;
+            case "aperture":
+                engine.setVirtualAperture(intent.getFloatExtra("f", 2.0f));
+                break;
             case "status":
-                Log.i(TAG, "EI " + engine.getEffectiveEi() + " push " + engine.getPushStops()
-                    + " under " + engine.getUnderexposureEv() + " EV autoGain " + engine.isAutoGain());
+                Log.i(TAG, "look " + VulkanRenderer.nativeGetActiveLookIndex() + " EI " + engine.getEffectiveEi() + " push " + engine.getPushStops()
+                    + " under " + engine.getUnderexposureEv() + " EV autoGain " + engine.isAutoGain()
+                    + " shutter " + (engine.getCurrentShutterNs() / 1000) + " us meter " + engine.getMeterEv()
+                    + " f/" + engine.getVirtualAperture());
                 break;
             case "dng":
                 DngSaver.setSaveDng(intent.getBooleanExtra("on", false));

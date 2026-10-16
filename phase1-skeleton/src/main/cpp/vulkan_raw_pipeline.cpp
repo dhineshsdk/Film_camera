@@ -2255,6 +2255,11 @@ Java_com_s24film_camera_VulkanRenderer_nativeGetActiveLookIndex(JNIEnv* /*env*/,
 }
 
 JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetVirtualAperture(JNIEnv* /*env*/, jobject /*thiz*/, jfloat fNumber) {
+    if (gPipeline) gPipeline->setVirtualAperture(fNumber);
+}
+
+JNIEXPORT void JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeSetFilmExposure(JNIEnv* /*env*/, jobject /*thiz*/,
                                                              jfloat digitalGain, jfloat pushStops) {
     if (gPipeline) gPipeline->setFilmExposure(digitalGain, pushStops);

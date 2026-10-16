@@ -339,6 +339,7 @@ public class CameraEngine {
         if (expRange != null) {
             minShutterNs = Math.max(minShutterNs, expRange.getLower());
             maxShutterNs = Math.min(maxShutterNs, expRange.getUpper());
+            deviceMaxShutterNs = expRange.getUpper();
         }
 
         int sweet = model[2];
@@ -439,6 +440,33 @@ public class CameraEngine {
     private int cachedLook = -2;
     private int cachedBoxIso = 0;
 
+    private volatile long manualShutterNs = 0;          // 0 = A (film-ISO auto)
+    private volatile long deviceMaxShutterNs = MAX_SHUTTER_NS;
+    private volatile float meterEv = 0.0f;
+    private volatile float virtualFNumber = 2.0f;
+
+    /**
+     * Shutter dial. ns > 0 sets a manual speed (clamped to the sensor's range; preview frame
+     * rate drops with long speeds); 0 returns to A (Auto moves the shutter at the film's ISO).
+     */
+    public void setManualShutterNs(long ns) { manualShutterNs = Math.max(0L, ns); }
+    public long getManualShutterNs() { return manualShutterNs; }
+    /** Shutter speed actually in use, ns. */
+    public long getCurrentShutterNs() { return currentExposureNs; }
+    /** Longest speed the sensor accepts (for the dial's slow end / B). */
+    public long getDeviceMaxShutterNs() { return deviceMaxShutterNs; }
+    /** Light meter: + means over, - under, in stops, at the current shutter vs what the scene needs. */
+    public float getMeterEv() { return meterEv; }
+    /**
+     * Aperture ring (virtual: the phone lenses are fixed-aperture). Drives depth of field and
+     * lens character (vignette, glow, flare shape) in the renderer, never exposure.
+     */
+    public void setVirtualAperture(float fNumber) {
+        virtualFNumber = Math.max(0.95f, Math.min(22.0f, fNumber));
+        VulkanRenderer.nativeSetVirtualAperture(virtualFNumber);
+    }
+    public float getVirtualAperture() { return virtualFNumber; }
+
     public void setFilmIsoMode(boolean enabled) { filmIsoMode = enabled; }
     public boolean isFilmIsoMode() { return filmIsoMode; }
     public void setPushStops(int stops) { pushStops = Math.max(-2, Math.min(3, stops)); }
@@ -489,6 +517,12 @@ public class CameraEngine {
         }
         int sensorIso = nearestCleanIso(ei);
         long t = (long) (Math.max(minShutterNs * 1e-9, Math.min(tMax, tWanted)) * 1e9);
+        long manual = manualShutterNs;
+        if (manual > 0) {
+            t = Math.max(minShutterNs, Math.min(deviceMaxShutterNs, manual));
+            under = 0.0;
+        }
+        meterEv = (float) (Math.log((t * 1e-9) / tWanted) / Math.log(2.0));
         currentIso = sensorIso;
         currentExposureNs = t;
         filmDigitalGain = (float) (ei / sensorIso);
@@ -511,23 +545,27 @@ public class CameraEngine {
             // Coming from a digital look: keep the exposure it had settled on.
             filmIsoSeconds = currentIso * (currentExposureNs * 1e-9);
         } else {
-            String key = boxIso + "/" + pushStops + "/" + autoGain;
+            String key = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs;
             framesSinceAeApply++;
             if (key.equals(filmKey) && (framesSinceAeApply < AE_APPLY_INTERVAL_FRAMES || mean <= 1e-5f)) return;
             if (key.equals(filmKey)) {
                 // Rendered brightness is raw x digital gain; steer it to the metered target.
                 float evErr = (float) (Math.log(aeTargetRawMean / (mean * filmDigitalGain)) / Math.log(2.0));
-                if (Math.abs(evErr) <= AE_DEADBAND_EV) return;
-                float step = Math.max(-AE_MAX_STEP_EV, Math.min(AE_MAX_STEP_EV, AE_GAIN * evErr));
+                // What the scene needs, measured from this frame (not integrated, so a shutter
+                // pinned at its slowest speed doesn't wind the estimate up), then damped.
                 double effIso = currentIso * (double) filmDigitalGain;
-                filmIsoSeconds = effIso * (currentExposureNs * 1e-9) * Math.pow(2.0, step);
+                double need = effIso * (currentExposureNs * 1e-9) * Math.pow(2.0, evErr);
+                double step = Math.log(need / filmIsoSeconds) / Math.log(2.0);
+                if (Math.abs(step) <= AE_DEADBAND_EV) return;
+                step = Math.max(-AE_MAX_STEP_EV, Math.min(AE_MAX_STEP_EV, AE_GAIN * step));
+                filmIsoSeconds *= Math.pow(2.0, step);
             }
         }
         // Never let the requested exposure run away while the shutter is pinned.
         double ei = boxIso * Math.pow(2.0, pushStops);
         filmIsoSeconds = Math.max(ei * minShutterNs * 1e-9 * 0.25,
             Math.min(ei * FILM_MAX_AUTO_SHUTTER_NS * 1e-9 * 256.0, filmIsoSeconds));
-        filmKey = boxIso + "/" + pushStops + "/" + autoGain;
+        filmKey = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs;
         int prevIso = currentIso;
         long prevExp = currentExposureNs;
         computeFilmExposure(boxIso, filmIsoSeconds);

@@ -32,6 +32,8 @@ public class VulkanRenderer {
     public static native int nativeGetActiveLookIndex();
     // digitalGain = exposure index / sensor ISO; pushStops: +1..+3 push, -1..-2 pull.
     public static native void nativeSetFilmExposure(float digitalGain, float pushStops);
+    // Aperture ring f-number (virtual): depth of field and lens character, not exposure.
+    public static native void nativeSetVirtualAperture(float fNumber);
     public static native float nativeGetLastRawMean();
     public static native boolean nativeSetEncoderSurface(Surface encoderSurface);
     public static native float nativeRenderRaw(

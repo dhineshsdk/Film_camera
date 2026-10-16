@@ -167,6 +167,7 @@ public:
         mPushStops.store(std::clamp(pushStops, -2.0f, 3.0f));
     }
     int activeLookIndex() const { return mActiveLookIdx.load(); }
+    void setVirtualAperture(float fNumber) { mVirtualFNumber.store(std::clamp(fNumber, 0.95f, 22.0f)); }
     float lastRawMean() const { return mLastRawMean.load(); }
     bool setEncoderWindow(ANativeWindow* encoderWindow);
     float renderRawFrame(AHardwareBuffer* ahb, int width, int height, int stride,
@@ -323,6 +324,7 @@ private:
     std::atomic<float> mFilmDigitalGain{1.0f};
     std::atomic<float> mPushStops{0.0f};
     std::atomic<float> mExposureSeconds{0.01f};
+    std::atomic<float> mVirtualFNumber{2.0f};   // aperture ring: lens character / depth of field only
 
     // Per-frame capture metadata from CaptureResult (Java)
     std::atomic<int> mIso{100};
