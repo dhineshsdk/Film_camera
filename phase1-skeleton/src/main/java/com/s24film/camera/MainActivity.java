@@ -128,7 +128,7 @@ public class MainActivity extends Activity implements
     private static final String[] TEST_CAM_TAGS = {"UW", "Wide", "Tele", "Front"};
     private static final int[] TEST_STOCKS = {0, 1, 2, 3, 4, 6, 9};
     private FilmFx fx;
-    private int uiTheme = 1;          // 0 = modern, 1 = black SLR, 2 = silver rangefinder
+    private int uiTheme = 0;          // 0 = modern, 1 = black SLR, 2 = silver rangefinder
     private boolean cocked = true;    // shutter cocked by the wind lever
     private boolean motorDrive = false;
     private final Button[] themeButtons = new Button[3];
@@ -287,7 +287,7 @@ public class MainActivity extends Activity implements
         }
         fx = new FilmFx(this);
         filmUi = new FilmUi(this, filmRoot, new FilmCallbacks(this), fx);
-        uiTheme = getSharedPreferences("ui", 0).getInt("theme", 1);
+        uiTheme = getSharedPreferences("ui", 0).getInt("theme", 0);
         setMode(false);
         applyTheme(uiTheme);
         loadLatestThumbnail();
