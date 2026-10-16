@@ -210,8 +210,17 @@ public class DngSaver {
         @Override
         public void run() {
             String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date());
-            File outDng = new File(STORAGE_DIR, "IMG_" + timeStamp + ".dng");
-            File outJpg = new File(STORAGE_DIR, "IMG_" + timeStamp + "_" + stockShortName + ".jpg");
+            // "Folder/name" puts the frame in a sub-folder of DCIM/S24Film (compare sets).
+            File dir = STORAGE_DIR;
+            String name = stockShortName;
+            int slash = (name != null) ? name.lastIndexOf('/') : -1;
+            if (slash > 0) {
+                dir = new File(STORAGE_DIR, name.substring(0, slash));
+                name = name.substring(slash + 1);
+                if (!dir.exists()) dir.mkdirs();
+            }
+            File outDng = new File(dir, "IMG_" + timeStamp + ".dng");
+            File outJpg = new File(dir, "IMG_" + timeStamp + "_" + name + ".jpg");
 
             long dngBytes = 0;
             long jpgBytes = 0;

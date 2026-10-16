@@ -55,6 +55,27 @@ static constexpr float kHdrSdrRatio = 3.0f;
 // UI: 0 Clean, 1 Helios 44-2, 2 Summilux, 3 Takumar, 4 Panavision 2x, 5 Super 70mm IMAX
 static constexpr int kUiLensToArchetype[6] = {-1, 0, 1, 4, 7, -1};
 
+// Lens character per UI lens (0 Clean, 1 Helios 44-2, 2 Summilux 35 v1, 3 Super-Takumar 50/1.4,
+// 4 Panavision C anamorphic, 5 Super 70). Strengths are for wide open; the aperture ring scales them.
+struct LensFx {
+    float maxAperture;
+    float ghosts, halo, streak, streakLen;
+    float streakTint[3];
+    float veil, ca, distortionK1, swirl, starburst;
+    float blades, squeeze;
+    float coating[3];
+};
+static constexpr LensFx kLensFx[6] = {
+    // fmax  ghost halo streak len   streak tint          veil    CA      k1      swirl star  blades sq   coating
+    {1.8f, 0.10f, 0.02f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.002f, 0.0f,   0.0f,   0.0f, 0.6f, 9.0f, 1.0f, {0.6f, 1.0f, 0.7f}},   // Clean
+    {2.0f, 0.55f, 0.15f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.014f, 0.0012f, 0.0f,   0.9f, 0.8f, 8.0f, 1.0f, {1.0f, 0.55f, 0.9f}},  // Helios 44-2
+    {1.4f, 0.25f, 0.30f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.010f, 0.0008f, -0.02f, 0.2f, 0.7f, 10.0f, 1.0f, {1.0f, 0.85f, 0.5f}}, // Summilux 35 v1
+    {1.4f, 0.35f, 0.08f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.008f, 0.0006f, 0.0f,   0.25f, 0.8f, 8.0f, 1.0f, {0.55f, 1.0f, 0.6f}}, // Super-Takumar
+    {2.8f, 0.30f, 0.05f, 0.9f, 0.45f, {0.25f, 0.55f, 1.0f}, 0.010f, 0.0015f, -0.05f, 0.0f, 0.5f, 8.0f, 2.0f, {0.4f, 0.6f, 1.0f}}, // Panavision C 2x
+    {2.0f, 0.10f, 0.03f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.003f, 0.0003f, 0.0f,   0.0f, 0.6f, 9.0f, 1.0f, {0.6f, 0.9f, 1.0f}},  // Super 70
+};
+static constexpr float kFlareThreshold = 1.6f;   // scene-linear (about 3 stops over mid grey)
+
 static uint16_t floatToHalf(float f) {
     uint32_t x;
     std::memcpy(&x, &f, 4);
@@ -1524,13 +1545,40 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     const int arch = kUiLensToArchetype[std::clamp(uiLens, 0, kSuper70LensIndex)];
     if (arch >= 0) {
         const auto& L = s24film::kLegendaryLenses8[arch];
-        u.lens[0] = L.swirlPetzval;
+        u.lens[0] = 0.0f;   // geometric twist removed; swirl is the tangential blur in lfx2.z
         u.lens[1] = L.thoriumWarmth;
         u.lens[2] = L.sphericalGlowW040;
         u.lens[3] = L.vignetteCos4;
         u.optics[2] = L.sphericalGlowW040 * 1.2f;
     }
     u.optics[3] = 0.6f;
+
+    if (mLensFxEnabled.load()) {
+        const LensFx& fx = kLensFx[std::clamp(uiLens, 0, 5)];
+        const float fNum = std::max(mVirtualFNumber.load(), fx.maxAperture);
+        const float open = fx.maxAperture / fNum;           // 1 wide open, smaller stopped down
+        const float open2 = open * open;
+        u.lfx0[0] = fx.ghosts;                               // ghosts stay (they sharpen, not fade)
+        u.lfx0[1] = fx.halo * open;
+        u.lfx0[2] = fx.streak;
+        u.lfx0[3] = fx.streakLen;
+        for (int c = 0; c < 3; ++c) {
+            u.lfx1[c] = fx.streakTint[c];
+            u.lfx4[c] = fx.coating[c];
+        }
+        u.lfx1[3] = fx.veil;
+        u.lfx2[0] = fx.ca * (0.6f + 0.4f * open);
+        u.lfx2[1] = fx.distortionK1;
+        u.lfx2[2] = fx.swirl * open2;
+        u.lfx2[3] = fx.starburst;
+        u.lfx3[0] = fx.blades;
+        u.lfx3[1] = fNum;
+        u.lfx3[2] = fx.squeeze;
+        u.lfx4[3] = kFlareThreshold;
+        // Glow (spherical aberration) and vignette fall quickly when stopping down.
+        u.optics[2] *= open2;
+        u.lens[3] *= open2;
+    }
 
     // Halation: TIR ring radius in output pixels -> Gaussian weights over mips 1..5 (log2 space).
     const float outLong = static_cast<float>(std::max(t.extent.width, t.extent.height));
@@ -2252,6 +2300,11 @@ Java_com_s24film_camera_VulkanRenderer_nativeGetLookBoxIso(JNIEnv* /*env*/, jobj
 JNIEXPORT jint JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeGetActiveLookIndex(JNIEnv* /*env*/, jobject /*thiz*/) {
     return gPipeline ? static_cast<jint>(gPipeline->activeLookIndex()) : -1;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetLensFxEnabled(JNIEnv* /*env*/, jobject /*thiz*/, jboolean on) {
+    if (gPipeline) gPipeline->setLensFxEnabled(on == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL

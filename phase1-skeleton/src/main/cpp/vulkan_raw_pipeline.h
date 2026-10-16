@@ -76,8 +76,13 @@ struct FrameParamsUbo {
     float fm0[4];   // CCT-interpolated ForwardMatrix rows (camera WB RGB -> XYZ D50), fm0[3] = valid
     float fm1[4];
     float fm2[4];
+    float lfx0[4];  // lens character, see demosaic.comp f_lfx0..4
+    float lfx1[4];
+    float lfx2[4];
+    float lfx3[4];
+    float lfx4[4];
 };
-static_assert(sizeof(FrameParamsUbo) == 272, "FrameParamsUbo layout mismatch");
+static_assert(sizeof(FrameParamsUbo) == 352, "FrameParamsUbo layout mismatch");
 
 // std430 mirror of LookGpu in demosaic.comp (binding 5).
 struct LookGpu {
@@ -167,6 +172,7 @@ public:
         mPushStops.store(std::clamp(pushStops, -2.0f, 3.0f));
     }
     int activeLookIndex() const { return mActiveLookIdx.load(); }
+    void setLensFxEnabled(bool on) { mLensFxEnabled.store(on); }
     void setVirtualAperture(float fNumber) { mVirtualFNumber.store(std::clamp(fNumber, 0.95f, 22.0f)); }
     float lastRawMean() const { return mLastRawMean.load(); }
     bool setEncoderWindow(ANativeWindow* encoderWindow);
@@ -324,7 +330,8 @@ private:
     std::atomic<float> mFilmDigitalGain{1.0f};
     std::atomic<float> mPushStops{0.0f};
     std::atomic<float> mExposureSeconds{0.01f};
-    std::atomic<float> mVirtualFNumber{2.0f};   // aperture ring: lens character / depth of field only
+    std::atomic<float> mVirtualFNumber{2.0f};
+    std::atomic<bool> mLensFxEnabled{false};    // flare/ghost/streak/CA/distortion/swirl (testing)   // aperture ring: lens character / depth of field only
 
     // Per-frame capture metadata from CaptureResult (Java)
     std::atomic<int> mIso{100};

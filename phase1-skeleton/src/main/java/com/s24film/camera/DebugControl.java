@@ -78,6 +78,12 @@ final class DebugControl extends BroadcastReceiver {
             case "filmiso":
                 engine.setFilmIsoMode(intent.getBooleanExtra("on", true));
                 break;
+            case "optic":   // UI lens character 0..5 (Clean, Helios, Summilux, Takumar, Panavision, Super 70)
+                VulkanRenderer.nativeSetFilmLook(1, intent.getIntExtra("idx", 0), true);
+                break;
+            case "lensfx":
+                VulkanRenderer.nativeSetLensFxEnabled(intent.getBooleanExtra("on", false));
+                break;
             case "shutter":
                 engine.setManualShutterNs(intent.getLongExtra("ns", 0L));
                 break;

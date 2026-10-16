@@ -34,6 +34,8 @@ public class VulkanRenderer {
     public static native void nativeSetFilmExposure(float digitalGain, float pushStops);
     // Aperture ring f-number (virtual): depth of field and lens character, not exposure.
     public static native void nativeSetVirtualAperture(float fNumber);
+    // Lens character (ghosts, halo, anamorphic streak, starburst, veil, CA, distortion, swirl). Off by default.
+    public static native void nativeSetLensFxEnabled(boolean enabled);
     public static native float nativeGetLastRawMean();
     public static native boolean nativeSetEncoderSurface(Surface encoderSurface);
     public static native float nativeRenderRaw(
