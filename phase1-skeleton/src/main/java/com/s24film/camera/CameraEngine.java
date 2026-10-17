@@ -180,10 +180,6 @@ public class CameraEngine {
         return manualRotationOffset;
     }
 
-    public int getManualRotationOffset() {
-        return manualRotationOffset;
-    }
-
     public void resetManualRotationOffset() {
         manualRotationOffset = 0;
     }
