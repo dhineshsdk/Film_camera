@@ -116,7 +116,7 @@ final class StockBrowser {
         ListView list = new ListView(ctx);
         list.setDividerHeight(0);
         list.setSelector(android.R.color.transparent);
-        adapter = new Adapter(dlg);
+        adapter = new Adapter(this, dlg);
         list.setAdapter(adapter);
         root.addView(list, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -197,16 +197,23 @@ final class StockBrowser {
         return true;
     }
 
-    private final class Adapter extends BaseAdapter {
+    // Static with an explicit owner: d8 8.2 crashes on the constructor metadata javac 21 writes
+    // for inner (non-static) classes.
+    static final class Adapter extends BaseAdapter {
+        private final StockBrowser sb;
         private final Dialog dlg;
-        Adapter(Dialog dlg) { this.dlg = dlg; }
+        Adapter(StockBrowser sb, Dialog dlg) { this.sb = sb; this.dlg = dlg; }
 
-        @Override public int getCount() { return shown.size(); }
-        @Override public Object getItem(int i) { return shown.get(i); }
-        @Override public long getItemId(int i) { return shown.get(i).index; }
+        @Override public int getCount() { return sb.shown.size(); }
+        @Override public Object getItem(int i) { return sb.shown.get(i); }
+        @Override public long getItemId(int i) { return sb.shown.get(i).index; }
 
         @Override
-        public View getView(int pos, View convert, ViewGroup parent) {
+        public View getView(int pos, View convert, ViewGroup parent) { return sb.rowView(pos, dlg); }
+    }
+
+    View rowView(int pos, Dialog dlg) {
+        {
             final LookCatalog.Look l = shown.get(pos);
             LinearLayout row = new LinearLayout(ctx);
             row.setGravity(Gravity.CENTER_VERTICAL);

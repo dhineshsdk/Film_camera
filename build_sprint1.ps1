@@ -73,12 +73,16 @@ Write-Host "Linking APK with aapt2..." -ForegroundColor Yellow
 Write-Host "Compiling Java with javac..." -ForegroundColor Yellow
 $javaSources = Get-ChildItem -Path "phase1-skeleton\src\main\java" -Filter "*.java" -Recurse | ForEach-Object { $_.FullName }
 $rJava = Get-ChildItem -Path "$buildDir\gen" -Filter "R.java" -Recurse | ForEach-Object { $_.FullName }
-& "$javaBin\javac.exe" -source 17 -target 17 -cp "$platform\android.jar" -d "$buildDir\classes" ($javaSources + $rJava)
+& "$javaBin\javac.exe" -XDstringConcat=inline -source 17 -target 17 -cp "$platform\android.jar" -d "$buildDir\classes" ($javaSources + $rJava)
 
 # 7. DEX with d8
 Write-Host "Creating classes.dex with d8..." -ForegroundColor Yellow
-$classFiles = (Get-ChildItem -Path "$buildDir\classes" -Filter "*.class" -Recurse).FullName
-& cmd /c """$buildTools\d8.bat"" --min-api 34 --lib ""$platform\android.jar"" --output ""$buildDir"" $classFiles"
+# Classes go to d8 as one jar: listing every .class file overran cmd.exe's 8191-character
+# command line once the app grew, and d8 then silently wrote no classes.dex.
+Remove-Item "$buildDir\classes.dex", "$buildDir\classes.jar" -ErrorAction SilentlyContinue
+& "$javaBin\jar.exe" cf "$buildDir\classes.jar" -C "$buildDir\classes" .
+& cmd /c """$buildTools\d8.bat"" --min-api 34 --lib ""$platform\android.jar"" --output ""$buildDir"" ""$buildDir\classes.jar"""
+if (-not (Test-Path "$buildDir\classes.dex")) { throw "d8 produced no classes.dex" }
 
 # 8. Package classes.dex and lib into unaligned APK
 Write-Host "Adding classes.dex and arm64-v8a native libraries to APK..." -ForegroundColor Yellow
