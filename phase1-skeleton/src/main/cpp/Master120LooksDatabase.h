@@ -34,7 +34,8 @@ struct LookProfile120 {
 inline constexpr uint32_t kTotalMasterLooks = 120;
 
 // ISO box speed of each look (exposure index the film is rated at). 0 = digital profile,
-// print stock or Fujifilm simulation: those keep the camera's own auto ISO.
+// print stock or Fujifilm simulation: those keep the camera's own auto ISO. Exception: 110
+// (Classic Neg) is offered as the Superia film stock, so it is rated at Superia X-TRA's 400.
 inline constexpr int kMasterLookBoxIso[kTotalMasterLooks] = {
      200,  400,  100,  200,  400,  160,  100,  100,  200,  400,  // 0-9
      800, 1600,  160,  160, 1600,  100,  200,  400,  400,  100,  // 10-19
@@ -47,7 +48,7 @@ inline constexpr int kMasterLookBoxIso[kTotalMasterLooks] = {
      400,  250,  125,  100,  400, 3200,  320,  400,   50,    0,  // 80-89
        0,    0,    0,    0,    0,    0,    0,    0,    0,    0,  // 90-99
        0,    0,    0,    0,    0,    0,    0,    0,    0,    0,  // 100-109
-       0,    0,    0,    0,    0,    0,    0,    0,    0,    0,  // 110-119
+     400,    0,    0,    0,    0,    0,    0,    0,    0,    0,  // 110-119
 };
 
 inline constexpr LookProfile120 kMasterLooks120[] = {

@@ -646,6 +646,7 @@ public class MainActivity extends Activity implements
     private void setMode(boolean video) {
         if (videoRecorder != null && videoRecorder.isRecording()) return;
         videoMode = video;
+        if (cameraEngine != null) cameraEngine.setVideoMode(video);
         modePhoto.setSelected(!video);
         modeVideo.setSelected(video);
         btnShutter.setVisibility(video ? View.GONE : View.VISIBLE);

@@ -38,6 +38,9 @@ public class DngSaver {
 
     // Keep the RAW DNG next to the developed JPEG. Off by default (about 20-25 MB per frame).
     private static volatile boolean saveDng = false;
+    // Exposure index the film look was rated at (0 = digital look: the sensor ISO is written).
+    private static volatile int exposureIndex = 0;
+    public static void setExposureIndex(int ei) { exposureIndex = Math.max(0, ei); }
 
     public static void setSaveDng(boolean enabled) {
         saveDng = enabled;
@@ -277,11 +280,16 @@ public class DngSaver {
                     try (FileOutputStream jfos = new FileOutputStream(outJpg)) {
                         bmp.compress(Bitmap.CompressFormat.JPEG, 98, jfos);
                         jfos.flush();
-                        jpgBytes = outJpg.length();
-                        Log.i(TAG, "Saved Master Film JPEG: " + outJpg.getAbsolutePath() + " (" + (jpgBytes / 1024) + " KB)");
                     } finally {
                         bmp.recycle();
                     }
+                    try {
+                        writeExif(outJpg, captureResult, timeStamp);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "EXIF write failed: " + t.getMessage());
+                    }
+                    jpgBytes = outJpg.length();
+                    Log.i(TAG, "Saved Master Film JPEG: " + outJpg.getAbsolutePath() + " (" + (jpgBytes / 1024) + " KB)");
                 }
 
                 // 3. Index immediately into Samsung Gallery / Android MediaStore
@@ -319,5 +327,112 @@ public class DngSaver {
                 } catch (Throwable ignored) {}
             }
         }
+    }
+
+    // Inserts a minimal EXIF block (camera, shutter, aperture, ISO / film EI, focal length, time)
+    // after SOI/APP0. Bitmap.compress writes none. Inserting ahead of the Ultra HDR MPF segment
+    // keeps the gain map valid: MPF offsets are relative to the MPF header, which moves with it.
+    static void writeExif(File jpg, CaptureResult r, String timeStamp) throws java.io.IOException {
+        byte[] src = java.nio.file.Files.readAllBytes(jpg.toPath());
+        if (src.length < 4 || (src[0] & 0xFF) != 0xFF || (src[1] & 0xFF) != 0xD8) return;
+        int insertAt = 2;
+        if ((src[2] & 0xFF) == 0xFF && (src[3] & 0xFF) == 0xE0) {
+            insertAt = 4 + (((src[4] & 0xFF) << 8) | (src[5] & 0xFF));
+        }
+        Long expNs = (r != null) ? r.get(CaptureResult.SENSOR_EXPOSURE_TIME) : null;
+        Integer sens = (r != null) ? r.get(CaptureResult.SENSOR_SENSITIVITY) : null;
+        Float fNum = (r != null) ? r.get(CaptureResult.LENS_APERTURE) : null;
+        Float focal = (r != null) ? r.get(CaptureResult.LENS_FOCAL_LENGTH) : null;
+        int ei = exposureIndex;
+        int iso = (ei > 0) ? ei : (sens != null ? sens : 0);
+        String date = timeStamp.length() >= 15
+            ? timeStamp.substring(0, 4) + ":" + timeStamp.substring(4, 6) + ":" + timeStamp.substring(6, 8) + " "
+              + timeStamp.substring(9, 11) + ":" + timeStamp.substring(11, 13) + ":" + timeStamp.substring(13, 15)
+            : "";
+        ExifBuilder ifd0 = new ExifBuilder();
+        ifd0.ascii(0x010F, "samsung");
+        ifd0.ascii(0x0110, Build.MODEL);
+        ifd0.ascii(0x0131, "S24Film");
+        ExifBuilder exif = new ExifBuilder();
+        if (expNs != null && expNs > 0) {
+            if (expNs < 1_000_000_000L) exif.rational(0x829A, 1, (int) Math.max(1L, Math.round(1e9 / expNs)));
+            else exif.rational(0x829A, (int) (expNs / 1_000_000L), 1000);
+        }
+        if (fNum != null && fNum > 0) exif.rational(0x829D, Math.round(fNum * 100), 100);
+        if (iso > 0) exif.shortVal(0x8827, Math.min(iso, 65535));
+        if (!date.isEmpty()) exif.ascii(0x9003, date);
+        if (focal != null && focal > 0) exif.rational(0x920A, Math.round(focal * 100), 100);
+        byte[] tiff = ExifBuilder.tiff(ifd0, exif);
+        int segLen = 2 + 6 + tiff.length;
+        if (segLen > 0xFFFF) return;
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(src.length + segLen + 2);
+        out.write(src, 0, insertAt);
+        out.write(0xFF); out.write(0xE1);
+        out.write((segLen >> 8) & 0xFF); out.write(segLen & 0xFF);
+        out.write(new byte[] {'E', 'x', 'i', 'f', 0, 0});
+        out.write(tiff);
+        out.write(src, insertAt, src.length - insertAt);
+        try (FileOutputStream fos = new FileOutputStream(jpg)) {
+            out.writeTo(fos);
+        }
+    }
+
+    // Big-endian TIFF IFD writer for the few EXIF tags above.
+    static final class ExifBuilder {
+        private final ArrayList<int[]> entries = new ArrayList<>();   // tag, type, count, valueIndex
+        private final ArrayList<byte[]> values = new ArrayList<>();
+
+        void ascii(int tag, String v) {
+            byte[] b = (v + " ").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+            add(tag, 2, b.length, b);
+        }
+        void shortVal(int tag, int v) { add(tag, 3, 1, new byte[] {(byte) (v >> 8), (byte) v, 0, 0}); }
+        void rational(int tag, int num, int den) {
+            add(tag, 5, 1, new byte[] {(byte) (num >> 24), (byte) (num >> 16), (byte) (num >> 8), (byte) num,
+                (byte) (den >> 24), (byte) (den >> 16), (byte) (den >> 8), (byte) den});
+        }
+        private void add(int tag, int type, int count, byte[] data) {
+            entries.add(new int[] {tag, type, count, values.size()});
+            values.add(data);
+        }
+        int size(boolean withPointer) {
+            int n = entries.size() + (withPointer ? 1 : 0);
+            int sz = 2 + n * 12 + 4;
+            for (byte[] v : values) if (v.length > 4) sz += (v.length + 1) & ~1;
+            return sz;
+        }
+        // Writes this IFD at offset 'at' (from the TIFF header); pointerTag adds a LONG entry.
+        void write(java.io.ByteArrayOutputStream o, int at, int pointerTag, int pointerValue) {
+            int n = entries.size() + (pointerTag != 0 ? 1 : 0);
+            int data = at + 2 + n * 12 + 4;
+            java.io.ByteArrayOutputStream extra = new java.io.ByteArrayOutputStream();
+            u16(o, n);
+            for (int[] e : entries) {
+                byte[] v = values.get(e[3]);
+                u16(o, e[0]); u16(o, e[1]); u32(o, e[2]);
+                if (v.length <= 4) {
+                    o.write(v, 0, v.length);
+                    for (int i = v.length; i < 4; i++) o.write(0);
+                } else {
+                    u32(o, data + extra.size());
+                    extra.write(v, 0, v.length);
+                    if ((v.length & 1) != 0) extra.write(0);
+                }
+            }
+            if (pointerTag != 0) { u16(o, pointerTag); u16(o, 4); u32(o, 1); u32(o, pointerValue); }
+            u32(o, 0);
+            byte[] x = extra.toByteArray();
+            o.write(x, 0, x.length);
+        }
+        static byte[] tiff(ExifBuilder ifd0, ExifBuilder exif) {
+            java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+            o.write('M'); o.write('M'); u16(o, 42); u32(o, 8);
+            int exifAt = 8 + ifd0.size(true);
+            ifd0.write(o, 8, 0x8769, exifAt);
+            exif.write(o, exifAt, 0, 0);
+            return o.toByteArray();
+        }
+        private static void u16(java.io.ByteArrayOutputStream o, int v) { o.write((v >> 8) & 0xFF); o.write(v & 0xFF); }
+        private static void u32(java.io.ByteArrayOutputStream o, int v) { u16(o, v >>> 16); u16(o, v & 0xFFFF); }
     }
 }

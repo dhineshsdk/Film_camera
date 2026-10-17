@@ -136,6 +136,13 @@ public class CameraEngine {
     private int deviceMaxIso = 3200;
     private long minShutterNs = HW_MIN_SHUTTER_FLOOR_NS;
     private long maxShutterNs = MAX_SHUTTER_NS;
+    // Longest frame the AE target fps ranges allow (1/15 s at the 15 fps floor). A manual
+    // exposure longer than 1/30 s needs that range in the request: without it the UW and front
+    // HALs silently cap the shutter at 30 ms and raise the ISO instead.
+    private long slowestFrameNs = MAX_SHUTTER_NS;
+    private Range<Integer> slowFpsRange = null;
+    private Range<Integer> defaultFpsRange = null;
+    private volatile boolean videoMode = false;
     private float staticBlackLevel = 0.0f;
 
     private double currentCameraFps = 0.0;
@@ -355,6 +362,22 @@ public class CameraEngine {
             maxShutterNs = Math.min(maxShutterNs, expRange.getUpper());
             deviceMaxShutterNs = expRange.getUpper();
         }
+        slowFpsRange = null;
+        slowestFrameNs = MAX_SHUTTER_NS;
+        Range<Integer>[] fpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+        if (fpsRanges != null) {
+            for (Range<Integer> r : fpsRanges) {
+                if (r.getLower() <= 0) continue;
+                if (slowFpsRange == null || r.getLower() < slowFpsRange.getLower()
+                    || (r.getLower().equals(slowFpsRange.getLower()) && r.getUpper() > slowFpsRange.getUpper())) {
+                    slowFpsRange = r;
+                }
+            }
+        }
+        if (slowFpsRange != null) {
+            slowestFrameNs = Math.max(MAX_SHUTTER_NS, 1_000_000_000L / slowFpsRange.getLower());
+        }
+        deviceMaxShutterNs = Math.min(deviceMaxShutterNs, slowestFrameNs);
 
         int sweet = model[2];
         int hcg = model[3];
@@ -430,6 +453,9 @@ public class CameraEngine {
             previewBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, currentIso);
             previewBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentExposureNs);
             previewBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, Math.max(currentExposureNs, MAX_SHUTTER_NS));
+            if (defaultFpsRange == null) defaultFpsRange = previewBuilder.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE);
+            Range<Integer> fps = (currentExposureNs > MAX_SHUTTER_NS && slowFpsRange != null) ? slowFpsRange : defaultFpsRange;
+            if (fps != null) previewBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fps);
             captureSession.setRepeatingRequest(previewBuilder.build(), new CaptureCallback(this), cameraHandler);
         } catch (Exception e) {
             Log.e(TAG, "Manual exposure update failed: " + e.getMessage(), e);
@@ -464,6 +490,10 @@ public class CameraEngine {
      * rate drops with long speeds); 0 returns to A (Auto moves the shutter at the film's ISO).
      */
     public void setManualShutterNs(long ns) { manualShutterNs = Math.max(0L, ns); }
+    /** Video mode keeps the shutter at 1/30 s or faster so the take runs at 30 fps. */
+    public void setVideoMode(boolean video) { videoMode = video; }
+    /** Slowest shutter the preview stream can run: 1/15 s for photos, 1/30 s for video. */
+    private long slowestShutterNs() { return videoMode ? maxShutterNs : Math.max(maxShutterNs, slowestFrameNs); }
     public long getManualShutterNs() { return manualShutterNs; }
     /** Shutter speed actually in use, ns. */
     public long getCurrentShutterNs() { return currentExposureNs; }
@@ -521,6 +551,8 @@ public class CameraEngine {
         int push = pushStops;
         double ei = boxIso * Math.pow(2.0, push);
         double tWanted = isoSeconds / ei;
+        // Auto stays at 1/30 s: an auto 1/15 s wedged the HAL's preview path on 17 Oct (twice).
+        // Slower speeds are manual only (dial 1/15 s), with the slow fps range in the request.
         double tMax = Math.min(FILM_MAX_AUTO_SHUTTER_NS, maxShutterNs) * 1e-9;
         double under = (tWanted > tMax) ? Math.log(tWanted / tMax) / Math.log(2.0) : 0.0;
         if (autoGain && under > 0.05 && push < 3) {
@@ -537,7 +569,7 @@ public class CameraEngine {
         }
         long manual = manualShutterNs;
         if (manual > 0) {
-            t = Math.max(minShutterNs, Math.min(deviceMaxShutterNs, manual));
+            t = Math.max(minShutterNs, Math.min(Math.min(deviceMaxShutterNs, slowestShutterNs()), manual));
             under = 0.0;
         }
         meterEv = (float) (Math.log((t * 1e-9) / tWanted) / Math.log(2.0));
@@ -546,10 +578,14 @@ public class CameraEngine {
         filmDigitalGain = (float) (ei / sensorIso);
         underexposureEv = (float) under;
         effectiveEi = (int) Math.round(ei);
+        DngSaver.setExposureIndex(effectiveEi);
         VulkanRenderer.nativeSetFilmExposure(filmDigitalGain, push);
     }
 
     private void updateFilmExposure(int boxIso, float mean) {
+        // A new session (lens switch) starts on the HAL's own AE: the film exposure must be sent
+        // again even when it equals the previous lens's, or the HAL keeps choosing its own ISO.
+        boolean fresh = false;
         if (!manualAeActive) {
             // Meter once with the camera's AE, then hold ISO and drive the shutter ourselves.
             aeWarmupFrames++;
@@ -559,11 +595,12 @@ public class CameraEngine {
             aeTargetRawMean = mean;
             filmIsoSeconds = resultIso * (resultExposureNs * 1e-9);
             manualAeActive = true;
+            fresh = true;
         } else if (filmKey.isEmpty()) {
             // Coming from a digital look: keep the exposure it had settled on.
             filmIsoSeconds = currentIso * (currentExposureNs * 1e-9);
         } else {
-            String key = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs;
+            String key = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode;
             framesSinceAeApply++;
             if (key.equals(filmKey) && (framesSinceAeApply < FILM_AE_INTERVAL_FRAMES || mean <= 1e-5f)) return;
             if (key.equals(filmKey)) {
@@ -593,12 +630,12 @@ public class CameraEngine {
         double ei = boxIso * Math.pow(2.0, pushStops);
         filmIsoSeconds = Math.max(ei * minShutterNs * 1e-9 * 0.25,
             Math.min(ei * FILM_MAX_AUTO_SHUTTER_NS * 1e-9 * 256.0, filmIsoSeconds));
-        filmKey = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs;
+        filmKey = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode;
         int prevIso = currentIso;
         long prevExp = currentExposureNs;
         computeFilmExposure(boxIso, filmIsoSeconds);
         framesSinceAeApply = 0;
-        if (currentIso != prevIso || currentExposureNs != prevExp) applyManualExposure();
+        if (fresh || currentIso != prevIso || currentExposureNs != prevExp) applyManualExposure();
     }
 
     // Runs on the camera thread once per rendered RAW frame.
@@ -614,6 +651,7 @@ public class CameraEngine {
             // Leaving a film look: back to the camera's own ISO ladder at the same exposure.
             filmKey = "";
             effectiveEi = 0;
+            DngSaver.setExposureIndex(0);
             underexposureEv = 0.0f;
             VulkanRenderer.nativeSetFilmExposure(1.0f, 0.0f);
             if (manualAeActive) {
@@ -762,6 +800,7 @@ public class CameraEngine {
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
 
                 engine.previewBuilder = builder;
+                engine.defaultFpsRange = builder.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE);
                 session.setRepeatingRequest(builder.build(), new CaptureCallback(engine), engine.cameraHandler);
                 engine.fpsStartTimeNs = System.nanoTime();
                 engine.frameCount = 0;
