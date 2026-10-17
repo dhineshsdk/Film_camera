@@ -9,6 +9,9 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.Display;
+import android.view.Surface;
+import android.view.WindowManager;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -34,6 +37,16 @@ public class ImuTelemetry implements SensorEventListener {
     private volatile double currentAccelHz = 0.0;
     private volatile int gravityOrientation = 0; // 0 = Upright Portrait default
 
+    // Grip detection: low-passed gravity, ignored near flat, with a wide hysteresis band.
+    private static final float GRAVITY_LP_ALPHA = 0.12f;      // ~20 ms time constant at 400 Hz
+    private static final float MIN_PLANAR_GRAVITY = 3.0f;     // m/s2; below this (within ~18 deg of flat) keep the last grip
+    private static final float SWITCH_ANGLE_DEG = 65.0f;      // leave a grip only past 45 + 20 deg
+    private static final int SETTLE_SAMPLES = 8;              // samples to average before the first reading counts
+    private final Context context;
+    private float gravX = 0.0f, gravY = 9.81f;
+    private int samplesSinceStart = 0;
+    private boolean settled = false;
+
     // Phase 5: 500 Hz Gyroflow (.gcsv v1.3) Timed Metadata Logger
     private final Object logLock = new Object();
     private BufferedWriter gcsvWriter = null;
@@ -42,10 +55,12 @@ public class ImuTelemetry implements SensorEventListener {
     private volatile float lastAx = 0.0f, lastAy = 9.81f, lastAz = 0.0f;
 
     public ImuTelemetry(Context context) {
+        this.context = context;
         sensorManager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
     }
 
     public void start() {
+        seedFromDisplay();
         sensorThread = new HandlerThread("IMU_500Hz_Thread", Thread.MAX_PRIORITY);
         sensorThread.start();
         sensorHandler = new Handler(sensorThread.getLooper());
@@ -143,20 +158,12 @@ public class ImuTelemetry implements SensorEventListener {
                 }
             }
         } else if (type == Sensor.TYPE_ACCELEROMETER) {
-            int count = accelCounter.incrementAndGet();
+            accelCounter.incrementAndGet();
             if (event.values != null && event.values.length >= 3) {
                 lastAx = event.values[0];
                 lastAy = event.values[1];
                 lastAz = event.values[2];
-                if ((count & 31) == 0) {
-                    float ax = lastAx;
-                    float ay = lastAy;
-                    if (Math.abs(ay) > Math.abs(ax) + 1.5f) {
-                        gravityOrientation = (ay >= 0.0f) ? 0 : 180;
-                    } else if (Math.abs(ax) > Math.abs(ay) + 1.5f) {
-                        gravityOrientation = (ax >= 0.0f) ? 270 : 90;
-                    }
-                }
+                updateGrip(lastAx, lastAy);
             }
         }
 
@@ -167,6 +174,69 @@ public class ImuTelemetry implements SensorEventListener {
             currentGyroHz = (gCount * 1000.0) / elapsed;
             currentAccelHz = (aCount * 1000.0) / elapsed;
             lastCalculationTime = now;
+        }
+    }
+
+    // Starts each resume from the display's grip instead of whatever the last session ended on
+    // (a landscape shot before leaving the app used to carry over into a portrait reopen).
+    // The activity is locked to portrait, so this is normally 0.
+    private void seedFromDisplay() {
+        int displayRot = Surface.ROTATION_0;
+        try {
+            Display d = null;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                d = context.getDisplay();
+            }
+            if (d == null) {
+                WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+                if (wm != null) d = wm.getDefaultDisplay();
+            }
+            if (d != null) displayRot = d.getRotation();
+        } catch (Exception e) {
+            Log.w(TAG, "Display rotation unavailable: " + e.getMessage());
+        }
+        // Same convention as the grip: device turned CCW (display ROTATION_90) reads ax > 0 = 270.
+        int seed = (displayRot == Surface.ROTATION_90) ? 270
+                 : (displayRot == Surface.ROTATION_180) ? 180
+                 : (displayRot == Surface.ROTATION_270) ? 90 : 0;
+        gravityOrientation = seed;
+        double rad = Math.toRadians(-seed);
+        gravX = (float) (9.81 * Math.sin(rad));
+        gravY = (float) (9.81 * Math.cos(rad));
+        samplesSinceStart = 0;
+        settled = false;
+        Log.i(TAG, "Grip seeded at " + seed + " (display rotation " + displayRot + ")");
+    }
+
+    // Runs on the sensor thread for every accelerometer sample.
+    private void updateGrip(float ax, float ay) {
+        gravX += GRAVITY_LP_ALPHA * (ax - gravX);
+        gravY += GRAVITY_LP_ALPHA * (ay - gravY);
+        if (samplesSinceStart < SETTLE_SAMPLES) {
+            samplesSinceStart++;
+            return;
+        }
+        float planar = (float) Math.hypot(gravX, gravY);
+        if (planar < MIN_PLANAR_GRAVITY) return; // flat or pointing at floor/sky: keep the seed or last grip
+        // 0 deg = top of phone up, +90 = left edge down (ax > 0).
+        double theta = Math.toDegrees(Math.atan2(gravX, gravY));
+        int nearest = (int) Math.round(theta / 90.0) * 90;
+        int candidate = ((360 - nearest) % 360 + 360) % 360;
+        int current = gravityOrientation;
+        if (candidate == current) {
+            settled = true;
+            return;
+        }
+        if (!settled) {
+            // First clear reading after a resume replaces the seed directly.
+            gravityOrientation = candidate;
+            settled = true;
+            return;
+        }
+        double centre = (360 - current) % 360;
+        double diff = Math.abs(((theta - centre) % 360 + 540) % 360 - 180);
+        if (diff > SWITCH_ANGLE_DEG) {
+            gravityOrientation = candidate;
         }
     }
 

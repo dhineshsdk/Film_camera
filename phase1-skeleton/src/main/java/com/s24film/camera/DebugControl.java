@@ -103,7 +103,8 @@ final class DebugControl extends BroadcastReceiver {
                 Log.i(TAG, "look " + VulkanRenderer.nativeGetActiveLookIndex() + " EI " + engine.getEffectiveEi() + " push " + engine.getPushStops()
                     + " under " + engine.getUnderexposureEv() + " EV autoGain " + engine.isAutoGain()
                     + " shutter " + (engine.getCurrentShutterNs() / 1000) + " us meter " + engine.getMeterEv()
-                    + " f/" + engine.getVirtualAperture());
+                    + " f/" + engine.getVirtualAperture()
+                    + " grip " + engine.currentActiveOrient() + " ROT +" + engine.getManualRotationOffset());
                 break;
             case "theme":   // 0 modern, 1 black SLR, 2 silver rangefinder
                 if (ui != null) ui.runOnUiThread(new ThemeTask(ui, intent.getIntExtra("idx", 0)));
