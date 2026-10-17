@@ -106,6 +106,20 @@ public class CameraEngine {
     private static final float AE_GAIN = 0.6f;
     private static final float AE_MAX_STEP_EV = 2.0f;
 
+    // Film-exposure loop: the capture pipeline lags the request by several frames, so it checks
+    // rarely, holds inside a dead band, leaves it only on a clear sustained error, then walks in
+    // small steps (no pumping). Shutter moves on a 1/3-stop ladder so it never creeps.
+    private static final int FILM_AE_INTERVAL_FRAMES = 8;
+    private static final float FILM_HOLD_EV = 0.30f;      // inside this: hold
+    private static final float FILM_LEAVE_EV = 0.50f;     // outside this twice running: start moving
+    private static final float FILM_SETTLE_EV = 0.12f;    // moving stops inside this
+    private static final float FILM_STEP_EV = 0.5f;       // largest move per check
+    private static final float FILM_GAIN = 0.6f;
+    /** Set while a video take is recording: exposure stays where it was when the take started. */
+    static volatile boolean videoHold = false;
+    private boolean filmMoving = false;
+    private int filmOutCount = 0;
+
     private CaptureRequest.Builder previewBuilder;
     private volatile boolean manualAeActive = false;
     private int aeWarmupFrames = 0;
@@ -517,6 +531,10 @@ public class CameraEngine {
         }
         int sensorIso = nearestCleanIso(ei);
         long t = (long) (Math.max(minShutterNs * 1e-9, Math.min(tMax, tWanted)) * 1e9);
+        if (manualShutterNs == 0 && t > 0) {   // 1/3-stop shutter ladder
+            t = (long) (Math.pow(2.0, Math.round(Math.log((double) t) / Math.log(2.0) * 3.0) / 3.0));
+            t = Math.max(minShutterNs, Math.min((long) (tMax * 1e9), t));
+        }
         long manual = manualShutterNs;
         if (manual > 0) {
             t = Math.max(minShutterNs, Math.min(deviceMaxShutterNs, manual));
@@ -547,7 +565,7 @@ public class CameraEngine {
         } else {
             String key = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs;
             framesSinceAeApply++;
-            if (key.equals(filmKey) && (framesSinceAeApply < AE_APPLY_INTERVAL_FRAMES || mean <= 1e-5f)) return;
+            if (key.equals(filmKey) && (framesSinceAeApply < FILM_AE_INTERVAL_FRAMES || mean <= 1e-5f)) return;
             if (key.equals(filmKey)) {
                 // Rendered brightness is raw x digital gain; steer it to the metered target.
                 float evErr = (float) (Math.log(aeTargetRawMean / (mean * filmDigitalGain)) / Math.log(2.0));
@@ -556,8 +574,18 @@ public class CameraEngine {
                 double effIso = currentIso * (double) filmDigitalGain;
                 double need = effIso * (currentExposureNs * 1e-9) * Math.pow(2.0, evErr);
                 double step = Math.log(need / filmIsoSeconds) / Math.log(2.0);
-                if (Math.abs(step) <= AE_DEADBAND_EV) return;
-                step = Math.max(-AE_MAX_STEP_EV, Math.min(AE_MAX_STEP_EV, AE_GAIN * step));
+                if (videoHold) { filmMoving = false; filmOutCount = 0; return; }
+                float absStep = (float) Math.abs(step);
+                if (!filmMoving) {
+                    if (absStep > FILM_LEAVE_EV) filmOutCount++; else filmOutCount = 0;
+                    if (filmOutCount < 2) return;
+                    filmMoving = true;
+                } else if (absStep <= FILM_SETTLE_EV) {
+                    filmMoving = false;
+                    filmOutCount = 0;
+                    return;
+                }
+                step = Math.max(-FILM_STEP_EV, Math.min(FILM_STEP_EV, FILM_GAIN * step));
                 filmIsoSeconds *= Math.pow(2.0, step);
             }
         }
@@ -610,9 +638,9 @@ public class CameraEngine {
         }
 
         framesSinceAeApply++;
-        if (framesSinceAeApply < AE_APPLY_INTERVAL_FRAMES || mean <= 1e-5f) return;
+        if (videoHold || framesSinceAeApply < FILM_AE_INTERVAL_FRAMES || mean <= 1e-5f) return;
         float evErr = (float) (Math.log(aeTargetRawMean / mean) / Math.log(2.0));
-        if (Math.abs(evErr) <= AE_DEADBAND_EV) return;
+        if (Math.abs(evErr) <= FILM_HOLD_EV) return;
         float step = Math.max(-AE_MAX_STEP_EV, Math.min(AE_MAX_STEP_EV, AE_GAIN * evErr));
         double isoSeconds = currentIso * (currentExposureNs * 1e-9) * Math.pow(2.0, step);
         int prevIso = currentIso;
@@ -875,6 +903,8 @@ public class CameraEngine {
             // The shader's 90/270 are mirrored against the accelerometer's landscape sense (live preview
             // came out upside-down in landscape), so swap them on the way into the renderer.
             int renderOrient = (activeOrient == 90) ? 270 : ((activeOrient == 270) ? 90 : activeOrient);
+            // Front sensor is mounted 180 degrees from the rear ones (SENSOR_ORIENTATION 270 vs 90).
+            if (engine.camMatrixIdx == 1) renderOrient = (renderOrient + 180) % 360;
 
             float vulkanMs = 0.0f;
             HardwareBuffer hb = image.getHardwareBuffer();

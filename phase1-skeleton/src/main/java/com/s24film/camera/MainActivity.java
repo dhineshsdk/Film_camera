@@ -502,6 +502,10 @@ public class MainActivity extends Activity implements
         return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
 
+    void debugTheme(int t) {
+        applyTheme(Math.max(0, Math.min(2, t)));
+    }
+
     // 0 = modern, 1 = black SLR, 2 = silver rangefinder.
     private void applyTheme(int t) {
         uiTheme = t;
@@ -934,6 +938,7 @@ public class MainActivity extends Activity implements
     @Override
     protected void onResume() {
         super.onResume();
+        DebugControl.ui = this;
         imuTelemetry.start();
         hideSystemUI();
 
@@ -953,6 +958,7 @@ public class MainActivity extends Activity implements
     @Override
     protected void onPause() {
         super.onPause();
+        if (DebugControl.ui == this) DebugControl.ui = null;
         if (videoRecorder != null && videoRecorder.isRecording()) {
             videoRecorder.stopRecording();
         }

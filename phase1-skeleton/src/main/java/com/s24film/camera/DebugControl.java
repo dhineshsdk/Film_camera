@@ -20,6 +20,15 @@ final class DebugControl extends BroadcastReceiver {
     static final String ACTION = "com.s24film.camera.DEBUG";
     private static final String TAG = "S24FilmDebug";
 
+    static volatile MainActivity ui;   // set by MainActivity while resumed
+
+    static class ThemeTask implements Runnable {
+        private final MainActivity a;
+        private final int t;
+        ThemeTask(MainActivity a, int t) { this.a = a; this.t = t; }
+        @Override public void run() { a.debugTheme(t); }
+    }
+
     private final CameraEngine engine;
     private int lookIdx = 24;
 
@@ -95,6 +104,9 @@ final class DebugControl extends BroadcastReceiver {
                     + " under " + engine.getUnderexposureEv() + " EV autoGain " + engine.isAutoGain()
                     + " shutter " + (engine.getCurrentShutterNs() / 1000) + " us meter " + engine.getMeterEv()
                     + " f/" + engine.getVirtualAperture());
+                break;
+            case "theme":   // 0 modern, 1 black SLR, 2 silver rangefinder
+                if (ui != null) ui.runOnUiThread(new ThemeTask(ui, intent.getIntExtra("idx", 0)));
                 break;
             case "dng":
                 DngSaver.setSaveDng(intent.getBooleanExtra("on", false));

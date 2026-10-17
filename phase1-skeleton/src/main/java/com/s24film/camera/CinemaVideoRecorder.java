@@ -95,6 +95,7 @@ public class CinemaVideoRecorder {
                 imuTelemetry.startGyroLog(currentGcsvFile);
             }
 
+            CameraEngine.videoHold = true;   // freeze exposure for the take
             isRecording.set(true);
             recordStartMs = System.currentTimeMillis();
 
@@ -117,6 +118,7 @@ public class CinemaVideoRecorder {
 
     public synchronized void stopRecording() {
         if (!isRecording.compareAndSet(true, false)) return;
+        CameraEngine.videoHold = false;
         // Detach Vulkan encoder swapchain first so no new frames are queued
         VulkanRenderer.nativeSetEncoderSurface(null);
         if (drainThread != null) {
@@ -128,6 +130,7 @@ public class CinemaVideoRecorder {
     }
 
     private void cleanupEncoder() {
+        CameraEngine.videoHold = false;
         try {
             VulkanRenderer.nativeSetEncoderSurface(null);
         } catch (Throwable ignored) {}

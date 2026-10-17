@@ -321,7 +321,9 @@ final class FilmUi implements View.OnClickListener {
             float w = getWidth(), h = getHeight();
             float top = h * HOLE_TOP, bot = h * HOLE_BOTTOM;
             fill.setShader(leather);
-            c.drawRect(0, 0, w, h, fill);
+            // leave the viewfinder window clear so the live preview shows through
+            c.drawRect(0, 0, w, top, fill);
+            c.drawRect(0, bot, w, h, fill);
             fill.setShader(null);
 
             // chrome top plate
@@ -348,12 +350,12 @@ final class FilmUi implements View.OnClickListener {
             // engraved brand
             text.setColor(th.engrave);
             text.setTextAlign(Paint.Align.CENTER);
-            text.setTextSize(d * 12);
-            text.setLetterSpacing(0.35f);
-            c.drawText(th.brand, w * 0.5f, d * 50, text);
-            text.setTextSize(d * 7.5f);
-            text.setLetterSpacing(0.25f);
-            c.drawText(th.model, w * 0.5f, d * 61, text);
+            text.setTextSize(d * 10.5f);
+            text.setLetterSpacing(0.3f);
+            c.drawText(th.brand, w * 0.84f, d * 50, text);
+            text.setTextSize(d * 6.5f);
+            text.setLetterSpacing(0.15f);
+            c.drawText(th.model, w * 0.84f, d * 61, text);
             text.setLetterSpacing(0f);
 
             // screws
