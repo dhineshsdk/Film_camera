@@ -1517,8 +1517,35 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     u.noise[2] = black;
     u.noise[3] = 1.0f;
     // Normalized-RAW -> scene-linear AP1 gain, so the FILM stage can scale the noise model.
-    const float evGain = std::pow(2.0f, mUserEvStops.load()) * kExposureScale;
+    // Includes the film looks' digital gain to the stock's EI (as in fillPushConstants): without
+    // it the NR under-read the noise whenever the sensor sat below the exposure index.
+    float filmGain = 1.0f;
+    {
+        const int li = mActiveLookIdx.load();
+        if (li >= 0 && li < static_cast<int>(s24film::kTotalMasterLooks) && s24film::kMasterLookBoxIso[li] > 0) {
+            filmGain = mFilmDigitalGain.load();
+            const float te = mExposureSeconds.load();
+            if (te > 1.0f) filmGain *= std::pow(te, kReciprocityP - 1.0f);
+        }
+    }
+    const float evGain = std::pow(2.0f, mUserEvStops.load()) * kExposureScale * filmGain;
     u.lsc[3] = evGain * std::max((mLastFrame.gainR + mLastFrame.gainG + mLastFrame.gainB) / 3.0f, 0.5f);
+
+    // Per-lens luma NR: the tele, UW and front sensors have smaller pixels (lab shot-noise
+    // scale up to ~5x the wide's at the same ISO). Scale the strength so every lens is left
+    // with about the wide camera's residual noise (0.55 of the input at strength 0.45).
+    float lumaNr = 0.45f;
+    {
+        const float iso = static_cast<float>(std::max(mIso.load(), 1));
+        auto shotS = [iso](const s24film::SensorNoiseModel& m) {
+            float t01 = (iso - static_cast<float>(m.minIso)) / static_cast<float>(std::max(m.hcgSwitchIso - m.minIso, 1));
+            t01 = std::clamp(t01, 0.0f, 1.0f);
+            return std::max(m.baseScaleS + (m.hcgScaleS - m.baseScaleS) * t01, 1e-7f);
+        };
+        const float ratio = std::sqrt(shotS(s24film::kS24SensorNoiseModels[camIdx]) /
+                                      shotS(s24film::kS24SensorNoiseModels[0]));
+        lumaNr = std::clamp(1.0f - 0.55f / std::max(ratio, 1.0f), 0.45f, 0.75f);
+    }
 
     u.lsc[0] = 1.0f;
     u.lsc[1] = static_cast<float>(s24film::kLscGridCols);
@@ -1637,7 +1664,7 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     u.hdr[0] = kHdrSdrRatio;
     u.hdr[1] = t.master ? 1.0f : 0.0f;
     u.hdr[2] = 1.0f;      // chroma noise reduction strength
-    u.hdr[3] = 0.45f;     // luma noise reduction strength
+    u.hdr[3] = lumaNr;    // luma noise reduction strength (per lens, see above)
 
     {
         std::lock_guard<std::mutex> lock(mFmMutex);
