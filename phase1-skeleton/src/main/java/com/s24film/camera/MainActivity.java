@@ -2,8 +2,6 @@ package com.s24film.camera;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
@@ -168,6 +166,8 @@ public class MainActivity extends Activity implements
 
     private int activeStockIndex = 1; // Default: Kodak Portra 400
     private int activeLensIndex = 0;  // Default: Clean
+    private LookCatalog lookCatalog;
+    private StockBrowser stockBrowser;
     private int pickedLookIndex = -1; // long-press picker override over all 120 looks (-1 = none)
     private int anamorphicMode = 0;   // 0=1.0x, 1=1.33x, 2=2.0x
     private int cinemaGate = 0;       // 0=3:4, 1=16:9, 2=2.39:1
@@ -236,6 +236,13 @@ public class MainActivity extends Activity implements
             stockButtons[i].setOnClickListener(this);
             stockButtons[i].setOnLongClickListener(this);
         }
+
+        lookCatalog = new LookCatalog(this);
+        stockBrowser = new StockBrowser(this, lookCatalog, new LookPicked(this));
+        View browse = findViewById(R.id.btn_stock_browse);
+        if (browse != null) browse.setOnClickListener(this);
+        int last = lookCatalog.lastUsed();
+        if (last >= 0 && last < lookCatalog.looks.size()) pickedLookIndex = last;
 
         stripStocks = findViewById(R.id.strip_stocks);
         int[] fmtIds = {R.id.btn_fmt_0, R.id.btn_fmt_1, R.id.btn_fmt_2, R.id.btn_fmt_3};
@@ -322,6 +329,33 @@ public class MainActivity extends Activity implements
         checkPermissions();
     }
 
+    // Short canister brand: first word of the look name, capped for the label.
+    private static String canisterBrand(String name) {
+        String b = name.trim().replaceFirst(
+            "^(?i)(kodak|fujifilm|fujicolor|fujichrome|fuji|agfacolor|agfa|ilford|eastman|konica|foma|orwo)\\s+", "");
+        int sp = b.indexOf(' ');
+        if (sp > 0 && b.length() > 9) b = b.substring(0, sp);
+        return b.toUpperCase(Locale.US);
+    }
+
+    private int currentLookForBrowser() {
+        return (pickedLookIndex >= 0) ? pickedLookIndex : STOCK_TO_LOOK[activeStockIndex];
+    }
+
+    static final class LookPicked implements StockBrowser.Listener {
+        private final MainActivity a;
+        LookPicked(MainActivity a) { this.a = a; }
+        @Override public void onLookPicked(int lookIndex) {
+            a.pickedLookIndex = lookIndex;
+            a.syncLookToNative();
+        }
+    }
+
+    private void openStockBrowser() {
+        if (stockBrowser == null) return;
+        stockBrowser.show(currentLookForBrowser());
+    }
+
     private int activeLookIndex() {
         return (pickedLookIndex >= 0) ? pickedLookIndex : STOCK_TO_LOOK[activeStockIndex];
     }
@@ -385,6 +419,11 @@ public class MainActivity extends Activity implements
                 : ("6".equals(currentCameraId) ? 2 : 3));
             filmUi.setActiveLens(li);
             filmUi.setCanister(activeStockIndex, activeLookLabel());
+            LookCatalog.Look pl = (pickedLookIndex >= 0) ? lookCatalog.get(pickedLookIndex) : null;
+            if (pl != null) {
+                filmUi.setCanisterLook(canisterBrand(pl.name), pl.iso,
+                    LookCatalog.CATEGORY_COLORS[pl.category], pl.name);
+            }
             filmUi.setMovie(videoMode);
         }
         btn06x.setSelected("2".equals(currentCameraId));
@@ -632,10 +671,10 @@ public class MainActivity extends Activity implements
         }
 
         @Override public void onStockTap() {
-            a.stockButtons[(a.activeStockIndex + 1) % 12].performClick();
+            a.openStockBrowser();
         }
 
-        @Override public void onStockLong() { a.onLongClick(a.stockButtons[0]); }
+        @Override public void onStockLong() { a.openStockBrowser(); }
 
         @Override public void onLens(int index) {
             Button[] b = {a.btn06x, a.btn1x, a.btn3x, a.btnFront};
@@ -828,22 +867,7 @@ public class MainActivity extends Activity implements
         }
     }
 
-    static class LookPickListener implements DialogInterface.OnClickListener {
-        private final MainActivity activity;
-
-        LookPickListener(MainActivity activity) {
-            this.activity = activity;
-        }
-
-        @Override
-        public void onClick(DialogInterface dialog, int which) {
-            activity.pickedLookIndex = which;
-            activity.syncLookToNative();
-            dialog.dismiss();
-        }
-    }
-
-    // Long-press any stock button: pick any of the 120 master looks.
+    // Long-press any stock button: open the stock browser (all 120 looks).
     @Override
     public boolean onLongClick(View v) {
         if (v.getId() == R.id.tv_sheet_title) {
@@ -854,19 +878,10 @@ public class MainActivity extends Activity implements
         return openLookPicker();
     }
 
-    // Every master look in one list. Batch A replaces this with the stock browser.
+    // Film chip, canister and long-press all open the stock browser.
     private boolean openLookPicker() {
         if (!vulkanInitialized) return false;
-        int count = VulkanRenderer.nativeGetLookCount();
-        if (count <= 0) return false;
-        String[] names = new String[count];
-        for (int i = 0; i < count; i++) {
-            names[i] = String.format(Locale.US, "%03d  %s", i, VulkanRenderer.nativeGetLookName(i));
-        }
-        new AlertDialog.Builder(this)
-            .setTitle("Master Look (120)")
-            .setItems(names, new LookPickListener(this))
-            .show();
+        openStockBrowser();
         return true;
     }
 
@@ -974,6 +989,8 @@ public class MainActivity extends Activity implements
             setMode(false);
         } else if (id == R.id.mode_video) {
             setMode(true);
+        } else if (id == R.id.btn_stock_browse) {
+            openStockBrowser();
         } else if (id == R.id.btn_gallery) {
             openGallery();
         } else if (id == R.id.btn_settings) {
@@ -1002,6 +1019,7 @@ public class MainActivity extends Activity implements
                 if (id == stockBtnIds[i]) {
                     activeStockIndex = i;
                     pickedLookIndex = -1;
+                    lookCatalog.setLastUsed(-1);
                     syncLookToNative();
                     break;
                 }

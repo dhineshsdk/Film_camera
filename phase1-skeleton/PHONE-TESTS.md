@@ -47,3 +47,18 @@ Build: branch `claude/portrait-tilt-fftv7j` (PR "Portrait tilt fix"). Logcat tag
 8. **ROT reset.** Press ROT once (+90), switch lens. Pass: button reads `ROT +0°`, next photo upright. Press ROT, start the test series. Pass: series starts at `ROT +0°`, all photos upright.
 
 adb shortcut for 1, 6, 7 without tapping: `adb shell am broadcast -a com.s24film.camera.DEBUG --es cmd capture`, `--es cmd lens --es id 0|2|6|1`, `--es cmd status`.
+
+## Batch A: stock browser
+
+Install the build, then check:
+
+1. Tap the **All 120** chip at the start of the stock strip: a full-screen browser opens. Header shows "120 of 120".
+2. Tap the film canister window (film theme) or long-press any stock chip: the same browser opens.
+3. Tabs: All, Favourites, Recent, C-41, ECN-2, Slide, B&W, Print, Cinema, Fuji Sims. Counts should add up to 120 (C-41 33, B&W 26, Slide 21, Fuji 14, ECN-2 9, Cinema 9, Print 8).
+4. Search: "portra", "400", "velvia", "ilford" each narrow the list; two words narrow further.
+5. Tap a stock: browser closes, status text and canister show that stock with its box ISO, and the preview look changes. Take a photo; the file name carries the stock tag.
+6. Star a stock, switch to Favourites: it is listed. Picked stocks appear under Recent.
+7. Close and reopen the app: the last picked stock is still selected. Tapping one of the 12 chips resets that.
+8. Render check (item 4 of the TODO): shoot the same scene on a few stocks per category and note any that are very dark, have a colour cast, or show a wrong ISO in the list. Report their names.
+
+Not done in this batch: real-pipeline thumbnails (the list shows a category-colour swatch with the box ISO), Aerochrome IR profile (button still uses the legacy path), per-stock push/pull control.
