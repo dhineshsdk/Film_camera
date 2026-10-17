@@ -457,6 +457,8 @@ public class MainActivity extends Activity implements
         setMode(false);
         testRunning = true;
         testStep = 0;
+        cameraEngine.resetManualRotationOffset();   // a leftover ROT press turned a whole series sideways (issue 4)
+        btnRotate.setText("ROT +0°");
         Toast.makeText(this, "Test series started: 4 lenses x " + TEST_STOCKS.length + " stocks", Toast.LENGTH_LONG).show();
         mainHandler.post(new TestTask(this, 0, 0));
     }
@@ -1014,7 +1016,8 @@ public class MainActivity extends Activity implements
         currentCameraId = camId;
         refreshSelection();
         showStatus("Switching to " + label + "…", false);
-        cameraEngine.openCamera(camId);
+        cameraEngine.openCamera(camId);   // also clears the ROT override
+        btnRotate.setText("ROT +" + cameraEngine.getManualRotationOffset() + "°");
     }
 
     private void checkPermissions() {

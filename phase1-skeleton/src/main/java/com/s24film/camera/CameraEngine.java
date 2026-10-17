@@ -77,8 +77,10 @@ public class CameraEngine {
     private volatile DngColor dngColor = null;
     private DebugControl debugControl = null;
     private volatile int manualRotationOffset = 0; // 0, 90, 180, 270 user override
+    private volatile int lockedCaptureOrient = 0;  // grip + ROT at the moment the shutter was pressed
 
     private final AtomicBoolean captureRequested = new AtomicBoolean(false);
+    private String lastRequestedCameraId = null;
     private volatile String pendingStockShortName = "Portra400";
     private volatile DngSaver.Callback pendingDngCallback = null;
     private volatile TotalCaptureResult latestCaptureResult = null;
@@ -178,6 +180,20 @@ public class CameraEngine {
         return manualRotationOffset;
     }
 
+    public int getManualRotationOffset() {
+        return manualRotationOffset;
+    }
+
+    public void resetManualRotationOffset() {
+        manualRotationOffset = 0;
+    }
+
+    // Grip plus the ROT override, in the accelerometer convention (0 portrait, 270 = left edge down).
+    int currentActiveOrient() {
+        int base = (imuTelemetry != null) ? imuTelemetry.getGravityOrientation() : 0;
+        return (base + manualRotationOffset) % 360;
+    }
+
     public synchronized void start() {
         if (debugControl == null) {
             debugControl = new DebugControl(this);
@@ -241,6 +257,11 @@ public class CameraEngine {
     }
 
     public synchronized void openCamera(final String cameraId) {
+        // A ROT override is for one lens; a lens change starts upright again (issue 4).
+        if (lastRequestedCameraId != null && !lastRequestedCameraId.equals(cameraId)) {
+            manualRotationOffset = 0;
+        }
+        lastRequestedCameraId = cameraId;
         this.activeCameraId = cameraId;
         start();
         if (cameraHandler != null) {
@@ -697,6 +718,8 @@ public class CameraEngine {
     public synchronized void triggerCapture(String stockShortName, DngSaver.Callback callback) {
         this.pendingStockShortName = stockShortName;
         this.pendingDngCallback = callback;
+        // Lock the grip now: the shutter tap itself can jolt the phone before the next frame lands.
+        this.lockedCaptureOrient = currentActiveOrient();
         this.captureRequested.set(true);
     }
 
@@ -941,8 +964,10 @@ public class CameraEngine {
             float gainG = 1.0f * engine.userWbTint;
             float gainB = engine.dngGainB * (2.0f - engine.userWbWarmth);
 
-            int baseOrient = (engine.imuTelemetry != null) ? engine.imuTelemetry.getGravityOrientation() : 0;
-            int activeOrient = (baseOrient + engine.manualRotationOffset) % 360;
+            // Claim the capture before rendering so this frame is rendered (and the master taken)
+            // in the grip locked at shutter press, not whatever the accelerometer reads now.
+            boolean capture = engine.captureRequested.compareAndSet(true, false);
+            int activeOrient = capture ? engine.lockedCaptureOrient : engine.currentActiveOrient();
             // The shader's 90/270 are mirrored against the accelerometer's landscape sense (live preview
             // came out upside-down in landscape), so swap them on the way into the renderer.
             int renderOrient = (activeOrient == 90) ? 270 : ((activeOrient == 270) ? 90 : activeOrient);
@@ -966,7 +991,8 @@ public class CameraEngine {
 
             engine.updateAutoIso();
 
-            if (engine.captureRequested.compareAndSet(true, false)) {
+            if (capture) {
+                Log.i(TAG, "Capture grip " + activeOrient + " (render " + renderOrient + ", ROT +" + engine.manualRotationOffset + ")");
                 // Full-resolution master render of this exact frame (ring holds it plus the
                 // previous burst frames), done before the RAW Image goes to the DNG writer.
                 int[] masterDims = new int[2];
