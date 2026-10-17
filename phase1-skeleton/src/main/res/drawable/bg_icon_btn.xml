@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Round icon button on the black bands; filled when its panel is open -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_selected="true"><shape android:shape="oval"><solid android:color="#40FFD60A" /></shape></item>
+    <item android:state_pressed="true"><shape android:shape="oval"><solid android:color="#40FFFFFF" /></shape></item>
+    <item><shape android:shape="oval"><solid android:color="#1FFFFFFF" /></shape></item>
+</selector>

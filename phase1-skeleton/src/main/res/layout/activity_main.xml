@@ -1,4 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Modern UI, portrait-locked. The live image is a 3:4 window centred on screen, which leaves a black
+  band above and below it (~170 dp each on the S24+). Everything lives in those bands:
+    top band:    settings | film chip | tune, then the exposure readout and the low-light banner
+    preview:     zoom pills on its bottom edge, transient status pill under the top band
+    bottom band: film labels, PHOTO / VIDEO, gallery | shutter | flip
+  One settings sheet (tabs: Tune, Film, Camera, Display, Debug) rises over the bottom band and
+  stops above the shutter row, so the shutter stays usable while it is open.
+-->
 <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -10,96 +19,161 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Top bar: look name (left), sheet chevron (centre), telemetry (right) -->
-    <RelativeLayout
+    <!-- Top band -->
+    <LinearLayout
         android:id="@+id/top_bar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_alignParentTop="true"
+        android:orientation="vertical"
+        android:gravity="center_horizontal"
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:paddingTop="40dp"
-        android:paddingStart="16dp"
-        android:paddingEnd="16dp">
+        android:paddingTop="34dp"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp">
 
+        <RelativeLayout
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:clipChildren="false">
+
+            <ImageButton
+                android:id="@+id/btn_settings"
+                style="@style/IconBtn"
+                android:layout_alignParentStart="true"
+                android:layout_centerVertical="true"
+                android:src="@drawable/ic_settings"
+                android:contentDescription="Settings" />
+
+            <!-- Active film; tap for every look (Batch A replaces the list with the stock browser) -->
+            <TextView
+                android:id="@+id/btn_film"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_centerInParent="true"
+                android:maxWidth="230dp"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_film_chip"
+                android:drawableStart="@drawable/ic_film"
+                android:drawablePadding="6dp"
+                android:drawableTint="@color/accent"
+                android:paddingStart="12dp"
+                android:paddingEnd="14dp"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:textColor="@color/ink"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:contentDescription="Film stock"
+                android:text="Portra 400" />
+
+            <ImageButton
+                android:id="@+id/btn_tune"
+                style="@style/IconBtn"
+                android:layout_alignParentEnd="true"
+                android:layout_centerVertical="true"
+                android:src="@drawable/ic_tune"
+                android:contentDescription="Tune exposure, grain and halation" />
+        </RelativeLayout>
+
+        <!-- Exposure readout: shutter, sensor ISO, film EI, push, lens, frame -->
+        <TextView
+            android:id="@+id/tv_readout"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:singleLine="true"
+            android:textColor="@color/ink"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.02"
+            android:text="A --   ISO --   1×   01/36" />
+    </LinearLayout>
+
+    <!-- Banner stack under the top band: low-light warning, then the transient status pill.
+         In the film themes it is shifted down into the viewfinder window from code. -->
+    <LinearLayout
+        android:id="@+id/info_stack"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/top_bar"
+        android:layout_alignWithParentIfMissing="true"
+        android:layout_centerHorizontal="true"
+        android:layout_marginTop="8dp"
+        android:orientation="vertical"
+        android:gravity="center_horizontal">
+
+        <!-- Low-light warning with one-tap Push -->
+        <LinearLayout
+            android:id="@+id/warn_bar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="@drawable/bg_pill"
+            android:paddingStart="12dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
+            android:visibility="gone">
+            <TextView
+                android:id="@+id/tv_warning"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:maxWidth="240dp"
+                android:textColor="@color/accent"
+                android:textSize="12sp"
+                android:fontFamily="sans-serif-medium"
+                android:text="Not enough light" />
+            <Button
+                android:id="@+id/btn_push_fix"
+                style="@style/Chip"
+                android:layout_height="30dp"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="0dp"
+                android:text="Push" />
+        </LinearLayout>
+
+        <!-- Transient status (saving, switching lens, recording time); fades out on its own -->
         <TextView
             android:id="@+id/tv_shutter_status"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_alignParentStart="true"
-            android:layout_centerVertical="true"
-            android:maxWidth="150dp"
+            android:layout_marginTop="8dp"
+            android:maxWidth="300dp"
             android:maxLines="2"
             android:ellipsize="end"
+            android:gravity="center"
             android:background="@drawable/bg_pill"
-            android:paddingStart="10dp" android:paddingEnd="10dp"
+            android:paddingStart="12dp" android:paddingEnd="12dp"
             android:paddingTop="5dp" android:paddingBottom="5dp"
             android:textColor="@color/ink"
-            android:textSize="11sp"
+            android:textSize="12sp"
             android:fontFamily="sans-serif-medium"
-            android:text="Portra 400" />
-
-        <Button
-            android:id="@+id/btn_darkroom"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_centerHorizontal="true"
-            android:background="@drawable/bg_chevron"
-            android:minWidth="0dp" android:minHeight="0dp"
-            android:stateListAnimator="@null"
+            android:visibility="gone"
             android:text="" />
+    </LinearLayout>
 
-        <TextView
-            android:id="@+id/hud_overlay"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_alignParentEnd="true"
-            android:layout_centerVertical="true"
-            android:maxWidth="110dp"
-            android:background="@drawable/bg_pill"
-            android:paddingStart="10dp" android:paddingEnd="10dp"
-            android:paddingTop="5dp" android:paddingBottom="5dp"
-            android:textColor="@color/ink_dim"
-            android:textSize="10sp"
-            android:fontFamily="monospace"
-            android:text="starting" />
-    </RelativeLayout>
-
-    <!-- Low-light warning with one-tap Push -->
-    <LinearLayout
-        android:id="@+id/warn_bar"
+    <!-- Pipeline stats (fps, GPU ms, CFA, temperature): Debug tab only -->
+    <TextView
+        android:id="@+id/hud_overlay"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_below="@id/top_bar"
-        android:layout_centerHorizontal="true"
-        android:layout_marginTop="8dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
+        android:layout_alignParentStart="true"
+        android:layout_marginStart="14dp"
+        android:layout_marginTop="56dp"
         android:background="@drawable/bg_pill"
-        android:paddingStart="12dp"
-        android:paddingEnd="6dp"
-        android:paddingTop="4dp"
-        android:paddingBottom="4dp"
-        android:visibility="gone">
-        <TextView
-            android:id="@+id/tv_warning"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:maxWidth="230dp"
-            android:textColor="@color/accent"
-            android:textSize="12sp"
-            android:fontFamily="sans-serif-medium"
-            android:text="Not enough light" />
-        <Button
-            android:id="@+id/btn_push_fix"
-            style="@style/Chip"
-            android:layout_height="30dp"
-            android:layout_marginStart="8dp"
-            android:layout_marginEnd="0dp"
-            android:text="Push" />
-    </LinearLayout>
+        android:paddingStart="10dp" android:paddingEnd="10dp"
+        android:paddingTop="5dp" android:paddingBottom="5dp"
+        android:textColor="@color/ink_dim"
+        android:textSize="10sp"
+        android:fontFamily="monospace"
+        android:visibility="gone"
+        android:text="starting" />
 
-    <!-- Bottom: sheet, zoom pills, film labels, mode strip, shutter row -->
+    <!-- Bottom band -->
     <LinearLayout
         android:id="@+id/bottom_bar"
         android:layout_width="match_parent"
@@ -108,120 +182,135 @@
         android:orientation="vertical"
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:background="@drawable/bg_bottom_fade"
-        android:paddingTop="24dp"
-        android:paddingBottom="22dp"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
+        android:paddingTop="0dp"
+        android:paddingBottom="16dp"
         android:gravity="center_horizontal">
 
-        <!-- Zoom pills, floating at the bottom edge of the preview -->
+        <!-- Zoom pills, floating on the bottom edge of the preview -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center"
-            android:layout_marginBottom="6dp">
-            <Button android:id="@+id/btn_06x" style="@style/LensBtn" android:text=".6" />
-            <Button android:id="@+id/btn_1x" style="@style/LensBtn" android:text="1×" />
-            <Button android:id="@+id/btn_3x" style="@style/LensBtn" android:text="3" />
+            android:padding="3dp"
+            android:background="@drawable/bg_pill"
+            android:layout_marginBottom="12dp">
+            <Button android:id="@+id/btn_06x" style="@style/LensBtn" android:text=".6" android:contentDescription="Ultra wide" />
+            <Button android:id="@+id/btn_1x" style="@style/LensBtn" android:text="1×" android:contentDescription="Wide" />
+            <Button android:id="@+id/btn_3x" style="@style/LensBtn" android:text="3" android:contentDescription="Telephoto" />
         </LinearLayout>
 
-        <!-- Film stock labels (long-press one for all 120 looks) -->
-        <HorizontalScrollView
-            android:id="@+id/strip_stocks"
-            android:layout_width="match_parent"
-            android:layout_height="40dp"
-            android:scrollbars="none"
-            android:clipChildren="false"
-            android:layout_marginBottom="4dp">
-            <LinearLayout
-                android:id="@+id/strip_stocks_row"
-                android:layout_width="wrap_content"
-                android:layout_height="match_parent"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:clipChildren="false">
-                <Button android:id="@+id/btn_stock_0" style="@style/StockLabel" android:text="Ref" />
-                <Button android:id="@+id/btn_stock_1" style="@style/StockLabel" android:text="Portra 400" />
-                <Button android:id="@+id/btn_stock_2" style="@style/StockLabel" android:text="Ektar 100" />
-                <Button android:id="@+id/btn_stock_3" style="@style/StockLabel" android:text="Tri-X 400" />
-                <Button android:id="@+id/btn_stock_4" style="@style/StockLabel" android:text="500T" />
-                <Button android:id="@+id/btn_stock_5" style="@style/StockLabel" android:text="800T" />
-                <Button android:id="@+id/btn_stock_6" style="@style/StockLabel" android:text="Velvia" />
-                <Button android:id="@+id/btn_stock_7" style="@style/StockLabel" android:text="HP5" />
-                <Button android:id="@+id/btn_stock_8" style="@style/StockLabel" android:text="Kodachrome" />
-                <Button android:id="@+id/btn_stock_9" style="@style/StockLabel" android:text="Classic Neg" />
-                <Button android:id="@+id/btn_stock_10" style="@style/StockLabel" android:text="LogC4" />
-                <Button android:id="@+id/btn_stock_11" style="@style/StockLabel" android:text="Aero IR" />
-            </LinearLayout>
-        </HorizontalScrollView>
-
-        <!-- Mode strip -->
+        <!-- Black from here down: matches the letterbox under the preview -->
         <LinearLayout
-            android:id="@+id/mode_strip"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center"
+            android:orientation="vertical"
+            android:gravity="center_horizontal"
             android:clipChildren="false"
-            android:layout_marginBottom="8dp">
-            <TextView android:id="@+id/mode_photo" style="@style/ModeLabel" android:text="PHOTO" />
-            <TextView android:id="@+id/mode_video" style="@style/ModeLabel" android:text="VIDEO" />
+            android:background="#000000">
+
+            <!-- Film stock labels (tap the film chip at the top for all looks) -->
+            <HorizontalScrollView
+                android:id="@+id/strip_stocks"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:scrollbars="none"
+                android:overScrollMode="never"
+                android:fadingEdgeLength="24dp"
+                android:requiresFadingEdge="horizontal">
+                <LinearLayout
+                    android:id="@+id/strip_stocks_row"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp">
+                    <Button android:id="@+id/btn_stock_0" style="@style/StockLabel" android:text="Ref" />
+                    <Button android:id="@+id/btn_stock_1" style="@style/StockLabel" android:text="Portra 400" />
+                    <Button android:id="@+id/btn_stock_2" style="@style/StockLabel" android:text="Ektar 100" />
+                    <Button android:id="@+id/btn_stock_3" style="@style/StockLabel" android:text="Tri-X 400" />
+                    <Button android:id="@+id/btn_stock_4" style="@style/StockLabel" android:text="500T" />
+                    <Button android:id="@+id/btn_stock_5" style="@style/StockLabel" android:text="800T" />
+                    <Button android:id="@+id/btn_stock_6" style="@style/StockLabel" android:text="Velvia" />
+                    <Button android:id="@+id/btn_stock_7" style="@style/StockLabel" android:text="HP5" />
+                    <Button android:id="@+id/btn_stock_8" style="@style/StockLabel" android:text="Kodachrome" />
+                    <Button android:id="@+id/btn_stock_9" style="@style/StockLabel" android:text="Classic Neg" />
+                    <Button android:id="@+id/btn_stock_10" style="@style/StockLabel" android:text="LogC4" />
+                    <Button android:id="@+id/btn_stock_11" style="@style/StockLabel" android:text="Aero IR" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <!-- Mode strip -->
+            <LinearLayout
+                android:id="@+id/mode_strip"
+                android:layout_width="match_parent"
+                android:layout_height="32dp"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:layout_marginBottom="4dp">
+                <TextView android:id="@+id/mode_photo" style="@style/ModeLabel" android:text="PHOTO" />
+                <TextView android:id="@+id/mode_video" style="@style/ModeLabel" android:text="VIDEO" />
+            </LinearLayout>
+
+            <!-- Shutter row: gallery | shutter | flip -->
+            <RelativeLayout
+                android:id="@+id/shutter_row"
+                android:layout_width="match_parent"
+                android:layout_height="80dp"
+                android:clipChildren="false">
+
+                <ImageView
+                    android:id="@+id/btn_gallery"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_alignParentStart="true"
+                    android:layout_centerVertical="true"
+                    android:layout_marginStart="30dp"
+                    android:background="@drawable/bg_thumb"
+                    android:clipToOutline="true"
+                    android:scaleType="centerCrop"
+                    android:contentDescription="Gallery" />
+
+                <Button
+                    android:id="@+id/btn_shutter"
+                    android:layout_width="78dp"
+                    android:layout_height="78dp"
+                    android:layout_centerInParent="true"
+                    android:background="@drawable/bg_shutter"
+                    android:minWidth="0dp" android:minHeight="0dp"
+                    android:stateListAnimator="@null"
+                    android:contentDescription="Take photo"
+                    android:text="" />
+
+                <Button
+                    android:id="@+id/btn_record_video"
+                    android:layout_width="78dp"
+                    android:layout_height="78dp"
+                    android:layout_centerInParent="true"
+                    android:background="@drawable/bg_record"
+                    android:minWidth="0dp" android:minHeight="0dp"
+                    android:stateListAnimator="@null"
+                    android:visibility="gone"
+                    android:contentDescription="Record video"
+                    android:text="" />
+
+                <Button
+                    android:id="@+id/btn_front"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_alignParentEnd="true"
+                    android:layout_centerVertical="true"
+                    android:layout_marginEnd="30dp"
+                    android:background="@drawable/bg_flip"
+                    android:minWidth="0dp" android:minHeight="0dp"
+                    android:stateListAnimator="@null"
+                    android:contentDescription="Front camera"
+                    android:text="" />
+            </RelativeLayout>
         </LinearLayout>
-
-        <!-- Shutter row: gallery | shutter | flip -->
-        <RelativeLayout
-            android:layout_width="match_parent"
-            android:layout_height="84dp"
-            android:clipChildren="false">
-
-            <ImageView
-                android:id="@+id/btn_gallery"
-                android:layout_width="52dp"
-                android:layout_height="52dp"
-                android:layout_alignParentStart="true"
-                android:layout_centerVertical="true"
-                android:layout_marginStart="26dp"
-                android:background="@drawable/bg_thumb"
-                android:clipToOutline="true"
-                android:scaleType="centerCrop"
-                android:contentDescription="Gallery" />
-
-            <Button
-                android:id="@+id/btn_shutter"
-                android:layout_width="78dp"
-                android:layout_height="78dp"
-                android:layout_centerInParent="true"
-                android:background="@drawable/bg_shutter"
-                android:minWidth="0dp" android:minHeight="0dp"
-                android:stateListAnimator="@null"
-                android:text="" />
-
-            <Button
-                android:id="@+id/btn_record_video"
-                android:layout_width="78dp"
-                android:layout_height="78dp"
-                android:layout_centerInParent="true"
-                android:background="@drawable/bg_record"
-                android:minWidth="0dp" android:minHeight="0dp"
-                android:stateListAnimator="@null"
-                android:visibility="gone"
-                android:text="" />
-
-            <Button
-                android:id="@+id/btn_front"
-                android:layout_width="52dp"
-                android:layout_height="52dp"
-                android:layout_alignParentEnd="true"
-                android:layout_centerVertical="true"
-                android:layout_marginEnd="26dp"
-                android:background="@drawable/bg_flip"
-                android:minWidth="0dp" android:minHeight="0dp"
-                android:stateListAnimator="@null"
-                android:text="" />
-        </RelativeLayout>
     </LinearLayout>
+
     <!-- Film-camera themes are built into this container by FilmUi -->
     <FrameLayout
         android:id="@+id/film_root"
@@ -230,100 +319,217 @@
         android:clipChildren="false"
         android:visibility="gone" />
 
+    <!-- Tap anywhere outside the open sheet to close it -->
+    <View
+        android:id="@+id/sheet_scrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#33000000"
+        android:clickable="true"
+        android:visibility="gone" />
+
+    <!-- Settings sheet. bottomMargin is set in code so it ends above the shutter row (Modern) or the dials (film themes). -->
+    <LinearLayout
+        android:id="@+id/settings_sheet"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="100dp"
+        android:orientation="vertical"
+        android:background="@drawable/bg_panel"
+        android:clickable="true"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="14dp"
+        android:visibility="gone">
+
+        <View
+            android:layout_width="36dp"
+            android:layout_height="5dp"
+            android:layout_gravity="center_horizontal"
+            android:background="@drawable/bg_grabber" />
+
+        <RelativeLayout
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_marginTop="4dp">
+            <!-- Long-press the title to show or hide the Debug tab -->
+            <TextView
+                android:id="@+id/tv_sheet_title"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:layout_alignParentStart="true"
+                android:gravity="center_vertical"
+                android:textColor="@color/ink"
+                android:textSize="17sp"
+                android:fontFamily="sans-serif-medium"
+                android:text="Settings" />
+            <TextView
+                android:id="@+id/btn_sheet_done"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:layout_alignParentEnd="true"
+                android:gravity="center_vertical"
+                android:paddingStart="16dp"
+                android:textColor="@color/accent"
+                android:textSize="15sp"
+                android:fontFamily="sans-serif-medium"
+                android:text="Done" />
+        </RelativeLayout>
+
         <LinearLayout
-            android:id="@+id/darkroom_drawer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_alignParentBottom="true"
-            android:layout_marginStart="10dp"
-            android:layout_marginEnd="10dp"
-            android:layout_marginBottom="300dp"
-            android:orientation="vertical"
-            android:background="@drawable/bg_panel"
-            android:padding="16dp"
-            android:visibility="gone">
-
-            <TextView style="@style/SliderLabel" android:text="INTERFACE" android:layout_marginTop="0dp" />
-            <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content" android:scrollbars="none" android:layout_marginTop="6dp" android:layout_marginBottom="12dp">
-                <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
-                    <Button android:id="@+id/btn_theme_0" style="@style/Chip" android:text="Modern" />
-                    <Button android:id="@+id/btn_theme_1" style="@style/Chip" android:text="Black SLR" />
-                    <Button android:id="@+id/btn_theme_2" style="@style/Chip" android:text="Silver Rangefinder" />
-                </LinearLayout>
-            </HorizontalScrollView>
-
-            <TextView style="@style/SliderLabel" android:text="FILM FORMAT" android:layout_marginTop="0dp" />
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:scrollbars="none"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="12dp">
-                <LinearLayout
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-                    <Button android:id="@+id/btn_fmt_0" style="@style/Chip" android:text="35mm" />
-                    <Button android:id="@+id/btn_fmt_1" style="@style/Chip" android:text="16mm" />
-                    <Button android:id="@+id/btn_fmt_2" style="@style/Chip" android:text="Super 8" />
-                    <Button android:id="@+id/btn_fmt_3" style="@style/Chip" android:text="6×7" />
-                    <Button android:id="@+id/btn_save_raw" style="@style/Chip" android:text="Save RAW: Off" android:layout_marginStart="12dp" />
-                </LinearLayout>
-            </HorizontalScrollView>
-
-            <TextView style="@style/SliderLabel" android:text="CAMERA" android:layout_marginTop="0dp" />
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:scrollbars="none"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="4dp">
-                <LinearLayout
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-                    <Button android:id="@+id/btn_lens" style="@style/Chip" android:text="Lens: Clean" />
-                    <Button android:id="@+id/btn_anamorphic" style="@style/Chip" android:text="Desqueeze: 1.0x" />
-                    <Button android:id="@+id/btn_gate" style="@style/Chip" android:text="Gate: 3:4" />
-                    <Button android:id="@+id/btn_step_print" style="@style/Chip" android:text="24fps Normal" />
-                    <Button android:id="@+id/btn_burst" style="@style/Chip" android:text="4F Burst" />
-                    <Button android:id="@+id/btn_wb" style="@style/Chip" android:text="WB: Auto" />
-                    <Button android:id="@+id/btn_rotate" style="@style/Chip" android:text="ROT +0°" />
-                    <Button android:id="@+id/btn_test_series" style="@style/Chip" android:text="Test: all lenses × stocks" />
-                </LinearLayout>
-            </HorizontalScrollView>
-
-            <TextView style="@style/SliderLabel" android:text="FILM EXPOSURE" />
-            <HorizontalScrollView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:scrollbars="none"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="4dp">
-                <LinearLayout
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-                    <Button android:id="@+id/btn_pushm2" style="@style/Chip" android:text="−2" />
-                    <Button android:id="@+id/btn_pushm1" style="@style/Chip" android:text="−1" />
-                    <Button android:id="@+id/btn_push0" style="@style/Chip" android:text="Push 0" />
-                    <Button android:id="@+id/btn_push1" style="@style/Chip" android:text="+1" />
-                    <Button android:id="@+id/btn_push2" style="@style/Chip" android:text="+2" />
-                    <Button android:id="@+id/btn_push3" style="@style/Chip" android:text="+3" />
-                    <Button android:id="@+id/btn_film_iso" style="@style/Chip" android:text="Film ISO: On" android:layout_marginStart="12dp" />
-                    <Button android:id="@+id/btn_auto_gain" style="@style/Chip" android:text="Auto Gain: Off" />
-                </LinearLayout>
-            </HorizontalScrollView>
-
-            <TextView android:id="@+id/tv_ev_label" style="@style/SliderLabel" android:text="EXPOSURE / PUSH-PULL: +0.0 EV" />
-            <SeekBar android:id="@+id/seek_ev" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="40" android:progress="20" />
-
-            <TextView android:id="@+id/tv_grain_label" style="@style/SliderLabel" android:text="SILVER GRAIN INTENSITY: 100%" />
-            <SeekBar android:id="@+id/seek_grain" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="250" android:progress="100" />
-
-            <TextView android:id="@+id/tv_hal_label" style="@style/SliderLabel" android:text="TIR HALATION &amp; BLOOM: 100%" />
-            <SeekBar android:id="@+id/seek_halation" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="250" android:progress="100" />
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal"
+            android:padding="2dp"
+            android:background="@drawable/bg_segmented">
+            <TextView android:id="@+id/tab_tune" style="@style/SheetTab" android:text="Tune" />
+            <TextView android:id="@+id/tab_film" style="@style/SheetTab" android:text="Film" />
+            <TextView android:id="@+id/tab_camera" style="@style/SheetTab" android:text="Camera" />
+            <TextView android:id="@+id/tab_display" style="@style/SheetTab" android:text="Display" />
+            <TextView android:id="@+id/tab_debug" style="@style/SheetTab" android:text="Debug" android:visibility="gone" />
         </LinearLayout>
 
+        <ScrollView
+            android:id="@+id/sheet_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:overScrollMode="never"
+            android:scrollbars="none">
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <!-- Tune: push/pull and the darkroom sliders -->
+                <LinearLayout
+                    android:id="@+id/page_tune"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <TextView style="@style/RowLabel" android:text="PUSH / PULL (STOPS)" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_pushm2" style="@style/Chip" android:text="−2" />
+                            <Button android:id="@+id/btn_pushm1" style="@style/Chip" android:text="−1" />
+                            <Button android:id="@+id/btn_push0" style="@style/Chip" android:text="0" />
+                            <Button android:id="@+id/btn_push1" style="@style/Chip" android:text="+1" />
+                            <Button android:id="@+id/btn_push2" style="@style/Chip" android:text="+2" />
+                            <Button android:id="@+id/btn_push3" style="@style/Chip" android:text="+3" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                    <TextView android:id="@+id/tv_ev_label" style="@style/RowLabel" android:text="EXPOSURE  +0.0 EV" />
+                    <SeekBar android:id="@+id/seek_ev" style="@style/SheetSeek" android:max="40" android:progress="20" />
+                    <TextView android:id="@+id/tv_grain_label" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="GRAIN  100%" />
+                    <SeekBar android:id="@+id/seek_grain" style="@style/SheetSeek" android:max="250" android:progress="100" />
+                    <TextView android:id="@+id/tv_hal_label" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="HALATION &amp; BLOOM  100%" />
+                    <SeekBar android:id="@+id/seek_halation" style="@style/SheetSeek" android:max="250" android:progress="100" />
+                </LinearLayout>
+
+                <!-- Film: format, exposure model, colour, files -->
+                <LinearLayout
+                    android:id="@+id/page_film"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <TextView style="@style/RowLabel" android:text="FORMAT" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_fmt_0" style="@style/Chip" android:text="35mm" />
+                            <Button android:id="@+id/btn_fmt_1" style="@style/Chip" android:text="16mm" />
+                            <Button android:id="@+id/btn_fmt_2" style="@style/Chip" android:text="Super 8" />
+                            <Button android:id="@+id/btn_fmt_3" style="@style/Chip" android:text="6×7" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="EXPOSURE" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_film_iso" style="@style/Chip" android:text="Film ISO: On" />
+                            <Button android:id="@+id/btn_auto_gain" style="@style/Chip" android:text="Auto Gain: Off" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="COLOUR AND FILES" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_wb" style="@style/Chip" android:text="WB: Auto" />
+                            <Button android:id="@+id/btn_save_raw" style="@style/Chip" android:text="Save RAW: Off" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                </LinearLayout>
+
+                <!-- Camera: frame, optics, capture -->
+                <LinearLayout
+                    android:id="@+id/page_camera"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <TextView style="@style/RowLabel" android:text="FRAME" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_gate" style="@style/Chip" android:text="Gate: 3:4" />
+                            <Button android:id="@+id/btn_anamorphic" style="@style/Chip" android:text="Desqueeze: 1.0x" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="LENS CHARACTER" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_lens" style="@style/Chip" android:text="Lens: Clean" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="CAPTURE" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_burst" style="@style/Chip" android:text="4F Burst" />
+                            <Button android:id="@+id/btn_step_print" style="@style/Chip" android:text="24fps Normal" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                </LinearLayout>
+
+                <!-- Display: interface theme -->
+                <LinearLayout
+                    android:id="@+id/page_display"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <TextView style="@style/RowLabel" android:text="INTERFACE" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_theme_0" style="@style/Chip" android:text="Modern" />
+                            <Button android:id="@+id/btn_theme_1" style="@style/Chip" android:text="Black SLR" />
+                            <Button android:id="@+id/btn_theme_2" style="@style/Chip" android:text="Silver Rangefinder" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                </LinearLayout>
+
+                <!-- Debug: test tools, hidden until unlocked from the sheet title -->
+                <LinearLayout
+                    android:id="@+id/page_debug"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <TextView style="@style/RowLabel" android:text="ORIENTATION AND STATS" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_rotate" style="@style/Chip" android:text="ROT +0°" />
+                            <Button android:id="@+id/btn_stats" style="@style/Chip" android:text="Stats: Off" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="TEST" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_test_series" style="@style/Chip" android:text="All lenses × stocks" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                </LinearLayout>
+            </FrameLayout>
+        </ScrollView>
+    </LinearLayout>
 
 </RelativeLayout>

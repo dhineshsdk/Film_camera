@@ -69,7 +69,10 @@ final class FilmUi implements View.OnClickListener {
         0xFF2A1F17, 0xFF3A2C20, 0xFFF1F1EF, 0xFFA3A39F, 0xFF4A3A2C, 0xFF222222,
         0xFFE9E9E6, 0xFF1B1B1B, 0xFFC8102E, 0xFFB08D57, 0xFFFFB000, 0xFF3A2B08, 0xFFFFC857, true);
 
-    static final float HOLE_TOP = 0.2124f, HOLE_BOTTOM = 0.8274f;
+    // The live preview is a 3:4 image centred in the full-screen surface, so the viewfinder window is whatever
+    // is left between the top and bottom bands once the width has taken its 4/3 share of the height.
+    static int holeTop(int w, int h) { return Math.max(0, Math.round((h - w * 4f / 3f) / 2f)); }
+    static int holeBottom(int w, int h) { return h - holeTop(w, h); }
 
     static final String[] SPEED_LABELS = {"A", "1000", "500", "250", "125", "60", "30", "15", "8", "4", "2", "1", "B"};
     static final long[] SPEED_MS = {0, 1, 2, 4, 8, 16, 33, 66, 125, 250, 500, 1000, 2000};
@@ -106,8 +109,8 @@ final class FilmUi implements View.OnClickListener {
         d = context.getResources().getDisplayMetrics().density;
         cb = callbacks;
         fx = effects;
-        int H = context.getResources().getDisplayMetrics().heightPixels;
-        int holeTop = (int) (H * HOLE_TOP), holeBottom = (int) (H * HOLE_BOTTOM);
+        android.util.DisplayMetrics dm = context.getResources().getDisplayMetrics();
+        int holeTop = holeTop(dm.widthPixels, dm.heightPixels), holeBottom = holeBottom(dm.widthPixels, dm.heightPixels);
 
         body = new BodyView(context);
         root.addView(body, new FrameLayout.LayoutParams(-1, -1));
@@ -121,6 +124,7 @@ final class FilmUi implements View.OnClickListener {
         FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(-1, dp(30));
         dlp.topMargin = holeBottom - dp(30);
         root.addView(strip, dlp);
+        root.addOnLayoutChangeListener(new HoleListener(this));
 
         // ---- top plate ----
         rewindKnob = new KnobView(context);
@@ -137,7 +141,7 @@ final class FilmUi implements View.OnClickListener {
         root.addView(release, lp(dp(64), dp(64), dp(224), dp(46), Gravity.TOP | Gravity.START));
 
         lever = new LeverView(context);
-        root.addView(lever, lp(dp(150), dp(86), dp(10), dp(88), Gravity.TOP | Gravity.END));
+        root.addView(lever, lp(dp(150), dp(86), dp(10), dp(82), Gravity.TOP | Gravity.END));
 
         // ---- bottom region ----
         apertureDial = new DialView(context, APERTURE_LABELS, 0);
@@ -194,6 +198,32 @@ final class FilmUi implements View.OnClickListener {
         p.leftMargin = left;
         p.topMargin = top;
         return p;
+    }
+
+    /** Re-fits the shot overlay and data strip to the viewfinder window whenever the root is laid out. */
+    static final class HoleListener implements View.OnLayoutChangeListener {
+        private final FilmUi ui;
+
+        HoleListener(FilmUi ui) { this.ui = ui; }
+
+        @Override
+        public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+            int w = r - l, h = b - t;
+            if (w <= 0 || h <= 0) return;
+            int top = holeTop(w, h), bottom = holeBottom(w, h);
+            FrameLayout.LayoutParams slp = (FrameLayout.LayoutParams) ui.shot.getLayoutParams();
+            if (slp.topMargin != top || slp.height != bottom - top) {
+                slp.topMargin = top;
+                slp.height = bottom - top;
+                ui.shot.requestLayout();
+            }
+            FrameLayout.LayoutParams dlp = (FrameLayout.LayoutParams) ui.strip.getLayoutParams();
+            int stripTop = bottom - ui.dp(30);
+            if (dlp.topMargin != stripTop) {
+                dlp.topMargin = stripTop;
+                ui.strip.requestLayout();
+            }
+        }
     }
 
     static final class SpeedListener implements DialView.Listener {
@@ -319,7 +349,7 @@ final class FilmUi implements View.OnClickListener {
         @Override
         protected void onDraw(Canvas c) {
             float w = getWidth(), h = getHeight();
-            float top = h * HOLE_TOP, bot = h * HOLE_BOTTOM;
+            float top = holeTop((int) w, (int) h), bot = holeBottom((int) w, (int) h);
             fill.setShader(leather);
             // leave the viewfinder window clear so the live preview shows through
             c.drawRect(0, 0, w, top, fill);

@@ -3,7 +3,7 @@
     <!-- Option chips inside the slide-up sheet -->
     <style name="Chip">
         <item name="android:layout_width">wrap_content</item>
-        <item name="android:layout_height">34dp</item>
+        <item name="android:layout_height">36dp</item>
         <item name="android:layout_marginEnd">8dp</item>
         <item name="android:minWidth">0dp</item>
         <item name="android:minHeight">0dp</item>
@@ -37,10 +37,10 @@
     </style>
     <!-- Floating zoom pills over the preview -->
     <style name="LensBtn">
-        <item name="android:layout_width">38dp</item>
-        <item name="android:layout_height">38dp</item>
-        <item name="android:layout_marginStart">5dp</item>
-        <item name="android:layout_marginEnd">5dp</item>
+        <item name="android:layout_width">44dp</item>
+        <item name="android:layout_height">44dp</item>
+        <item name="android:layout_marginStart">4dp</item>
+        <item name="android:layout_marginEnd">4dp</item>
         <item name="android:minWidth">0dp</item>
         <item name="android:minHeight">0dp</item>
         <item name="android:padding">0dp</item>
@@ -71,5 +71,50 @@
         <item name="android:textSize">11sp</item>
         <item name="android:fontFamily">sans-serif-medium</item>
         <item name="android:layout_marginTop">8dp</item>
+    </style>
+    <!-- Round icon buttons on the top band (settings, tune) -->
+    <style name="IconBtn">
+        <item name="android:layout_width">44dp</item>
+        <item name="android:layout_height">44dp</item>
+        <item name="android:padding">10dp</item>
+        <item name="android:scaleType">fitCenter</item>
+        <item name="android:background">@drawable/bg_icon_btn</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+    <!-- Segmented tab in the settings sheet -->
+    <style name="SheetTab">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">32dp</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:gravity">center</item>
+        <item name="android:background">@drawable/bg_tab</item>
+        <item name="android:textColor">@color/tab_text</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:maxLines">1</item>
+    </style>
+    <!-- Row heading inside a sheet page -->
+    <style name="RowLabel">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">@color/ink_dim</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:letterSpacing">0.06</item>
+        <item name="android:layout_marginTop">14dp</item>
+        <item name="android:layout_marginBottom">6dp</item>
+    </style>
+    <style name="ChipRow">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:scrollbars">none</item>
+        <item name="android:overScrollMode">never</item>
+    </style>
+    <style name="SheetSeek">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">36dp</item>
+        <item name="android:progressTint">@color/accent</item>
+        <item name="android:thumbTint">#FFFFFFFF</item>
+        <item name="android:progressBackgroundTint">#55FFFFFF</item>
     </style>
 </resources>

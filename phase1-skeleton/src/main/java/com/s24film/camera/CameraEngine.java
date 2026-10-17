@@ -497,6 +497,10 @@ public class CameraEngine {
     public long getManualShutterNs() { return manualShutterNs; }
     /** Shutter speed actually in use, ns. */
     public long getCurrentShutterNs() { return currentExposureNs; }
+
+    public int getCurrentIso() { return currentIso; }
+
+    public int getManualRotationOffset() { return manualRotationOffset; }
     /** Longest speed the sensor accepts (for the dial's slow end / B). */
     public long getDeviceMaxShutterNs() { return deviceMaxShutterNs; }
     /** Light meter: + means over, - under, in stops, at the current shutter vs what the scene needs. */
