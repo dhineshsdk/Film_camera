@@ -226,6 +226,7 @@
                     android:gravity="center_vertical"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp">
+                    <Button android:id="@+id/btn_stock_browse" style="@style/StockLabel" android:text="All 120" />
                     <Button android:id="@+id/btn_stock_0" style="@style/StockLabel" android:text="Ref" />
                     <Button android:id="@+id/btn_stock_1" style="@style/StockLabel" android:text="Portra 400" />
                     <Button android:id="@+id/btn_stock_2" style="@style/StockLabel" android:text="Ektar 100" />

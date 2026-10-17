@@ -269,6 +269,11 @@ final class FilmUi implements View.OnClickListener {
         canister.setStock(stockIndex, name);
     }
 
+    /** Canister for a look picked from the browser (any of the 120): label, box ISO and category colour. */
+    void setCanisterLook(String brand, int iso, int color, String name) {
+        canister.setPicked(brand, iso, color, name);
+    }
+
     void setActiveLens(int index) {
         for (int i = 0; i < 4; i++) lens[i].lit = (i == index);
         for (ChromeButton b : lens) b.invalidate();
@@ -952,7 +957,16 @@ final class FilmUi implements View.OnClickListener {
 
         private FilmUi getFilmUi() { return ui; }
 
-        void setStock(int s, String n) { stock = Math.max(0, Math.min(STOCK_BRAND.length - 1, s)); name = n; invalidate(); }
+        private String pickedBrand;
+        private int pickedIso, pickedColor;
+
+        void setStock(int s, String n) {
+            stock = Math.max(0, Math.min(STOCK_BRAND.length - 1, s)); name = n; pickedBrand = null; invalidate();
+        }
+
+        void setPicked(String brand, int iso, int color, String n) {
+            pickedBrand = brand; pickedIso = iso; pickedColor = color; name = n; invalidate();
+        }
 
         @Override
         public boolean onTouchEvent(MotionEvent e) {
@@ -983,16 +997,18 @@ final class FilmUi implements View.OnClickListener {
             c.drawRoundRect(can, d * 4, d * 4, fill);
             fill.setShader(null);
             RectF lab = new RectF(can.left + d * 4, can.top + d * 10, can.right - d * 4, can.bottom - d * 8);
-            fill.setColor(STOCK_COLOR[stock]);
+            fill.setColor(pickedBrand != null ? pickedColor : STOCK_COLOR[stock]);
             c.drawRect(lab, fill);
             fill.setColor(0x33000000);
             c.drawRect(lab.left, lab.bottom - d * 7, lab.right, lab.bottom, fill);
             text.setColor(0xFFFFFFFF);
-            text.setTextSize(d * (STOCK_BRAND[stock].length() > 7 ? 9f : 11f));
-            c.drawText(STOCK_BRAND[stock], lab.centerX(), lab.centerY() - d * 1f, text);
+            String brand = pickedBrand != null ? pickedBrand : STOCK_BRAND[stock];
+            int iso = pickedBrand != null ? pickedIso : STOCK_ISO[stock];
+            text.setTextSize(d * (brand.length() > 7 ? 9f : 11f));
+            c.drawText(brand, lab.centerX(), lab.centerY() - d * 1f, text);
             text.setTextSize(d * 8);
             text.setColor(0xDDFFFFFF);
-            c.drawText(STOCK_ISO[stock] > 0 ? ("ISO " + STOCK_ISO[stock]) : "DIGITAL", lab.centerX(), lab.centerY() + d * 10, text);
+            c.drawText(iso > 0 ? ("ISO " + iso) : "DIGITAL", lab.centerX(), lab.centerY() + d * 10, text);
             line.setStyle(Paint.Style.STROKE);
             line.setStrokeWidth(d * 2);
             line.setColor(theme.edge);

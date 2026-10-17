@@ -1,0 +1,120 @@
+0	0	agfa_aps_star_200	Agfa APS star 200	200
+1	0	agfa_aps_star_400	Agfa APS star 400	400
+2	0	agfa_optima_100	Agfacolor Optima 100	100
+3	0	agfa_optima_200	Agfacolor Optima 200	200
+4	0	agfa_optima_400	Agfacolor Optima 400	400
+5	0	agfa_portrait_160	Agfacolor Portrait 160	160
+6	0	agfa_ultra_100	Agfa Ultra 100	100
+7	0	agfa_vista_100	Agfa Vista 100	100
+8	0	agfa_vista_200	Agfa Vista 200	200
+9	0	agfa_vista_400	Agfa Vista 400	400
+10	0	agfa_vista_800	Agfa Vista 800	800
+11	0	fuji_natura_1600	Fujicolor Natura 1600	1600
+12	0	fuji_pro_160nh	Fujicolor Pro 160NH	160
+13	0	fuji_pro_160ns	Fujicolor Pro 160NS	160
+14	0	fuji_superia_1600	Fujicolor Superia 1600	1600
+15	0	fuji_superia_reala	Fujicolor Superia Reala 100	100
+16	0	fujifilm_c200	Fujifilm C200	200
+17	0	fujifilm_pro_400h	Fujifilm Pro 400H	400
+18	0	fujifilm_xtra_400	Fujifilm X-Tra 400	400
+19	0	kodak_ektar_100	Kodak Ektar 100	100
+20	0	kodak_exr_500t	Eastman EXR 500T 5298	500
+21	0	kodak_exr_50d	Eastman EXR 50D 5245/7245	50
+22	0	kodak_gold_200	Kodak Gold 200	200
+23	0	kodak_portra_160	Kodak Portra 160	160
+24	0	kodak_portra_400	Kodak Portra 400	400
+25	0	kodak_portra_800	Kodak Portra 800	800
+26	0	kodak_portra_800_push1	Kodak Portra 800 (Push 1)	1600
+27	0	kodak_portra_800_push2	Kodak Portra 800 (Push 2)	3200
+28	0	kodak_ultramax_400	Kodak Ultramax 400	400
+29	0	kodak_vericolor_iii	Kodak Vericolor III Professional (VPS)	160
+30	0	kodak_verita_200d	Kodak Verita 200D	200
+31	0	konica_centuria_super_100	Konica Centuria Super 100	100
+32	0	konica_centuria_super_200	Konica Centuria Super 200	200
+33	1	fuji_eterna_250d	Fujifilm Eterna 250D (8563/8663)	250
+34	1	fuji_eterna_250t	Fujifilm Eterna 250T (8553/8653)	250
+35	1	fuji_eterna_400t	Fujifilm Eterna 400T (8583/8683)	400
+36	1	fuji_eterna_500t	Fujifilm Eterna 500T (8573/8673)	500
+37	1	fuji_eterna_vivid_160t	Fujifilm Eterna Vivid 160T (8543/8643)	160
+38	1	kodak_vision3_200t	Kodak Vision3 200T	200
+39	1	kodak_vision3_250d	Kodak Vision3 250D	250
+40	1	kodak_vision3_500t	Kodak Vision3 500T	500
+41	1	kodak_vision3_50d	Kodak Vision3 50D	50
+42	2	agfa_ct_precisa_100	Agfa CT precisa 100	100
+43	2	agfa_ct_precisa_200	Agfa CT precisa 200	200
+44	2	agfa_rsx2_100	Agfachrome RSX II 100	100
+45	2	agfa_rsx2_200	Agfachrome RSX II 200	200
+46	2	agfa_rsx2_50	Agfachrome RSX II 50	50
+47	2	fuji_astia_100f	Fujichrome Astia 100F (RAP100F)	100
+48	2	fuji_provia_400x	Fujichrome Provia 400X (RXP)	400
+49	2	fuji_velvia_100f	Fujichrome Velvia 100F (RVP100F)	100
+50	2	fuji_velvia_50	Fujichrome Velvia 50 (RVP50)	50
+51	2	fujifilm_provia_100f	Fujifilm Provia 100F	100
+52	2	fujifilm_velvia_100	Fujifilm Velvia 100	100
+53	2	kodak_ektachrome_100	Kodak Ektachrome 100	100
+54	2	kodak_ektachrome_100d	Kodak Ektachrome 100D 5294/7294	100
+55	2	kodak_ektachrome_e100g	Kodak Ektachrome E100G	100
+56	2	kodak_ektachrome_e100s	Kodak Ektachrome E100S	100
+57	2	kodak_ektachrome_e100sw	Kodak Ektachrome E100SW	100
+58	2	kodak_ektachrome_e100vs	Kodak Ektachrome E100VS	100
+59	2	kodak_elite_chrome_100	Kodak Elite Chrome 100	100
+60	2	kodak_kodachrome_200	Kodak Kodachrome 200 Professional (K-14)	200
+61	2	kodak_kodachrome_25	Kodak Kodachrome 25 Professional (K-14)	25
+62	2	kodak_kodachrome_64	Kodak Kodachrome 64	64
+63	3	agfa_apx_100	Agfapan APX 100	100
+64	3	agfa_apx_400	Agfapan APX 400	400
+65	3	agfa_scala_200x	Agfa Scala 200x Professional	200
+66	3	foma_fomapan_100	Fomapan 100 Classic	100
+67	3	foma_fomapan_200	Fomapan 200 Creative	200
+68	3	foma_fomapan_400	Fomapan 400 Action	400
+69	3	fuji_acros_ii	Fujifilm Neopan 100 Acros II	100
+70	3	fuji_neopan_1600	Fujifilm Neopan 1600 Professional	1600
+71	3	fuji_neopan_400	Fujifilm Neopan 400 Professional	400
+72	3	ilford_delta100	Ilford Delta 100 Professional	100
+73	3	ilford_delta3200	Ilford Delta 3200 Professional	3200
+74	3	ilford_delta400	Ilford Delta 400 Professional	400
+75	3	ilford_fp4	Ilford FP4 Plus	125
+76	3	ilford_hp5	Ilford HP5 Plus	400
+77	3	ilford_ortho_plus	Ilford Ortho Plus	80
+78	3	ilford_panf	Ilford Pan F Plus	50
+79	3	ilford_sfx200	Ilford SFX 200	200
+80	3	ilford_xp2	Ilford XP2 Super	400
+81	3	kodak_double_x_5222	Eastman Double-X 5222	250
+82	3	kodak_plus_x_125	Kodak Plus-X 125 (PXP)	125
+83	3	kodak_tmax_100	Kodak T-Max 100	100
+84	3	kodak_tmax_400	Kodak T-Max 400	400
+85	3	kodak_tmax_p3200	Kodak T-Max P3200	3200
+86	3	kodak_trix_320	Kodak Tri-X 320 (320TXP)	320
+87	3	kodak_trix_400	Kodak Tri-X 400 (400TX)	400
+88	3	orwo_un54	ORWO UN 54	50
+89	4	fujifilm_crystal_archive_typeii	Fujifilm Crystal Archive Type II	0
+90	4	kodak_2383	Kodak Vision 2383	0
+91	4	kodak_2393	Kodak Vision Premier 2393	0
+92	4	kodak_ektacolor_edge	Kodak Ektacolor Edge	0
+93	4	kodak_endura_premier	Kodak Professional Endura Premier	0
+94	4	kodak_portra_endura	Kodak Professional Portra Endura	0
+95	4	kodak_supra_endura	Kodak Professional Supra Endura	0
+96	4	kodak_ultra_endura	Kodak Professional Ultra Endura	0
+97	5	cinema_arri_alexa35_logc4	ARRI ALEXA 35 (AWG4 / LogC4 / REVEAL)	0
+98	5	cinema_arri_minilf_logc3	ARRI ALEXA Mini LF (AWG3 / LogC3)	0
+99	5	cinema_red_vraptor_ipp2	RED V-Raptor XL (RWG / Log3G10 / IPP2)	0
+100	5	cinema_sony_venice2_slog3	Sony VENICE 2 (S-Gamut3.Cine / S-Log3)	0
+101	5	cinema_canon_clog2	Canon Cinema EOS (Cinema Gamut / C-Log2)	0
+102	5	cinema_bmd_gen5_film	Blackmagic URSA Gen 5 Film Color	0
+103	5	cinema_fujifilm_flog2	Fujifilm F-Gamut / F-Log2 Cinema	0
+104	5	cinema_apple_log	Apple Log (Rec.2020 Cinema Profile)	0
+105	5	cinema_dji_dlog	DJI Ronin 4D / Inspire 3 (D-Gamut/D-Log)	0
+106	6	fuji_sim_provia	Fujifilm PROVIA / Standard	0
+107	6	fuji_sim_velvia	Fujifilm VELVIA / Vivid	0
+108	6	fuji_sim_astia	Fujifilm ASTIA / Soft	0
+109	6	fuji_sim_classic_chrome	Fujifilm CLASSIC CHROME	0
+110	6	fuji_sim_classic_neg	Fujifilm CLASSIC NEG (Superia)	400
+111	6	fuji_sim_nostalgic_neg	Fujifilm NOSTALGIC NEG (Amber)	0
+112	6	fuji_sim_reala_ace	Fujifilm REALA ACE (4th Layer)	0
+113	6	fuji_sim_pro_neg_hi	Fujifilm PRO Neg. Hi	0
+114	6	fuji_sim_pro_neg_std	Fujifilm PRO Neg. Std	0
+115	6	fuji_sim_eterna	Fujifilm ETERNA / Cinema	0
+116	6	fuji_sim_bleach_bypass	Fujifilm ETERNA BLEACH BYPASS	0
+117	6	fuji_sim_acros	Fujifilm ACROS 100 (Fine Silver)	0
+118	6	fuji_sim_monochrome	Fujifilm MONOCHROME	0
+119	6	fuji_sim_sepia	Fujifilm SEPIA (Warm Sulfide)	0
