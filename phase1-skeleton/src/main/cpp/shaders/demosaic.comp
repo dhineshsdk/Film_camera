@@ -879,7 +879,15 @@ vec3 denoiseScene(vec3 c0, vec2 uv) {
     float Y3 = max(luminanceAP1(c3), 0.0);
 
     float g = max(f_lsc.w, 1e-3);
-    float var = max(f_noise.x * g * Y1 + f_noise.y * g * g, 1e-9);
+    // Lens-shading gain was applied to the RAW before everything else, so the noise at this
+    // spot is that much larger (shot x G, read x G^2): 2.8-3x in the front camera's corners.
+    // Approximated from the portrait mapping; the grids are near-symmetric.
+    float lscG = 1.0;
+    if (f_lsc.x > 0.5) {
+        vec2 rawPos = vec2(uv.y * float(u_width), (1.0 - uv.x) * float(u_height));
+        lscG = 0.5 * (lscGainAt(rawPos, 1u) + lscGainAt(rawPos, 2u));
+    }
+    float var = max(f_noise.x * g * lscG * Y1 + f_noise.y * g * g * lscG * lscG, 1e-9);
     float sig = sqrt(var);
 
     float d = Y0 - Y1;
@@ -900,7 +908,7 @@ vec3 denoiseScene(vec3 c0, vec2 uv) {
 
     // The sensor clips RAW at black 0, so read noise rectifies into a positive bias that the
     // WB gains turn into blue/magenta shadows. Fade chroma out near the noise floor.
-    float tDark = 0.25 * sqrt(max(f_noise.x * g, 1e-8));
+    float tDark = 0.25 * sqrt(max(f_noise.x * g * lscG, 1e-8)) + 1.0 * sqrt(max(f_noise.y, 0.0)) * g * lscG;
     float keep = smoothstep(0.3 * tDark, tDark, Yd);
     col = mix(vec3(Yd), col, mix(1.0, keep, s));
     return max(col, vec3(0.0));
