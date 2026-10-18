@@ -65,14 +65,42 @@ $nativeBuildDir = "phase1-skeleton\build_native"
     -DCMAKE_BUILD_TYPE=Release
 & "$ninja" -C "$nativeBuildDir"
 
+# 2b. ONNX Runtime (Android AAR) + Depth Anything V2 Small int8 (Apache-2.0), downloaded once into a gitignored cache
+$cache = ".build_cache"
+New-Item -ItemType Directory -Force -Path $cache | Out-Null
+$ortVer = "1.24.3"
+$ortAar = "$cache\onnxruntime-android-$ortVer.aar"
+$ortSha = "67397e4a970e75617f765d2015ceaf911917e1d822276cfb5792744e8085cbce"
+$modelName = "depth_anything_v2_small_int8.onnx"
+$modelFile = "$cache\$modelName"
+$modelSha = "fcf51f1b230362b28690bb9d1809bf0431f29cad20534e3f589bd7285547f20d"
+function Get-Verified($url, $sha, $file) {
+    if ((Test-Path $file) -and ((Get-FileHash $file -Algorithm SHA256).Hash.ToLower() -eq $sha)) { return }
+    Write-Host "Downloading $url ..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri $url -OutFile $file
+    if ((Get-FileHash $file -Algorithm SHA256).Hash.ToLower() -ne $sha) { Remove-Item $file; throw "SHA-256 mismatch for $file" }
+}
+Get-Verified "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$ortVer/onnxruntime-android-$ortVer.aar" $ortSha $ortAar
+Get-Verified "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx" $modelSha $modelFile
+$ortDir = "$cache\ort-$ortVer"
+if (-not (Test-Path "$ortDir\classes.jar")) {
+    if (Test-Path $ortDir) { Remove-Item -Recurse -Force $ortDir }
+    Copy-Item $ortAar "$ortAar.zip" -Force
+    Expand-Archive -Path "$ortAar.zip" -DestinationPath $ortDir -Force
+    Remove-Item "$ortAar.zip"
+}
+
 # 3. Setup build directories
 $buildDir = "phase1-skeleton\build"
 if (Test-Path "$buildDir") { Remove-Item -Recurse -Force "$buildDir" }
 New-Item -ItemType Directory -Force -Path "$buildDir\classes" | Out-Null
 New-Item -ItemType Directory -Force -Path "$buildDir\gen" | Out-Null
 New-Item -ItemType Directory -Force -Path "$buildDir\lib\arm64-v8a" | Out-Null
+New-Item -ItemType Directory -Force -Path "$buildDir\assets_extra" | Out-Null
 
 Copy-Item "$nativeBuildDir\libs24film_vulkan.so" -Destination "$buildDir\lib\arm64-v8a\"
+Copy-Item "$ortDir\jni\arm64-v8a\*.so" -Destination "$buildDir\lib\arm64-v8a\"
+Copy-Item $modelFile -Destination "$buildDir\assets_extra\"
 
 # 4. Compile resources with aapt2
 Write-Host "Compiling resources with aapt2..." -ForegroundColor Yellow
@@ -82,7 +110,7 @@ Write-Host "Compiling resources with aapt2..." -ForegroundColor Yellow
 Write-Host "Linking APK with aapt2..." -ForegroundColor Yellow
 & "$buildTools\aapt2.exe" link -I "$platform\android.jar" "$buildDir\res.zip" `
     --manifest "phase1-skeleton\src\main\AndroidManifest.xml" `
-    -A "phase1-skeleton/src/main/assets" --min-sdk-version 34 --target-sdk-version 34 `
+    -A "phase1-skeleton/src/main/assets" -A "$buildDir\assets_extra" -0 onnx --min-sdk-version 34 --target-sdk-version 34 `
     --java "$buildDir\gen" `
     -o "$buildDir\unaligned.apk" --auto-add-overlay
 
@@ -90,7 +118,7 @@ Write-Host "Linking APK with aapt2..." -ForegroundColor Yellow
 Write-Host "Compiling Java with javac..." -ForegroundColor Yellow
 $javaSources = Get-ChildItem -Path "phase1-skeleton\src\main\java" -Filter "*.java" -Recurse | ForEach-Object { $_.FullName }
 $rJava = Get-ChildItem -Path "$buildDir\gen" -Filter "R.java" -Recurse | ForEach-Object { $_.FullName }
-& "$javaBin\javac.exe" -XDstringConcat=inline -parameters -source 17 -target 17 -cp "$platform\android.jar" -d "$buildDir\classes" ($javaSources + $rJava)
+& "$javaBin\javac.exe" -XDstringConcat=inline -parameters -source 17 -target 17 -cp "$platform\android.jar;$ortDir\classes.jar" -d "$buildDir\classes" ($javaSources + $rJava)
 
 # 7. DEX with d8
 Write-Host "Creating classes.dex with d8..." -ForegroundColor Yellow
@@ -98,7 +126,7 @@ Write-Host "Creating classes.dex with d8..." -ForegroundColor Yellow
 # command line once the app grew, and d8 then silently wrote no classes.dex.
 Remove-Item "$buildDir\classes.dex", "$buildDir\classes.jar" -ErrorAction SilentlyContinue
 & "$javaBin\jar.exe" cf "$buildDir\classes.jar" -C "$buildDir\classes" .
-& cmd /c """$buildTools\d8.bat"" --min-api 34 --lib ""$platform\android.jar"" --output ""$buildDir"" ""$buildDir\classes.jar"""
+& cmd /c """$buildTools\d8.bat"" --min-api 34 --lib ""$platform\android.jar"" --output ""$buildDir"" ""$buildDir\classes.jar"" ""$ortDir\classes.jar"""
 if (-not (Test-Path "$buildDir\classes.dex")) { throw "d8 produced no classes.dex" }
 
 # 8. Package classes.dex and lib into unaligned APK

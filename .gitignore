@@ -12,6 +12,9 @@ captures/
 *.class
 *.dex
 
+# Downloaded build dependencies (ONNX Runtime AAR, depth model)
+.build_cache/
+
 # Local config / secrets
 local.properties
 *.jks

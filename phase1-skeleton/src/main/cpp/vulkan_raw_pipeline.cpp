@@ -53,6 +53,11 @@ static constexpr float kSuper70FocalMm = 80.0f;     // Super 70mm IMAX archetype
 static constexpr float kSuper70FNumber = 2.0f;
 static constexpr float kSuper70GateLongMm = 52.5f;  // 52.5 x 23 mm gate
 static constexpr float kHdrSdrRatio = 3.0f;
+// Depth bokeh (master): virtual full-frame-equivalent lens, 50 mm.
+static constexpr float kDepthLensMm = 50.0f;
+static constexpr float kDepthSensorLongMm = 36.0f;
+static constexpr float kDepthMaxCocFrac = 0.03f;    // |CoC| cap, fraction of the long edge
+static constexpr int kDepthBands = 4;               // BOKEH dispatches per master (live preview runs between them)
 
 // UI lens index -> kLegendaryLenses8 archetype (-1 = none).
 // UI: 0 Clean, 1 Helios 44-2, 2 Summilux, 3 Takumar, 4 Panavision 2x, 5 Super 70mm IMAX
@@ -982,6 +987,10 @@ bool VulkanRawPipeline::createDescriptorLayoutAndPipelines() {
         {16, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},           // master RGBA8
         {17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},           // live RGBA16F
         {18, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},          // spectral film tables
+        {20, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},          // depth grid + near-side blur reach
+        {21, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},           // signed CoC map
+        {22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER},  // signed CoC map sampled
+        {23, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},          // depth bokeh params
     };
     constexpr uint32_t kBindingCount = sizeof(descs) / sizeof(descs[0]);
 
@@ -1423,6 +1432,15 @@ bool VulkanRawPipeline::createSharedResources() {
     mSpectralWanted.store(-2);
     requestSpectralTables(mActiveLookIdx.load());
 
+    // Depth bokeh input: disparity grid + dilated near-side blur reach, written by masterFinish.
+    {
+        void* mapped = nullptr;
+        if (!createBuffer(2ull * kDepthMaxCells * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
+                          mDepthBuffer, mDepthMemory, &mapped)) return false;
+        mDepthMapped = static_cast<float*>(mapped);
+        std::memset(mDepthMapped, 0, 2ull * kDepthMaxCells * sizeof(float));
+    }
+
     VkSamplerCreateInfo sampler = {};
     sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     sampler.magFilter = VK_FILTER_LINEAR;
@@ -1479,12 +1497,19 @@ bool VulkanRawPipeline::createTargets(FrameTargets& t, VkExtent2D extent, bool m
     if (!createImage(t.storageRgba8, VK_FORMAT_R8G8B8A8_UNORM, rgba8Extent.width, rgba8Extent.height, 1, rw)) return false;
     if (!createImage(t.storageRgba16, VK_FORMAT_R16G16B16A16_SFLOAT, rgba16Extent.width, rgba16Extent.height, 1, rw)) return false;
 
+    VkExtent2D cocExtent = master ? extent : VkExtent2D{1, 1};
+    if (!createImage(t.cocMap, VK_FORMAT_R32_SFLOAT, cocExtent.width, cocExtent.height, 1, rw)) return false;
+    if (!createBuffer(sizeof(DepthParamsUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      t.depthUbo, t.depthUboMemory, &t.depthUboMapped)) return false;
+    std::memset(t.depthUboMapped, 0, sizeof(DepthParamsUbo));
+
     if (!createBuffer(sizeof(FrameParamsUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                       t.ubo, t.uboMemory, &t.uboMapped)) return false;
     std::memset(t.uboMapped, 0, sizeof(FrameParamsUbo));
 
-    if (!transitionToGeneral({t.linearAces.image, t.bokeh.image, t.storageRgba8.image, t.storageRgba16.image})) return false;
+    if (!transitionToGeneral({t.linearAces.image, t.bokeh.image, t.storageRgba8.image, t.storageRgba16.image, t.cocMap.image})) return false;
     writeTargetDescriptors(t);
 
     LOGI("%s targets: %ux%u (bokeh %ux%u, %u-level pyramid)", master ? "Master" : "Live",
@@ -1497,6 +1522,8 @@ void VulkanRawPipeline::destroyTargets(FrameTargets& t) {
     destroyImage(t.bokeh);
     destroyImage(t.storageRgba8);
     destroyImage(t.storageRgba16);
+    destroyImage(t.cocMap);
+    destroyBuffer(t.depthUbo, t.depthUboMemory, &t.depthUboMapped);
     destroyBuffer(t.ubo, t.uboMemory, &t.uboMapped);
     t.extent = {0, 0};
     t.bokehExtent = {0, 0};
@@ -1522,6 +1549,10 @@ void VulkanRawPipeline::writeTargetDescriptors(FrameTargets& t) {
     VkDescriptorImageInfo bokehTex = {mLinearClampSampler, t.bokeh.sampledView, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo out8 = {VK_NULL_HANDLE, t.storageRgba8.levelViews[0], VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo out16 = {VK_NULL_HANDLE, t.storageRgba16.levelViews[0], VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorBufferInfo depthInfo = {mDepthBuffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorImageInfo cocOut = {VK_NULL_HANDLE, t.cocMap.levelViews[0], VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo cocTex = {mLinearClampSampler, t.cocMap.sampledView, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorBufferInfo depthUboInfo = {t.depthUbo, 0, sizeof(DepthParamsUbo)};
 
     std::vector<VkWriteDescriptorSet> writes;
     auto addBuf = [&](uint32_t binding, VkDescriptorType type, const VkDescriptorBufferInfo* info) {
@@ -1562,6 +1593,10 @@ void VulkanRawPipeline::writeTargetDescriptors(FrameTargets& t) {
     addImg(15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &bokehTex);
     addImg(16, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &out8);
     addImg(17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &out16);
+    addBuf(20, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &depthInfo);
+    addImg(21, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &cocOut);
+    addImg(22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &cocTex);
+    addBuf(23, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &depthUboInfo);
 
     vkUpdateDescriptorSets(mDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
@@ -1638,6 +1673,11 @@ void VulkanRawPipeline::destroyComputeResources() {
     destroyImage(mLookLutImage);
     destroyImage(mGrainTileImage);
 
+    {
+        void* mapped = mDepthMapped;
+        destroyBuffer(mDepthBuffer, mDepthMemory, &mapped);
+        mDepthMapped = nullptr;
+    }
     destroyBuffer(mLookBuffer, mLookMemory, &mLookMapped);
     destroyBuffer(mSpectralBuffer, mSpectralMemory, &mSpectralMapped);
     destroyBuffer(mLscBuffer, mLscMemory, &mLscMapped);
@@ -1949,10 +1989,10 @@ void VulkanRawPipeline::computeBarrier(VkCommandBuffer cmd) {
                          0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
-// Records PREP -> ISP -> PYRAMID x5 -> BOKEH -> FILM. Timestamps (if supported):
+// Records PREP -> ISP -> PYRAMID x5 -> BOKEH -> FILM (or just the front / the film pass, see kPass*). Timestamps (if supported):
 // queryBase + 0 start, +1 PREP, +2 ISP, +3 PYRAMID, +4 BOKEH, +5 FILM.
 void VulkanRawPipeline::recordEngine(VkCommandBuffer cmd, FrameTargets& t, PushConstants pc,
-                                     uint32_t rawW, uint32_t rawH, uint32_t queryBase) {
+                                     uint32_t rawW, uint32_t rawH, uint32_t queryBase, uint32_t pass) {
     const bool ts = (mQueryPool != VK_NULL_HANDLE);
     if (ts) {
         vkCmdResetQueryPool(cmd, mQueryPool, queryBase, kQueriesPerPass);
@@ -1968,6 +2008,7 @@ void VulkanRawPipeline::recordEngine(VkCommandBuffer cmd, FrameTargets& t, PushC
     };
     auto groups = [](uint32_t n) { return (n + 15u) / 16u; };
 
+    if (pass != kPassFilm && pass != kPassBack) {
     // Stage 1-2: PREP (sensor resolution)
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipelines[0]);
     push();
@@ -1992,10 +2033,12 @@ void VulkanRawPipeline::recordEngine(VkCommandBuffer cmd, FrameTargets& t, PushC
     }
     pc.level = 0;
     if (ts) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mQueryPool, queryBase + 3);
+    if (pass == kPassFront) return;
+    }
 
     // Stage 8: Super 70mm bokeh (half-res live, full-res master)
     const FrameParamsUbo* u = static_cast<const FrameParamsUbo*>(t.uboMapped);
-    if (u->bokeh[0] > 0.5f) {
+    if (pass != kPassFilm && u->bokeh[0] > 0.5f) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipelines[3]);
         push();
         vkCmdDispatch(cmd, groups(t.bokehExtent.width), groups(t.bokehExtent.height), 1);
@@ -2379,15 +2422,7 @@ bool VulkanRawPipeline::copyLastRenderedRgba(std::vector<uint8_t>& outRgba, int&
 // =============================================================================
 // Offline Master Still Renderer (full native resolution)
 // =============================================================================
-bool VulkanRawPipeline::renderMasterStill(std::vector<uint8_t>& outRgba, int& outW, int& outH) {
-    std::lock_guard<std::mutex> lock(mRenderMutex);
-    if (!mDevice || !mLastFrame.valid) return false;
-    auto cpuStart = std::chrono::high_resolution_clock::now();
-
-    vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
-    uploadPendingSpectral();
-
-    const VkExtent2D ext = masterExtentFor(mLastFrame.width, mLastFrame.height, mLastFrame.sensorOrientation);
+bool VulkanRawPipeline::ensureMasterTargets(VkExtent2D ext) {
     if (mMasterTargets.extent.width != ext.width || mMasterTargets.extent.height != ext.height) {
         vkDeviceWaitIdle(mDevice);
         destroyTargets(mMasterTargets);
@@ -2414,6 +2449,20 @@ bool VulkanRawPipeline::renderMasterStill(std::vector<uint8_t>& outRgba, int& ou
             return false;
         }
     }
+    return true;
+}
+
+bool VulkanRawPipeline::renderMasterStill(std::vector<uint8_t>& outRgba, int& outW, int& outH) {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    if (!mDevice || !mLastFrame.valid) return false;
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+    vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
+
+    if (mMasterPending) { LOGW("Master render requested while a depth render is pending"); return false; }
+    uploadPendingSpectral();
+    const VkExtent2D ext = masterExtentFor(mLastFrame.width, mLastFrame.height, mLastFrame.sensorOrientation);
+    if (!ensureMasterTargets(ext)) return false;
 
     fillFrameParams(mMasterTargets, mLastFrame.camMatrixIdx);
     PushConstants pc;
@@ -2481,6 +2530,302 @@ bool VulkanRawPipeline::renderMasterStill(std::vector<uint8_t>& outRgba, int& ou
     std::chrono::duration<float, std::milli> elapsed = cpuEnd - cpuStart;
     LOGI("Master still %dx%d rendered + read back in %.1f ms (look %d, lens %d, burst %u)",
          outW, outH, elapsed.count(), mActiveLookIdx.load(), mActiveLensIdx.load(), mLastFrame.burstCount);
+    return true;
+}
+
+// =============================================================================
+// Two-step master render (monocular depth bokeh)
+// =============================================================================
+bool VulkanRawPipeline::submitAndWait(VkCommandBuffer cmd) {
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    if (vkQueueSubmit(mQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) return false;
+    return vkQueueWaitIdle(mQueue) == VK_SUCCESS;
+}
+
+// Infinity blur of the virtual 50 mm lens at the dial's f-number and the focus distance, in
+// output pixels (thin lens: CoC = f^2 / (N (s - f)), radius = half of it).
+static float depthInfinityRadiusPx(float fNumber, float diopters, float outLong) {
+    float subjectM = (diopters > 0.05f) ? 1.0f / diopters : 20.0f;
+    subjectM = std::clamp(subjectM, 0.3f, 20.0f);
+    const float cocMm = (kDepthLensMm * kDepthLensMm) /
+                        (std::max(fNumber, 0.5f) * std::max(subjectM * 1000.0f - kDepthLensMm, 1.0f));
+    return 0.5f * cocMm / kDepthSensorLongMm * outLong;
+}
+
+void VulkanRawPipeline::fillDepthParams(FrameTargets& t, bool enable, float focusDisp) {
+    DepthParamsUbo u = {};
+    if (enable) {
+        const float outLong = static_cast<float>(std::max(t.extent.width, t.extent.height));
+        float fNum = mPendingFNumber;
+        // Super 70mm: 52.5 mm gate, so the same f-number is a shallower full-frame equivalent.
+        if (mPendingLens == kSuper70LensIndex) fNum *= kDepthSensorLongMm / kSuper70GateLongMm;
+        const float rInf = depthInfinityRadiusPx(fNum, mPendingDiopters, outLong);
+        const FrameParamsUbo* fp = static_cast<const FrameParamsUbo*>(t.uboMapped);
+        u.a[0] = 1.0f;
+        u.a[1] = rInf;
+        u.a[2] = focusDisp;
+        u.a[3] = std::max(0.8f * outLong / 1024.0f, 0.05f * rInf);
+        u.b[0] = kDepthMaxCocFrac * outLong;
+        u.b[3] = (fp->lfx3[0] > 0.5f) ? fp->lfx3[0] : 9.0f;   // iris blades
+        u.c[0] = 0.6f;     // rounded blades
+        u.c[1] = 0.45f;    // cat's eye at the corners
+        u.c[2] = 0.25f;    // soap-bubble rim
+        u.c[3] = 192.0f;   // max taps
+        u.d[0] = 3.0f;     // clipped-highlight weight
+    }
+    std::memcpy(t.depthUboMapped, &u, sizeof(u));
+}
+
+bool VulkanRawPipeline::masterBegin(int dstW, int dstH, std::vector<uint8_t>& outRgb) {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    if (!mDevice || !mLastFrame.valid || mMasterPending || dstW < 8 || dstH < 8) return false;
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
+    uploadPendingSpectral();
+
+    const VkExtent2D ext = masterExtentFor(mLastFrame.width, mLastFrame.height, mLastFrame.sensorOrientation);
+    if (!ensureMasterTargets(ext)) return false;
+    fillFrameParams(mMasterTargets, mLastFrame.camMatrixIdx);
+    PushConstants pc;
+    fillPushConstants(pc, mLastFrame, mLastFrame.slot, mLastFrame.burstCount);
+
+    // Smallest copy that still covers the network input: pyramid mip m >= 1 (the readback buffer
+    // holds ext w*h*4 bytes, a mip >= 1 of RGBA16F always fits).
+    uint32_t m = 1;
+    while (m < kPyramidLevels && mipDim(ext.width, m + 1) >= static_cast<uint32_t>(dstW) &&
+           mipDim(ext.height, m + 1) >= static_cast<uint32_t>(dstH)) ++m;
+    const uint32_t mw = mipDim(ext.width, m), mh = mipDim(ext.height, m);
+
+    vkResetCommandBuffer(mReadbackCommandBuffer, 0);
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(mReadbackCommandBuffer, &beginInfo);
+    recordEngine(mReadbackCommandBuffer, mMasterTargets, pc,
+                 static_cast<uint32_t>(mLastFrame.width), static_cast<uint32_t>(mLastFrame.height),
+                 kQueriesPerPass, kPassFront);
+    VkMemoryBarrier toTransfer = {};
+    toTransfer.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(mReadbackCommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 1, &toTransfer, 0, nullptr, 0, nullptr);
+    VkBufferImageCopy copyRegion = {};
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.mipLevel = m;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageExtent = {mw, mh, 1};
+    vkCmdCopyImageToBuffer(mReadbackCommandBuffer, mMasterTargets.linearAces.image, VK_IMAGE_LAYOUT_GENERAL,
+                           mMasterReadbackBuffer, 1, &copyRegion);
+    VkMemoryBarrier toHost = {};
+    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(mReadbackCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &toHost, 0, nullptr, 0, nullptr);
+    vkEndCommandBuffer(mReadbackCommandBuffer);
+    if (!submitAndWait(mReadbackCommandBuffer)) {
+        LOGE("Master begin submit failed");
+        return false;
+    }
+
+    // Scene-linear ACEScg -> display sRGB (soft shoulder), then area-average to dstW x dstH.
+    const uint16_t* src = static_cast<const uint16_t*>(mMasterReadbackMapped);
+    std::vector<float> disp(static_cast<size_t>(mw) * mh * 3);
+    for (size_t i = 0; i < static_cast<size_t>(mw) * mh; ++i) {
+        const float r = std::max(halfToFloat(src[i * 4 + 0]), 0.0f);
+        const float g = std::max(halfToFloat(src[i * 4 + 1]), 0.0f);
+        const float b = std::max(halfToFloat(src[i * 4 + 2]), 0.0f);
+        const float lin[3] = {1.70505f * r - 0.62179f * g - 0.08326f * b,
+                              -0.13026f * r + 1.14080f * g - 0.01055f * b,
+                              -0.02400f * r - 0.12897f * g + 1.15297f * b};
+        for (int k = 0; k < 3; ++k) {
+            float x = std::max(lin[k], 0.0f);
+            x = x * (1.0f + x * 0.0625f) / (1.0f + x);
+            x = std::min(x, 1.0f);
+            disp[i * 3 + k] = (x <= 0.0031308f) ? 12.92f * x : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f;
+        }
+    }
+    outRgb.assign(static_cast<size_t>(dstW) * dstH * 3, 0);
+    for (int y = 0; y < dstH; ++y) {
+        const float sy0 = static_cast<float>(y) * mh / dstH, sy1 = static_cast<float>(y + 1) * mh / dstH;
+        for (int x = 0; x < dstW; ++x) {
+            const float sx0 = static_cast<float>(x) * mw / dstW, sx1 = static_cast<float>(x + 1) * mw / dstW;
+            float acc[3] = {0, 0, 0}, wsum = 0.0f;
+            for (int yy = static_cast<int>(sy0); yy < std::min(static_cast<int>(std::ceil(sy1)), static_cast<int>(mh)); ++yy) {
+                const float wy = std::min(sy1, yy + 1.0f) - std::max(sy0, static_cast<float>(yy));
+                for (int xx = static_cast<int>(sx0); xx < std::min(static_cast<int>(std::ceil(sx1)), static_cast<int>(mw)); ++xx) {
+                    const float w = wy * (std::min(sx1, xx + 1.0f) - std::max(sx0, static_cast<float>(xx)));
+                    const float* s = &disp[(static_cast<size_t>(yy) * mw + xx) * 3];
+                    acc[0] += s[0] * w; acc[1] += s[1] * w; acc[2] += s[2] * w;
+                    wsum += w;
+                }
+            }
+            uint8_t* o = &outRgb[(static_cast<size_t>(y) * dstW + x) * 3];
+            for (int k = 0; k < 3; ++k) o[k] = static_cast<uint8_t>(std::clamp(acc[k] / std::max(wsum, 1e-6f), 0.0f, 1.0f) * 255.0f + 0.5f);
+        }
+    }
+
+    mPendingPc = pc;
+    mPendingFrame = mLastFrame;
+    mPendingExtent = ext;
+    mPendingFNumber = mVirtualFNumber.load();
+    mPendingDiopters = mFocusDiopters.load();
+    mPendingLens = mActiveLensIdx.load();
+    mMasterPending = true;
+    std::chrono::duration<float, std::milli> elapsed = std::chrono::high_resolution_clock::now() - cpuStart;
+    LOGI("Master begin %ux%u (PREP+ISP+PYRAMID, %dx%d preview from mip %u) in %.1f ms", ext.width, ext.height,
+         dstW, dstH, m, elapsed.count());
+    return true;
+}
+
+bool VulkanRawPipeline::masterFinish(const float* disparity, int dw, int dh, float focusDisp,
+                                     std::vector<uint8_t>& outRgba, int& outW, int& outH) {
+    std::unique_lock<std::mutex> lock(mRenderMutex);
+    if (!mMasterPending) return false;
+    struct Clear { bool& f; ~Clear() { f = false; } } clear{mMasterPending};
+    if (!mDevice) return false;
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    auto ms = [](std::chrono::high_resolution_clock::time_point a) {
+        return std::chrono::duration<float, std::milli>(std::chrono::high_resolution_clock::now() - a).count();
+    };
+
+    FrameTargets& t = mMasterTargets;
+    const VkExtent2D ext = mPendingExtent;
+    const bool useDepth = disparity && dw >= 8 && dh >= 8 && static_cast<uint32_t>(dw) * dh <= kDepthMaxCells &&
+                          mDepthMapped && t.cocMap.extent.width == ext.width && t.cocMap.extent.height == ext.height;
+    float depthUpMs = 0.0f, bokehMs = 0.0f;
+
+    PushConstants pc = mPendingPc;
+    pc.flags = kFlagGat | kFlagLsc | kFlagMaster | kFlagSpatial;
+    pc.level = 0;
+    auto beginCmd = [&]() {
+        vkResetCommandBuffer(mReadbackCommandBuffer, 0);
+        VkCommandBufferBeginInfo bi = {};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(mReadbackCommandBuffer, &bi);
+        vkCmdBindDescriptorSets(mReadbackCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, mPipelineLayout, 0, 1,
+                                &t.descriptorSet, 0, nullptr);
+    };
+    auto groups = [](uint32_t n) { return (n + 15u) / 16u; };
+
+    if (useDepth) {
+        // Disparity grid (clamped to 0..1) + near-side blur reach: the positive CoC on the grid,
+        // max-dilated by the largest CoC, bounds how far a blurry foreground can spill.
+        const size_t n = static_cast<size_t>(dw) * dh;
+        float* d = mDepthMapped;
+        float* reach = mDepthMapped + n;
+        for (size_t i = 0; i < n; ++i) d[i] = std::clamp(disparity[i], 0.0f, 1.0f);
+        fillDepthParams(t, true, std::clamp(focusDisp, 0.0f, 1.0f));
+        DepthParamsUbo grid = *static_cast<const DepthParamsUbo*>(t.depthUboMapped);
+        grid.b[1] = static_cast<float>(dw);
+        grid.b[2] = static_cast<float>(dh);
+        std::memcpy(t.depthUboMapped, &grid, sizeof(grid));
+        std::vector<float> pos(n);
+        for (size_t i = 0; i < n; ++i) {
+            float cc = std::clamp(grid.a[1] * (d[i] - grid.a[2]) / std::max(grid.a[2], 0.05f), -grid.b[0], grid.b[0]);
+            const float ac = std::fabs(cc);
+            const float x = std::clamp((ac - grid.a[3]) / (2.0f * grid.a[3]), 0.0f, 1.0f);
+            pos[i] = std::max(cc, 0.0f) * x * x * (3.0f - 2.0f * x);
+        }
+        const float cellPx = static_cast<float>(std::max(ext.width, ext.height)) / static_cast<float>(std::max(dw, dh));
+        const int k = static_cast<int>(std::ceil(grid.b[0] / cellPx)) + 1;
+        std::vector<float> tmp(n);
+        for (int y = 0; y < dh; ++y) {
+            for (int x = 0; x < dw; ++x) {
+                float mx = 0.0f;
+                for (int xx = std::max(0, x - k); xx <= std::min(dw - 1, x + k); ++xx) mx = std::max(mx, pos[static_cast<size_t>(y) * dw + xx]);
+                tmp[static_cast<size_t>(y) * dw + x] = mx;
+            }
+        }
+        for (int y = 0; y < dh; ++y) {
+            for (int x = 0; x < dw; ++x) {
+                float mx = 0.0f;
+                for (int yy = std::max(0, y - k); yy <= std::min(dh - 1, y + k); ++yy) mx = std::max(mx, tmp[static_cast<size_t>(yy) * dw + x]);
+                reach[static_cast<size_t>(y) * dw + x] = mx;
+            }
+        }
+        static_cast<FrameParamsUbo*>(t.uboMapped)->bokeh[0] = 1.0f;   // FILM consumes the bokeh image
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        beginCmd();
+        vkCmdBindPipeline(mReadbackCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, mPipelines[5]);
+        vkCmdPushConstants(mReadbackCommandBuffer, mPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &pc);
+        vkCmdDispatch(mReadbackCommandBuffer, groups(ext.width), groups(ext.height), 1);
+        vkEndCommandBuffer(mReadbackCommandBuffer);
+        if (!submitAndWait(mReadbackCommandBuffer)) { LOGE("Depth upsample failed"); return false; }
+        depthUpMs = ms(t0);
+
+        // BOKEH in horizontal bands, each its own submit: the live viewfinder renders in between.
+        t0 = std::chrono::high_resolution_clock::now();
+        const uint32_t bandRows = (((ext.height + kDepthBands - 1) / kDepthBands) + 15u) / 16u * 16u;
+        for (uint32_t y0 = 0; y0 < ext.height; y0 += bandRows) {
+            pc.reserved0 = y0;
+            beginCmd();
+            vkCmdBindPipeline(mReadbackCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, mPipelines[3]);
+            vkCmdPushConstants(mReadbackCommandBuffer, mPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &pc);
+            vkCmdDispatch(mReadbackCommandBuffer, groups(ext.width), groups(std::min(bandRows, ext.height - y0)), 1);
+            vkEndCommandBuffer(mReadbackCommandBuffer);
+            if (!submitAndWait(mReadbackCommandBuffer)) { LOGE("Depth bokeh band failed"); return false; }
+            lock.unlock();
+            lock.lock();
+            if (!mDevice) return false;
+        }
+        pc.reserved0 = 0;
+        bokehMs = ms(t0);
+    } else {
+        fillDepthParams(t, false, 0.0f);
+    }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
+    beginCmd();
+    recordEngine(mReadbackCommandBuffer, t, pc, static_cast<uint32_t>(mPendingFrame.width),
+                 static_cast<uint32_t>(mPendingFrame.height), kQueriesPerPass, useDepth ? kPassFilm : kPassBack);
+    VkMemoryBarrier toTransfer = {};
+    toTransfer.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(mReadbackCommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 1, &toTransfer, 0, nullptr, 0, nullptr);
+    VkBufferImageCopy copyRegion = {};
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageExtent = {ext.width, ext.height, 1};
+    vkCmdCopyImageToBuffer(mReadbackCommandBuffer, t.storageRgba8.image, VK_IMAGE_LAYOUT_GENERAL,
+                           mMasterReadbackBuffer, 1, &copyRegion);
+    VkMemoryBarrier toHost = {};
+    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(mReadbackCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &toHost, 0, nullptr, 0, nullptr);
+    vkEndCommandBuffer(mReadbackCommandBuffer);
+    if (!submitAndWait(mReadbackCommandBuffer)) { LOGE("Master finish submit failed"); return false; }
+    const float filmMs = ms(t1);
+
+    outW = static_cast<int>(ext.width);
+    outH = static_cast<int>(ext.height);
+    const size_t pixels = static_cast<size_t>(outW) * static_cast<size_t>(outH);
+    outRgba.resize(pixels * 4);
+    mMasterGain.resize(pixels);
+    mMasterGainW = outW;
+    mMasterGainH = outH;
+    const uint8_t* src = static_cast<const uint8_t*>(mMasterReadbackMapped);
+    for (size_t i = 0; i < pixels; ++i) {
+        outRgba[i * 4 + 0] = src[i * 4 + 0];
+        outRgba[i * 4 + 1] = src[i * 4 + 1];
+        outRgba[i * 4 + 2] = src[i * 4 + 2];
+        outRgba[i * 4 + 3] = 255;
+        mMasterGain[i] = src[i * 4 + 3];
+    }
+    LOGI("Master finish %dx%d: %s | depth upsample %.1f ms, bokeh %.1f ms (%d bands), film+readback %.1f ms, total %.1f ms (f/%.1f, focus %.2f D, d_f %.3f)",
+         outW, outH, useDepth ? "depth bokeh" : "no depth", depthUpMs, bokehMs, kDepthBands, filmMs, ms(cpuStart),
+         mPendingFNumber, mPendingDiopters, focusDisp);
     return true;
 }
 
@@ -2902,6 +3247,44 @@ Java_com_s24film_camera_VulkanRenderer_nativeRenderMasterStill(
     std::vector<uint8_t> rgba;
     int w = 0, h = 0;
     if (!gPipeline->renderMasterStill(rgba, w, h)) return nullptr;
+    jint dims[2] = {w, h};
+    env->SetIntArrayRegion(outDims, 0, 2, dims);
+    jbyteArray arr = env->NewByteArray(static_cast<jsize>(rgba.size()));
+    if (!arr) return nullptr;
+    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(rgba.size()), reinterpret_cast<const jbyte*>(rgba.data()));
+    return arr;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeMasterBegin(JNIEnv* env, jobject /*thiz*/, jint dstW, jint dstH) {
+    if (!gPipeline) return nullptr;
+    std::vector<uint8_t> rgb;
+    if (!gPipeline->masterBegin(dstW, dstH, rgb)) return nullptr;
+    jbyteArray arr = env->NewByteArray(static_cast<jsize>(rgb.size()));
+    if (!arr) {
+        // No Java copy to run depth on: finish the render without it so the pending state clears.
+        std::vector<uint8_t> dummy;
+        int w = 0, h = 0;
+        gPipeline->masterFinish(nullptr, 0, 0, 0.0f, dummy, w, h);
+        return nullptr;
+    }
+    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(rgb.size()), reinterpret_cast<const jbyte*>(rgb.data()));
+    return arr;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeMasterFinish(
+    JNIEnv* env, jobject /*thiz*/, jfloatArray disparity, jint dw, jint dh, jfloat focusDisp, jintArray outDims)
+{
+    if (!gPipeline || !outDims) return nullptr;
+    std::vector<float> disp;
+    if (disparity && dw > 0 && dh > 0 && env->GetArrayLength(disparity) >= dw * dh) {
+        disp.resize(static_cast<size_t>(dw) * dh);
+        env->GetFloatArrayRegion(disparity, 0, dw * dh, disp.data());
+    }
+    std::vector<uint8_t> rgba;
+    int w = 0, h = 0;
+    if (!gPipeline->masterFinish(disp.empty() ? nullptr : disp.data(), dw, dh, focusDisp, rgba, w, h)) return nullptr;
     jint dims[2] = {w, h};
     env->SetIntArrayRegion(outDims, 0, 2, dims);
     jbyteArray arr = env->NewByteArray(static_cast<jsize>(rgba.size()));

@@ -44,6 +44,7 @@ public class CameraEngine {
     private final Context context;
     private final CameraManager cameraManager;
     private final DngSaver dngSaver;
+    private final DepthBokeh depthBokeh;
     private final ImuTelemetry imuTelemetry;
     private final FrameCallback frameCallback;
 
@@ -163,6 +164,7 @@ public class CameraEngine {
         this.context = context;
         this.cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
         this.dngSaver = dngSaver;
+        this.depthBokeh = new DepthBokeh(context);
         this.imuTelemetry = imuTelemetry;
         this.frameCallback = frameCallback;
     }
@@ -1498,6 +1500,13 @@ public class CameraEngine {
 
             if (capture) {
                 Log.i(TAG, "Capture grip " + activeOrient + " (render " + renderOrient + ", ROT +" + engine.manualRotationOffset + ")");
+                // Depth bokeh: the first half of the master render runs here, the depth network and the
+                // second half on a worker, which also hands the Image to the saver.
+                if (engine.depthBokeh.tryCapture(image, engine.characteristics, engine.latestCaptureResult,
+                        engine.pendingStockShortName, activeOrient, stacked, engine.virtualFNumber,
+                        engine.dngSaver, engine.pendingDngCallback)) {
+                    return;
+                }
                 // Full-resolution master render of this exact frame (ring holds it plus the
                 // previous burst frames), done before the RAW Image goes to the DNG writer.
                 int[] masterDims = new int[2];

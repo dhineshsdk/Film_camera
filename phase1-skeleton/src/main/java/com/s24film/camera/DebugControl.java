@@ -13,6 +13,7 @@ import android.util.Log;
  *   ... --es cmd look --ei idx 24             (kMasterLooks120 index)
  *   ... --es cmd format --ei idx 0..3         (35mm, 16mm, Super 8, 6x7)
  *   ... --es cmd dng --ez on true|false       (keep the RAW DNG)
+ *   ... --es cmd depth --ez on true|false     (depth bokeh on masters at f/5.6 and wider; logs S24FilmDepth)
  * Only acts while the app is running; the shell (adb) is the only sender that can reach it
  * besides the app itself because the action is unique to this package.
  */
@@ -104,6 +105,10 @@ final class DebugControl extends BroadcastReceiver {
                 break;
             case "aperture":
                 engine.setVirtualAperture(intent.getFloatExtra("f", 2.0f));
+                break;
+            case "depth":   // depth bokeh (f/5.6 and wider masters): --ez on true|false
+                DepthBokeh.enabled = intent.getBooleanExtra("on", true);
+                Log.i(TAG, "depth bokeh " + DepthBokeh.enabled);
                 break;
             case "status":
                 Log.i(TAG, "look " + VulkanRenderer.nativeGetActiveLookIndex() + " EI " + engine.getEffectiveEi() + " push " + engine.getPushStops()

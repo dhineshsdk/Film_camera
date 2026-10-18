@@ -12,7 +12,9 @@
 //   STAGE 1  ISP      output res   Hamilton-Adams demosaic, WB, Oklab highlight recovery,
 //                                  ForwardMatrix -> ACEScg, ACES RGC -> mLinearAcesImage mip 0
 //   STAGE 2  PYRAMID  per level    5-level Gaussian mip pyramid of mLinearAcesImage
-//   STAGE 3  BOKEH    half / full  Super 70mm (52.5 x 23 mm, 80 mm f/2.0) 64-tap gather
+//   STAGE 3  BOKEH    half / full  Super 70mm (52.5 x 23 mm, 80 mm f/2.0) 64-tap gather; master with a
+//                                  depth map: scatter-as-gather over the signed CoC map (STAGE 5)
+//   STAGE 5  DEPTH    output res   master only: monocular disparity -> signed CoC map (joint bilateral upsample)
 //   STAGE 4  FILM     output res   TIR halation + Pro-Mist diffusion from the pyramid,
 //                                  120-look spectral matrix + 2D LUT, DIR couplers,
 //                                  Gabor tile grain (live) / Newson Boolean grain (master),
@@ -28,6 +30,7 @@ const uint STAGE_ISP     = 1u;
 const uint STAGE_PYRAMID = 2u;
 const uint STAGE_BOKEH   = 3u;
 const uint STAGE_FILM    = 4u;
+const uint STAGE_DEPTH   = 5u;
 
 const uint FLAG_MASTER  = 1u;  // offline master still render
 const uint FLAG_SPATIAL = 2u;  // PREP: spatial Wiener shrinkage in the Anscombe domain
@@ -113,6 +116,21 @@ layout(binding = 15) uniform sampler2D u_bokeh_tex;
 layout(binding = 16, rgba8) writeonly uniform image2D u_out_rgba8;     // mMasterStorageImage
 layout(binding = 17, rgba16f) writeonly uniform image2D u_out_rgba16;  // live viewfinder image
 
+// Depth bokeh (master only). u_depth: [0, n) normalized disparity (0 = far, 1 = near) on the
+// network's grid, [n, 2n) the nearer-side blur radius (px) max-dilated by the largest CoC.
+layout(std430, binding = 20) readonly buffer DepthBuffer {
+    float u_depth[];
+};
+layout(binding = 21, r32f) writeonly uniform image2D u_coc_out;   // signed CoC radius in output px (+ near, - far)
+layout(binding = 22) uniform sampler2D u_coc_tex;
+
+layout(std140, binding = 23) uniform DepthParams {
+    vec4 d_a;    // x=enable, y=CoC radius at infinity (px), z=focus disparity, w=in-focus tolerance (px)
+    vec4 d_b;    // x=max |CoC| (px), y=grid width, z=grid height, w=iris blades (0 = circle)
+    vec4 d_c;    // x=blade roundness, y=cat's-eye strength, z=rim brightness, w=max taps
+    vec4 d_d;    // x=highlight weight boost
+};
+
 layout(push_constant) uniform PushConstants {
     uint u_width;              // 0   raw width
     uint u_height;             // 4   raw height
@@ -144,7 +162,7 @@ layout(push_constant) uniform PushConstants {
     uint u_packed_ring_info;   // 108 (bits 0..1 slot, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave)
     uint u_level;              // 112 PYRAMID destination level (1..5)
     uint u_flags;              // 116 FLAG_*
-    uint u_reserved0;          // 120
+    uint u_reserved0;          // 120 BOKEH (depth): first row of the band
     uint u_reserved1;          // 124
 };
 
@@ -592,6 +610,8 @@ void stagePyramid() {
 // =============================================================================
 // STAGE 3: Super 70mm IMAX shallow bokeh gather (CoC in output pixels)
 // =============================================================================
+void stageBokehDepth();
+
 float cocAt(vec2 uv, vec2 outSize) {
     vec2 d = (uv - f_bokeh.zw) * vec2(outSize.x / outSize.y, 1.0);
     float r = length(d);
@@ -599,6 +619,7 @@ float cocAt(vec2 uv, vec2 outSize) {
 }
 
 void stageBokeh() {
+    if (d_a.x > 0.5) { stageBokehDepth(); return; }
     ivec2 bSize = imageSize(u_bokeh_out);
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= bSize.x || p.y >= bSize.y) return;
@@ -632,6 +653,139 @@ void stageBokeh() {
     vec3 center = textureLod(u_aces_pyramid, uv, 0.0).rgb;
     vec3 result = (wAcc > 1e-4) ? acc / wAcc : center;
     imageStore(u_bokeh_out, p, vec4(result, coc));
+}
+
+// =============================================================================
+// STAGE 5 + depth mode of STAGE 3: monocular-depth bokeh (master only)
+// =============================================================================
+float depthCoc(float d) {
+    float c = d_a.y * (d - d_a.z) / max(d_a.z, 0.05);
+    c = clamp(c, -d_b.x, d_b.x);
+    float ac = abs(c);
+    return c * smoothstep(d_a.w, 3.0 * d_a.w, ac);   // soft in-focus zone, no hard mask edge
+}
+
+vec3 depthGuide(vec3 c) {
+    return c / (c + 0.25);
+}
+
+// Joint bilateral upsample of the network's disparity grid, guided by the scene.
+void stageDepth() {
+    ivec2 size = imageSize(u_coc_out);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) return;
+
+    ivec2 gs = ivec2(d_b.y, d_b.z);
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    vec2 g = uv * vec2(gs) - 0.5;
+    ivec2 i0 = ivec2(floor(g));
+    vec3 gp = depthGuide(textureLod(u_aces_pyramid, uv, 1.0).rgb);
+
+    float num = 0.0, den = 0.0;
+    for (int dy = -1; dy <= 2; ++dy) {
+        for (int dx = -1; dx <= 2; ++dx) {
+            ivec2 q = clamp(i0 + ivec2(dx, dy), ivec2(0), gs - 1);
+            vec2 dq = vec2(q) - g;
+            float ws = exp(-dot(dq, dq) / (2.0 * 0.81));
+            vec3 gq = depthGuide(textureLod(u_aces_pyramid, (vec2(q) + 0.5) / vec2(gs), 1.0).rgb);
+            vec3 dg = gp - gq;
+            float wr = exp(-dot(dg, dg) / (2.0 * 0.01));
+            float w = ws * (wr + 1e-4);
+            num += w * u_depth[q.y * gs.x + q.x];
+            den += w;
+        }
+    }
+    imageStore(u_coc_out, p, vec4(depthCoc(num / max(den, 1e-8)), 0.0, 0.0, 0.0));
+}
+
+// Radius of the (unit-circumradius) iris polygon along direction th; the gather region is the
+// scatter shape turned 180 degrees.
+float irisRho(float th) {
+    int n = int(d_b.w + 0.5);
+    if (n < 3) return 1.0;
+    float seg = 6.2831853 / float(n);
+    float a = mod(th + 3.14159265, seg) - 0.5 * seg;
+    float poly = cos(3.14159265 / float(n)) / cos(a);
+    return mix(poly, 1.0, d_c.x);
+}
+
+float blendToAlpha(float s) {
+    // FILM mixes with smoothstep(0.75, 2.0, alpha): invert it so alpha carries the blend factor.
+    s = clamp(s, 0.0, 1.0);
+    return 0.75 + 1.25 * (0.5 - sin(asin(1.0 - 2.0 * s) / 3.0));
+}
+
+float depthFgReach(vec2 uv) {
+    ivec2 gs = ivec2(d_b.y, d_b.z);
+    int n = gs.x * gs.y;
+    vec2 g = uv * vec2(gs) - 0.5;
+    ivec2 i0 = ivec2(floor(g));
+    vec2 f = g - vec2(i0);
+    ivec2 a = clamp(i0, ivec2(0), gs - 1);
+    ivec2 b = clamp(i0 + 1, ivec2(0), gs - 1);
+    float v00 = u_depth[n + a.y * gs.x + a.x], v10 = u_depth[n + a.y * gs.x + b.x];
+    float v01 = u_depth[n + b.y * gs.x + a.x], v11 = u_depth[n + b.y * gs.x + b.x];
+    return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+}
+
+void stageBokehDepth() {
+    ivec2 bSize = imageSize(u_bokeh_out);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    p.y += int(u_reserved0);
+    if (p.x >= bSize.x || p.y >= bSize.y) return;
+
+    vec2 size = vec2(bSize);
+    vec2 uv = (vec2(p) + 0.5) / size;
+    float cc = texelFetch(u_coc_tex, p, 0).r;
+    float absCc = abs(cc);
+    float Rs = max(absCc, depthFgReach(uv));
+    vec3 centre = textureLod(u_aces_pyramid, uv, 0.0).rgb;
+    if (Rs < 0.6) {
+        imageStore(u_bokeh_out, p, vec4(centre, 0.0));
+        return;
+    }
+
+    int taps = int(clamp(Rs * 0.9 + 16.0, 16.0, d_c.w));
+    float spacing = Rs * 1.7725 / sqrt(float(taps));
+    float lod = clamp(log2(max(spacing, 1.0)), 0.0, 5.0);
+    const float GOLDEN_ANGLE = 2.39996323;
+    float rot = hash3f(uvec3(uint(p.x), uint(p.y), 0x9e37u)).x * 6.2831853;
+
+    // Cat's eye: toward the frame edge the aperture is clipped to a lens (two shifted circles).
+    vec2 dv = (uv - 0.5) * vec2(size.x / size.y, 1.0);
+    vec2 sh = 0.5 * d_c.y * dv / length(vec2(0.5 * size.x / size.y, 0.5));
+
+    vec3 acc = vec3(0.0);
+    float wAcc = 0.0, blur = 0.0;
+    for (int i = 0; i < taps; ++i) {
+        float rr = sqrt((float(i) + 0.5) / float(taps));
+        float th = float(i) * GOLDEN_ANGLE + rot;
+        float rho = irisRho(th);
+        vec2 o = rr * rho * vec2(cos(th), sin(th));
+        float shape = smoothstep(1.04, 0.96, max(length(o - sh), length(o + sh)));
+        vec2 tpos = vec2(p) + 0.5 + o * Rs;
+        float cs = texelFetch(u_coc_tex, clamp(ivec2(tpos), ivec2(0), bSize - 1), 0).r;
+        vec3 s = textureLod(u_aces_pyramid, tpos / size, lod).rgb;
+        float acs = abs(cs);
+        // Farther samples may not spread past the centre's own blur, so a sharp foreground
+        // stays clean; nearer (blurrier) samples spill over a sharp background.
+        float farther = smoothstep(0.0, 2.0, cc - cs);
+        float reachR = mix(acs, min(acs, absCc), farther);
+        float reach = clamp(reachR - rr * Rs + 1.0, 0.0, 1.0);
+        float w = reach / max(reachR * reachR, 1.0);
+        w *= (1.0 + d_d.x * smoothstep(0.9, 2.5, luminanceAP1(s)))      // clipped highlights form discs
+           * (1.0 + d_c.z * smoothstep(0.75, 1.0, rr))                  // faint soap-bubble rim
+           * shape * rho * rho;
+        acc += s * w;
+        wAcc += w;
+        blur += w * smoothstep(0.75, 2.0, reachR);
+    }
+    float wc = (1.0 + d_d.x * smoothstep(0.9, 2.5, luminanceAP1(centre))) / max(absCc * absCc, 1.0);
+    acc += centre * wc;
+    wAcc += wc;
+
+    float amt = max(clamp(blur / max(wAcc, 1e-6), 0.0, 1.0), smoothstep(0.75, 2.0, absCc));
+    imageStore(u_bokeh_out, p, vec4(acc / max(wAcc, 1e-6), blendToAlpha(amt)));
 }
 
 // =============================================================================
@@ -1328,6 +1482,8 @@ void main() {
         stagePyramid();
     } else if (STAGE == STAGE_BOKEH) {
         stageBokeh();
+    } else if (STAGE == STAGE_DEPTH) {
+        stageDepth();
     } else {
         stageFilm();
     }

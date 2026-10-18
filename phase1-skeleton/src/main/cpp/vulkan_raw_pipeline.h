@@ -111,6 +111,15 @@ struct LookGpu {
 };
 static_assert(sizeof(LookGpu) == 176, "LookGpu layout mismatch");
 
+// std140 mirror of DepthParams in demosaic.comp (binding 23).
+struct DepthParamsUbo {
+    float a[4];   // enable, CoC radius at infinity (px), focus disparity, in-focus tolerance (px)
+    float b[4];   // max |CoC| (px), disparity grid width, height, iris blades
+    float c[4];   // blade roundness, cat's-eye strength, rim brightness, max taps
+    float d[4];   // highlight weight boost
+};
+static_assert(sizeof(DepthParamsUbo) == 64, "DepthParamsUbo layout mismatch");
+
 struct GpuImage {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -131,6 +140,10 @@ struct FrameTargets {
     GpuImage bokeh;             // RGBA16F, half-res live / full-res master
     GpuImage storageRgba8;      // mMasterStorageImage (master) / 1x1 dummy (live)
     GpuImage storageRgba16;     // live viewfinder output (live) / 1x1 dummy (master)
+    GpuImage cocMap;            // R32F signed CoC in output px (master, depth bokeh) / 1x1 dummy (live)
+    VkBuffer depthUbo = VK_NULL_HANDLE;   // DepthParamsUbo
+    VkDeviceMemory depthUboMemory = VK_NULL_HANDLE;
+    void* depthUboMapped = nullptr;
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory uboMemory = VK_NULL_HANDLE;
     void* uboMapped = nullptr;
@@ -155,7 +168,7 @@ struct LastFrameState {
 
 class VulkanRawPipeline {
 public:
-    static constexpr uint32_t kStageCount = 5;
+    static constexpr uint32_t kStageCount = 6;
     static constexpr uint32_t kPyramidLevels = 5;      // mips 1..5 on top of the base
     static constexpr uint32_t kFlagMaster = 1u;
     static constexpr uint32_t kFlagSpatial = 2u;
@@ -195,6 +208,14 @@ public:
                          int sensorOrientation, int camMatrixIdx);
     bool copyLastRenderedRgba(std::vector<uint8_t>& outRgba, int& outW, int& outH);
     bool renderMasterStill(std::vector<uint8_t>& outRgba, int& outW, int& outH);
+    // Two-step master render so monocular depth can run off the camera thread. Begin renders
+    // PREP + ISP + PYRAMID into the master targets and returns a small sRGB 8-bit RGB copy of the
+    // scene (dstW x dstH x 3, for the depth network). Finish adds the depth bokeh (disparity
+    // normalized 0 = far .. 1 = near, w x h; null = no depth, plain master path), FILM and the
+    // readback exactly like renderMasterStill. Exactly one Finish must follow every successful Begin.
+    bool masterBegin(int dstW, int dstH, std::vector<uint8_t>& outRgb);
+    bool masterFinish(const float* disparity, int dw, int dh, float focusDisp,
+                      std::vector<uint8_t>& outRgba, int& outW, int& outH);
     bool copyMasterGainmap(std::vector<uint8_t>& outGain, int& outW, int& outH);
 
     // Multi-frame stacking on the frames already held in the RAW ring (no extra camera streams).
@@ -255,8 +276,15 @@ private:
     void destroyTargets(FrameTargets& t);
     void writeTargetDescriptors(FrameTargets& t);
     void fillFrameParams(FrameTargets& t, int camMatrixIdx);
+    static constexpr uint32_t kPassAll = 0;     // PREP .. FILM
+    static constexpr uint32_t kPassFront = 1;   // PREP, ISP, PYRAMID
+    static constexpr uint32_t kPassFilm = 2;    // FILM only (depth bokeh already recorded)
+    static constexpr uint32_t kPassBack = 3;    // Super 70mm BOKEH (if enabled) + FILM
     void recordEngine(VkCommandBuffer cmd, FrameTargets& t, PushConstants pc,
-                      uint32_t rawW, uint32_t rawH, uint32_t queryBase);
+                      uint32_t rawW, uint32_t rawH, uint32_t queryBase, uint32_t pass = kPassAll);
+    bool ensureMasterTargets(VkExtent2D ext);
+    bool submitAndWait(VkCommandBuffer cmd);
+    void fillDepthParams(FrameTargets& t, bool enable, float focusDisp);
     void computeBarrier(VkCommandBuffer cmd);
     void fillPushConstants(PushConstants& pc, const LastFrameState& st, uint32_t slot, uint32_t burstCnt);
     void logTimestamps(const char* label, uint32_t queryBase, uint32_t count);
@@ -338,6 +366,20 @@ private:
     std::atomic<int> mSpectralWanted{-2};
     void requestSpectralTables(int lookIndex);
     void uploadPendingSpectral();
+
+    VkBuffer mDepthBuffer = VK_NULL_HANDLE;       // disparity grid + dilated near-side CoC (host visible)
+    VkDeviceMemory mDepthMemory = VK_NULL_HANDLE;
+    float* mDepthMapped = nullptr;
+    static constexpr uint32_t kDepthMaxCells = 1024u * 1024u;
+
+    // Master render split in two (masterBegin / masterFinish): state frozen at Begin.
+    bool mMasterPending = false;
+    PushConstants mPendingPc = {};
+    LastFrameState mPendingFrame;
+    VkExtent2D mPendingExtent = {0, 0};
+    float mPendingFNumber = 2.0f;
+    float mPendingDiopters = 0.0f;
+    int mPendingLens = 0;
 
     GpuImage mLookLutImage;        // 256 x 120 RGBA32F (RGBA16F if 32F linear filtering is unsupported)
     GpuImage mGrainTileImage;      // 512 x 512 RGBA16F tileable Gabor noise

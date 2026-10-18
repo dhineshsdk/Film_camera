@@ -58,6 +58,13 @@ public class VulkanRenderer {
     public static native byte[] nativeCaptureLastRgba(int[] outDims);
     // Full-resolution offline master render of the last RAW frame (RGBA8, alpha = 255).
     public static native byte[] nativeRenderMasterStill(int[] outDims);
+    // Two-step master render for depth bokeh. Begin renders PREP + ISP + PYRAMID and returns a
+    // dstW x dstH sRGB RGB copy (3 bytes per pixel) of the scene, or null (busy / no frame). Every
+    // successful Begin must be followed by exactly one Finish: disparity normalized 0 = far .. 1 =
+    // near (dw x dh, row major) or null to render without depth; focusDisp is the in-focus disparity.
+    // Finish returns RGBA8 like nativeRenderMasterStill; the gain plane is then nativeGetMasterGainmap.
+    public static native byte[] nativeMasterBegin(int dstW, int dstH);
+    public static native byte[] nativeMasterFinish(float[] disparity, int dw, int dh, float focusDisp, int[] outDims);
     // Ultra HDR gain plane from the last master render (log2(gain)/log2(3), 8-bit).
     public static native byte[] nativeGetMasterGainmap(int[] outDims);
     // Multi-frame stacking on the frames already in the RAW ring. Mode: 0 burst average, 1 HDR bracket,
