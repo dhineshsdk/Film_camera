@@ -1012,6 +1012,7 @@ bool VulkanRawPipeline::loadLookLut() {
             case s24film::LookCategory::MOTION_PICTURE_ECN2:   dirBoost = 0.10f; break;
             case s24film::LookCategory::COLOR_REVERSAL_SLIDE:  dirBoost = 0.06f; break;
             case s24film::LookCategory::FUJIFILM_SIMULATION:   dirBoost = 0.08f; break;
+            case s24film::LookCategory::CREATIVE_INSTANT_EXPIRED: dirBoost = 0.10f; break;
             default:                                            dirBoost = 0.0f; break;
         }
 

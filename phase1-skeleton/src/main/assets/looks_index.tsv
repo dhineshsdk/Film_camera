@@ -120,96 +120,96 @@
 119	6	fuji_sim_sepia	Fujifilm SEPIA (Warm Sulfide)	0
 120	1	cinestill_50d	CineStill 50 Daylight	50
 121	1	cinestill_400d	CineStill 400 Daylight	400
-122	1	cinestill_800t	CineStill 800 Tungsten	800
-123	1	cinestill_850d	CineStill 850 Daylight	800
+122	7	cinestill_800t	CineStill 800 Tungsten	800
+123	7	cinestill_850d	CineStill 850 Daylight	800
 124	3	cinestill_bwxx	CineStill BwXX	250
-125	1	kodak_vision3_500t_bleach	Vision3 500T Bleach Bypass	500
-126	1	kodak_vision3_250d_bleach	Vision3 250D Bleach Bypass	250
-127	1	kodak_vision3_500t_push1	Vision3 500T Push +1	1000
-128	1	kodak_vision3_200t_tungsten_day	Vision3 200T Daylight No 85	200
+125	7	kodak_vision3_500t_bleach	Vision3 500T Bleach Bypass	500
+126	7	kodak_vision3_250d_bleach	Vision3 250D Bleach Bypass	250
+127	7	kodak_vision3_500t_push1	Vision3 500T Push +1	1000
+128	7	kodak_vision3_200t_tungsten_day	Vision3 200T Daylight No 85	200
 129	2	kodak_ektachrome_64t	Kodak Ektachrome 64T	64
 130	2	kodak_ektachrome_160t	Kodak Ektachrome 160T	160
 131	0	kodak_colorplus_200	Kodak ColorPlus 200	200
 132	0	kodak_gold_100	Kodak Gold 100	100
 133	0	kodak_gold_400	Kodak Gold 400	400
-134	0	kodak_ultramax_800	Kodak Ultramax 800	800
+134	7	kodak_ultramax_800	Kodak Ultramax 800	800
 135	0	kodak_pro_image_100	Kodak Pro Image 100	100
 136	0	kodak_portra_160nc	Kodak Portra 160NC	160
 137	0	kodak_portra_160vc	Kodak Portra 160VC	160
-138	0	kodak_portra_100t	Kodak Portra 100T	100
+138	7	kodak_portra_100t	Kodak Portra 100T	100
 139	0	kodak_portra_400_push1	Portra 400 Push +1	800
-140	0	kodak_portra_400_push2	Portra 400 Push +2	1600
+140	7	kodak_portra_400_push2	Portra 400 Push +2	1600
 141	0	kodak_portra_400_pull1	Portra 400 Pull -1	200
 142	0	kodak_ektar_100_push1	Ektar 100 Push +1	200
-143	0	kodak_kodacolor_vr_200	Kodacolor VR 200	200
+143	7	kodak_kodacolor_vr_200	Kodacolor VR 200	200
 144	0	kodak_kodacolor_vr_400	Kodacolor VR 400	400
-145	0	kodak_color_neg_ii_5247	Kodak Color Negative II 5247	100
+145	7	kodak_color_neg_ii_5247	Kodak Color Negative II 5247	100
 146	0	kodak_max_versatility_800	Kodak Max Versatility 800	800
-147	0	fuji_superia_100	Fujicolor Superia 100	100
-148	0	fuji_superia_200	Fujicolor Superia 200	200
+147	7	fuji_superia_100	Fujicolor Superia 100	100
+148	7	fuji_superia_200	Fujicolor Superia 200	200
 149	0	fuji_superia_premium_400	Fujicolor Superia Premium 400	400
 150	0	fuji_superia_800	Fujicolor Superia 800	800
 151	0	fuji_fujicolor_100	Fujicolor 100	100
-152	0	fuji_industrial_100	Fujicolor Industrial 100	100
-153	0	fuji_press_800	Fujicolor Press 800	800
+152	7	fuji_industrial_100	Fujicolor Industrial 100	100
+153	7	fuji_press_800	Fujicolor Press 800	800
 154	0	agfa_vista_plus_200	Agfa Vista Plus 200	200
 155	0	agfa_vista_plus_400	Agfa Vista Plus 400	400
 156	0	konica_centuria_400	Konica Centuria 400	400
 157	0	konica_vx_400	Konica VX 400	400
-158	0	harman_phoenix_200	Harman Phoenix 200	200
-159	0	harman_phoenix_ii_200	Harman Phoenix II 200	200
+158	7	harman_phoenix_200	Harman Phoenix 200	200
+159	7	harman_phoenix_ii_200	Harman Phoenix II 200	200
 160	0	lomo_color_100	Lomography Color Negative 100	100
 161	0	lomo_color_400	Lomography Color Negative 400	400
 162	0	lomo_color_800	Lomography Color Negative 800	800
-163	0	lomochrome_color_92	LomoChrome Color '92	400
-164	1	lomochrome_purple	LomoChrome Purple	400
-165	0	lomochrome_metropolis	LomoChrome Metropolis	400
-166	0	lomochrome_turquoise	LomoChrome Turquoise	400
-167	0	lomo_redscale_xr	LomoChrome Redscale XR	200
-168	0	harman_red_125	Harman Red 125	125
+163	7	lomochrome_color_92	LomoChrome Color '92	400
+164	7	lomochrome_purple	LomoChrome Purple	400
+165	7	lomochrome_metropolis	LomoChrome Metropolis	400
+166	7	lomochrome_turquoise	LomoChrome Turquoise	400
+167	7	lomo_redscale_xr	LomoChrome Redscale XR	200
+168	7	harman_red_125	Harman Red 125	125
 169	2	lomo_slide_xpro_200	Lomography X-Pro Slide 200	200
-170	0	polaroid_600_color	Polaroid 600 Color	640
+170	7	polaroid_600_color	Polaroid 600 Color	640
 171	2	polaroid_sx70_color	Polaroid SX-70 Color	160
-172	0	polaroid_itype_color	Polaroid i-Type Color	640
-173	0	polaroid_originals_color	Polaroid Originals Color	640
-174	0	impossible_project_color	Impossible Project Color	640
-175	0	fuji_instax_mini_color	Fujifilm Instax Mini	800
-176	0	fuji_instax_wide_color	Fujifilm Instax Wide	800
+172	7	polaroid_itype_color	Polaroid i-Type Color	640
+173	7	polaroid_originals_color	Polaroid Originals Color	640
+174	7	impossible_project_color	Impossible Project Color	640
+175	7	fuji_instax_mini_color	Fujifilm Instax Mini	800
+176	7	fuji_instax_wide_color	Fujifilm Instax Wide	800
 177	2	fuji_fp100c	Fujifilm FP-100C (Peel-Apart)	100
-178	3	polaroid_bw_669	Polaroid Type 667 B&W	3000
-179	3	fuji_instax_bw	Fujifilm Instax Monochrome	800
-180	3	polaroid_bw_600	Polaroid 600 B&W	640
-181	0	expired_portra_400_10y	Portra 400, 10 yr Expired	320
-182	0	expired_portra_400_20y	Portra 400, 20 yr Expired	200
-183	0	expired_gold_200_90s	Gold 200, 1990s Expired	100
-184	0	expired_ektar_100	Ektar 100, Expired	80
-185	0	expired_superia_400	Superia X-TRA 400, Expired	250
-186	1	expired_vision3_500t	Vision3 500T, Expired	320
+178	7	polaroid_bw_669	Polaroid Type 667 B&W	3000
+179	7	fuji_instax_bw	Fujifilm Instax Monochrome	800
+180	7	polaroid_bw_600	Polaroid 600 B&W	640
+181	7	expired_portra_400_10y	Portra 400, 10 yr Expired	320
+182	7	expired_portra_400_20y	Portra 400, 20 yr Expired	200
+183	7	expired_gold_200_90s	Gold 200, 1990s Expired	100
+184	7	expired_ektar_100	Ektar 100, Expired	80
+185	7	expired_superia_400	Superia X-TRA 400, Expired	250
+186	7	expired_vision3_500t	Vision3 500T, Expired	320
 187	2	expired_ektachrome_e100	Ektachrome E100, Expired	80
 188	2	expired_velvia_50	Velvia 50, Expired	40
 189	2	expired_provia_100f	Provia 100F, Expired	80
 190	2	expired_kodachrome_64	Kodachrome 64, Expired	50
-191	3	expired_trix_400	Tri-X 400, Expired	250
-192	3	expired_hp5_plus	HP5 Plus, Expired	250
-193	3	expired_fp4_plus	FP4 Plus, Expired	80
+191	7	expired_trix_400	Tri-X 400, Expired	250
+192	7	expired_hp5_plus	HP5 Plus, Expired	250
+193	7	expired_fp4_plus	FP4 Plus, Expired	80
 194	2	xpro_e100_in_c41	Ektachrome E100 Cross (C-41)	100
 195	2	xpro_provia_in_c41	Provia 100F Cross (C-41)	100
 196	2	xpro_velvia_in_c41	Velvia 50 Cross (C-41)	50
 197	2	xpro_astia_in_c41	Astia 100F Cross (C-41)	100
 198	2	xpro_precisa_in_c41	Agfa CT Precisa Cross (C-41)	100
 199	2	xpro_kodachrome_c41	Kodachrome 64 Cross (C-41)	64
-200	0	xpro_portra_in_e6	Portra 400 Cross (E-6)	400
-201	0	xpro_gold_in_e6	Gold 200 Cross (E-6)	200
-202	0	xpro_superia_in_e6	Superia X-TRA 400 Cross (E-6)	400
-203	0	bleach_bypass_portra_400	Portra 400 Bleach Bypass	400
-204	0	bleach_bypass_gold_200	Gold 200 Bleach Bypass	200
-205	0	bleach_bypass_ektar_100	Ektar 100 Bleach Bypass	100
+200	7	xpro_portra_in_e6	Portra 400 Cross (E-6)	400
+201	7	xpro_gold_in_e6	Gold 200 Cross (E-6)	200
+202	7	xpro_superia_in_e6	Superia X-TRA 400 Cross (E-6)	400
+203	7	bleach_bypass_portra_400	Portra 400 Bleach Bypass	400
+204	7	bleach_bypass_gold_200	Gold 200 Bleach Bypass	200
+205	7	bleach_bypass_ektar_100	Ektar 100 Bleach Bypass	100
 206	3	kodak_trix_400_push1	Tri-X 400 Push +1 (800)	800
-207	3	kodak_trix_400_push2	Tri-X 400 Push +2 (1600)	1600
-208	3	kodak_trix_400_push3	Tri-X 400 Push +3 (3200)	3200
+207	7	kodak_trix_400_push2	Tri-X 400 Push +2 (1600)	1600
+208	7	kodak_trix_400_push3	Tri-X 400 Push +3 (3200)	3200
 209	3	ilford_hp5_push1	HP5 Plus Push +1 (800)	800
 210	3	ilford_hp5_push2	HP5 Plus Push +2 (1600)	1600
-211	3	ilford_hp5_push3	HP5 Plus Push +3 (3200)	3200
+211	7	ilford_hp5_push3	HP5 Plus Push +3 (3200)	3200
 212	3	kodak_tmax_400_push2	T-Max 400 Push +2 (1600)	1600
 213	3	ilford_delta_400_push2	Delta 400 Push +2 (1600)	1600
 214	3	kodak_trix_400_pull1	Tri-X 400 Pull -1 (200)	200
@@ -217,7 +217,7 @@
 216	3	kentmere_pan_400	Kentmere Pan 400	400
 217	3	rollei_retro_80s	Rollei Retro 80S	80
 218	3	rollei_retro_400s	Rollei Retro 400S	400
-219	3	rollei_ir_400	Rollei Infrared 400	400
+219	7	rollei_ir_400	Rollei Infrared 400	400
 220	3	rollei_ortho_25	Rollei Ortho 25 Plus	25
 221	3	rollei_superpan_200	Rollei Superpan 200	200
 222	3	adox_chs_100	Adox CHS 100 II	100
@@ -225,15 +225,15 @@
 224	3	orwo_n74_plus	ORWO N74 Plus	400
 225	3	efke_kb25	Efke KB25	25
 226	3	efke_kb100	Efke KB100	100
-227	3	shanghai_gp3	Shanghai GP3 100	100
+227	7	shanghai_gp3	Shanghai GP3 100	100
 228	3	lomo_lady_grey_400	Lomography Lady Grey 400	400
 229	3	lomo_earl_grey_100	Lomography Earl Grey 100	100
 230	3	lomo_berlin_kino_400	Lomography Berlin Kino 400	400
 231	3	kodak_panatomic_x	Kodak Panatomic-X	32
-232	3	toned_selenium	Tri-X 400, Selenium Toned	400
-233	3	toned_sepia	FP4 Plus, Sepia Toned	125
-234	3	toned_cyanotype	Cyanotype Print	125
-235	3	toned_gold	HP5 Plus, Gold Toned	400
+232	7	toned_selenium	Tri-X 400, Selenium Toned	400
+233	7	toned_sepia	FP4 Plus, Sepia Toned	125
+234	7	toned_cyanotype	Cyanotype Print	125
+235	7	toned_gold	HP5 Plus, Gold Toned	400
 236	2	technicolor_3strip	Technicolor 3-Strip	8
 237	2	technicolor_2strip	Technicolor 2-Strip	8
 238	2	kodachrome_40_type_a	Kodachrome 40 Type A	40

@@ -15,10 +15,10 @@ import java.util.Set;
 final class LookCatalog {
     static final String[] CATEGORY_NAMES = {
         "C-41 Colour Neg", "ECN-2 Motion Picture", "Slide (E-6 / K-14)", "Black & White",
-        "Print / Paper", "Digital Cinema", "Fujifilm Sims"
+        "Print / Paper", "Digital Cinema", "Fujifilm Sims", "Creative / Instant / Expired"
     };
     static final int[] CATEGORY_COLORS = {
-        0xFFE59A2B, 0xFF2D6CC0, 0xFF2E8B3D, 0xFF8E8E8E, 0xFFB5651D, 0xFF3A3A3A, 0xFFC2185B
+        0xFFE59A2B, 0xFF2D6CC0, 0xFF2E8B3D, 0xFF8E8E8E, 0xFFB5651D, 0xFF3A3A3A, 0xFFC2185B, 0xFF7B3FA0
     };
 
     static final class Look {

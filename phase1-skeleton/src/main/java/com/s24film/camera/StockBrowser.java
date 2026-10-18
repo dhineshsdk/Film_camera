@@ -29,9 +29,9 @@ import java.util.Locale;
 final class StockBrowser {
     interface Listener { void onLookPicked(int lookIndex); }
 
-    // Tabs: 0 = All, 1 = Favourites, 2 = Recent, 3.. = categories 0..6
+    // Tabs: 0 = All, 1 = Favourites, 2 = Recent, 3.. = categories 0..7
     private static final String[] TAB_LABELS = {
-        "All", "★ Favourites", "Recent", "C-41", "ECN-2", "Slide", "B&W", "Print", "Cinema", "Fuji Sims"
+        "All", "★ Favourites", "Recent", "C-41", "ECN-2", "Slide", "B&W", "Print", "Cinema", "Fuji Sims", "Creative"
     };
 
     private final Context ctx;

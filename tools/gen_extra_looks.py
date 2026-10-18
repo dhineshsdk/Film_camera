@@ -18,20 +18,24 @@ HDR = ROOT / "cpp/Master120LooksDatabase.h"
 BASE = 120
 COLS = 256
 CATS = ["COLOR_NEGATIVE_C41", "MOTION_PICTURE_ECN2", "COLOR_REVERSAL_SLIDE", "BLACK_AND_WHITE",
-        "PRINT_STOCK_AND_PAPER", "DIGITAL_CINEMA_CAMERA", "FUJIFILM_SIMULATION"]
+        "PRINT_STOCK_AND_PAPER", "DIGITAL_CINEMA_CAMERA", "FUJIFILM_SIMULATION", "CREATIVE_INSTANT_EXPIRED"]
 
 # id, display name, parent id, box ISO, ops. Category follows the parent unless 'cat' is given.
 # ops: c contrast about mid grey, s colour saturation, sh per-layer exposure shift in log10 E
-# (R,G,B; + = film behaves as if it saw less light on that layer), fog density added to the
-# whole curve (base fog / expiry), tint per-layer density multiplier, g grain x, h halation x.
+# (R,G,B; + = film behaves as if it saw less light on that layer), fog = shadow fade (density
+# bump in the toe, black point kept: the shader subtracts base fog, so a flat offset would vanish),
+# tint per-layer density multiplier, g grain x, h halation x, hal = absolute halation.
+# The printed colour-negative path (C-41 / ECN-2 / Fuji sims) re-neutralises the grey axis and
+# removes the black, so casts, fade and tints die there. Any look that relies on them is moved to
+# category 7 (scanned straight, no print stage); toned B&W also gets a luminance matrix.
 L = []
 def add(i, n, p, iso, **o): L.append((i, n, p, iso, o))
 
 # --- CineStill / cine stocks run as stills ----------------------------------------------------
-add("cinestill_50d", "CineStill 50 Daylight", "kodak_vision3_50d", 50, h=2.2, c=1.02)
-add("cinestill_400d", "CineStill 400 Daylight", "kodak_vision3_250d", 400, h=2.2, g=1.35, c=1.05)
-add("cinestill_800t", "CineStill 800 Tungsten", "kodak_vision3_500t", 800, h=3.0, g=1.3, c=1.04)
-add("cinestill_850d", "CineStill 850 Daylight", "kodak_vision3_500t", 800, h=2.8, sh=(-.04, 0, .05), g=1.4)
+add("cinestill_50d", "CineStill 50 Daylight", "kodak_vision3_50d", 50, hal=.30, c=1.02)
+add("cinestill_400d", "CineStill 400 Daylight", "kodak_vision3_250d", 400, hal=.32, g=1.35, c=1.05)
+add("cinestill_800t", "CineStill 800 Tungsten", "kodak_vision3_500t", 800, hal=.55, g=1.3, c=1.08, sh=(.12, 0, -.16))
+add("cinestill_850d", "CineStill 850 Daylight", "kodak_vision3_500t", 800, hal=.50, sh=(.04, 0, -.06), g=1.4, c=1.1)
 add("cinestill_bwxx", "CineStill BwXX", "kodak_double_x_5222", 250, h=1.6)
 add("kodak_vision3_500t_bleach", "Vision3 500T Bleach Bypass", "kodak_vision3_500t", 500, c=1.28, s=.55, fog=.03, g=1.2)
 add("kodak_vision3_250d_bleach", "Vision3 250D Bleach Bypass", "kodak_vision3_250d", 250, c=1.25, s=.55, fog=.03)
@@ -69,10 +73,10 @@ add("agfa_vista_plus_400", "Agfa Vista Plus 400", "agfa_vista_400", 400, s=1.08,
 add("konica_centuria_400", "Konica Centuria 400", "konica_centuria_super_200", 400, g=1.3, c=1.04)
 add("konica_vx_400", "Konica VX 400", "konica_centuria_super_200", 400, c=1.08, s=1.1, g=1.25)
 # --- Harman / Lomography / creative colour ----------------------------------------------------
-add("harman_phoenix_200", "Harman Phoenix 200", "kodak_gold_200", 200, c=1.22, s=1.1, sh=(-.18, .08, .05),
-    fog=.10, tint=(1.0, .96, .72), g=1.8, h=1.3)
-add("harman_phoenix_ii_200", "Harman Phoenix II 200", "kodak_gold_200", 200, c=1.14, sh=(-.10, .04, .03),
-    fog=.05, tint=(1.0, .98, .84), g=1.45, h=1.2)
+add("harman_phoenix_200", "Harman Phoenix 200", "kodak_gold_200", 200, c=1.35, s=1.2, sh=(-.30, .10, .30),
+    fog=.10, tint=(1.0, .92, .62), g=1.8, h=1.6)
+add("harman_phoenix_ii_200", "Harman Phoenix II 200", "kodak_gold_200", 200, c=1.22, sh=(-.18, .06, .16),
+    fog=.06, tint=(1.0, .95, .75), g=1.45, h=1.4)
 add("lomo_color_100", "Lomography Color Negative 100", "kodak_gold_200", 100, c=1.08, s=1.15)
 add("lomo_color_400", "Lomography Color Negative 400", "kodak_ultramax_400", 400, c=1.1, s=1.15, g=1.15)
 add("lomo_color_800", "Lomography Color Negative 800", "fuji_superia_1600", 800, c=1.08, s=1.12, g=.9)
@@ -87,8 +91,8 @@ add("lomo_redscale_xr", "LomoChrome Redscale XR", "kodak_gold_200", 200, c=1.15,
 add("harman_red_125", "Harman Red 125", "kodak_gold_200", 125, c=1.15, sh=(-.28, .10, .32), tint=(1.0, .82, .5), g=1.2)
 add("lomo_slide_xpro_200", "Lomography X-Pro Slide 200", "fuji_provia_400x", 200, c=1.22, s=1.25, sh=(.04, -.10, .12))
 # --- Instant film -----------------------------------------------------------------------------
-add("polaroid_600_color", "Polaroid 600 Color", "kodak_gold_200", 640, c=1.12, s=.85, fog=.09, sh=(-.03, .02, .07),
-    tint=(1.0, .97, .93), g=.6, h=2.0)
+add("polaroid_600_color", "Polaroid 600 Color", "kodak_gold_200", 640, c=.88, s=.8, fog=.12, sh=(-.08, .05, .16),
+    tint=(1.0, .95, .88), g=.6, hal=.35)
 add("polaroid_sx70_color", "Polaroid SX-70 Color", "kodak_ektachrome_100", 160, c=1.0, s=.85, fog=.08,
     sh=(-.05, -.02, .08), g=.5, h=1.8)
 add("polaroid_itype_color", "Polaroid i-Type Color", "fujifilm_pro_400h", 640, c=1.05, s=.9, fog=.06, g=.6, h=1.6)
@@ -172,6 +176,19 @@ add("sensia_100", "Fujichrome Sensia 100", "fujifilm_provia_100f", 100, c=.97, s
 add("kodak_e100vs_push1", "Ektachrome E100VS Push +1", "kodak_ektachrome_e100vs", 200, c=1.12, g=1.25)
 add("provia_100f_push2", "Provia 100F Push +2", "fujifilm_provia_100f", 400, c=1.2, g=1.5)
 
+# Near-clone variants (tone/colour within ~0.1 of the parent) get a clearer character.
+PUNCH = {
+    "cinestill_bwxx": dict(c=1.14, g=1.25, hal=.35), "lomo_earl_grey_100": dict(c=.88),
+    "rollei_superpan_200": dict(c=1.14), "kodak_gold_100": dict(c=1.12, s=1.18), "kodak_gold_400": dict(c=1.14, s=1.12),
+    "orwo_n74_plus": dict(c=1.12), "fuji_superia_200": dict(c=1.16, s=1.12), "cinestill_50d": dict(c=1.12, s=1.1),
+    "agfachrome_1000rs": dict(c=.85, s=.88), "fuji_fujicolor_100": dict(c=1.16, s=1.12), "fuji_fp100c": dict(c=1.2, s=.85),
+    "sensia_100": dict(c=.86, s=.84), "kodak_colorplus_200": dict(c=1.14, s=.88), "fuji_superia_800": dict(c=.86, s=.9),
+    "konica_centuria_400": dict(c=1.16, s=1.1), "lomo_lady_grey_400": dict(c=.84), "agfa_vista_plus_200": dict(c=1.14, s=1.16),
+    "agfa_vista_plus_400": dict(c=1.14, s=1.16), "fuji_superia_premium_400": dict(c=.88, s=.84),
+    "fuji_press_800": dict(c=1.12), "kentmere_pan_100": dict(c=1.14),
+}
+L[:] = [(i, n, p, iso, {**o, **PUNCH.get(i, {})}) for i, n, p, iso, o in L]
+
 # ---------------------------------------------------------------------------------------------
 def parse_header(text):
     ents = {}
@@ -202,11 +219,14 @@ def transform(row, o):
     t = o.get("tint")
     if t:
         d[:, :3] *= np.array(t)
-    f = o.get("fog", 0.0)
+    f = o.get("fog", 0.0) * 3.0
     if f:
-        d[:, :3] += f
-    # density can't fall below the parent's base (+fog): contrast changes only stretch above it
-    d[:, :3] = np.maximum(d[:, :3], row[:, :3].min(axis=0) + f)
+        tt = np.clip(np.arange(COLS) / mid, 0.0, 1.0)
+        w = (np.sin(np.pi * tt) ** 1.2)[:, None]
+        w[int(mid) + 1:] = 0.0
+        slide = row[0, 1] > row[-1, 1]            # reversal: more light = less density, so fade subtracts
+        d[:, :3] += (-f if slide else f) * w
+    d[:, :3] = np.maximum(d[:, :3], row[:, :3].min(axis=0))
     return d
 
 def main():
@@ -232,18 +252,25 @@ def main():
         pidx, cat, _, rest = ents[parent]
         nums = floats(rest)
         dmin, dmax, gam, mat, hal, grain = nums[0:3], nums[3:6], nums[6:9], nums[9:18], nums[18], nums[19]
+        o = dict(o)
+        if "sh" in o and CATS.index(cat) in (0, 1, 6) and any(o.get(k) for k in ("sh", "fog", "tint")):
+            o["sh"] = tuple(v * 1.5 for v in o["sh"])      # casts only survive in category 7: make them read
         row = transform(lut[pidx], o)
         row[:, 3] = lut[pidx][:, 3]
         # shift sign: increasing curve keeps its max as D-max, decreasing (slide) as its min row start
+        creative = CATS.index(cat) in (0, 1, 3, 6) and any(o.get(k) for k in ("sh", "fog", "tint"))
+        if creative:
+            cat = "CREATIVE_INSTANT_EXPIRED"
+            if CATS.index(ents[parent][1]) == 3:
+                mat = [0.2722, 0.6741, 0.0537] * 3          # panchromatic toned B&W: tint needs a colour output
         new_dmax = [float(np.abs(row[:, k]).max()) if lut[pidx][:, :3].max() > 1.05 else dmax[k] for k in range(3)]
-        g = o.get("c", 1.0)
-        gam2 = [round(x * g, 3) for x in gam]
+        gam2 = gam   # contrast comes from the stretched density; scaling gamma too would cancel it in the shader
         new_rows.append(row)
         idx = BASE + i
         hdr.append('    {%d, LookCategory::%s, "%s", "%s", {%s}, {%s}, {%s}, {%s}, %.2ff, %.2ff},' % (
             idx, cat, lid, name, ", ".join("%.3ff" % x for x in dmin), ", ".join("%.3ff" % x for x in new_dmax),
             ", ".join("%.3ff" % x for x in gam2), ", ".join("%.4ff" % x for x in mat),
-            min(hal * o.get("h", 1.0), 0.6), min(grain * o.get("g", 1.0), 1.0)))
+            min(o.get('hal', hal * o.get('h', 1.0)), 0.6), min(grain * o.get("g", 1.0), 1.0)))
         tsv.append("%d\t%d\t%s\t%s\t%d" % (idx, CATS.index(cat), lid, name, iso))
         isos.append(iso)
 
