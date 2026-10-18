@@ -26,13 +26,28 @@ public class ProOverlay extends View {
     private boolean running = false;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Runnable sampler = new Runnable() {
+    private final Runnable sampler = new Sampler(this);
+
+    // Named static classes: d8 cannot take javac's anonymous $1 class files in this build.
+    static class Sampler implements Runnable {
+        private final ProOverlay o;
+        Sampler(ProOverlay o) { this.o = o; }
         @Override public void run() {
-            if (!running) return;
-            new Thread(new Job(ProOverlay.this), "ProSampler").start();
-            postDelayed(this, SAMPLE_MS);
+            if (!o.running) return;
+            new Thread(new Job(o), "ProSampler").start();
+            o.postDelayed(this, SAMPLE_MS);
         }
-    };
+    }
+
+    static class Apply implements Runnable {
+        private final ProOverlay o; private final int[][] fh; private final int fmx; private final float[] fp; private final int fn; private final float zone;
+        Apply(ProOverlay o, int[][] fh, int fmx, float[] fp, int fn, float zone) { this.o = o; this.fh = fh; this.fmx = fmx; this.fp = fp; this.fn = fn; this.zone = zone; }
+        @Override public void run() {
+            o.hist[0] = fh[0]; o.hist[1] = fh[1]; o.hist[2] = fh[2]; o.hist[3] = fh[3];
+            o.histMax = fmx; o.peakPts = fp; o.peakCount = fn; o.meanZone = zone;
+            o.invalidate();
+        }
+    }
 
     public ProOverlay(Context c) { super(c); }
     public ProOverlay(Context c, AttributeSet a) { super(c, a); }
@@ -98,13 +113,7 @@ public class ProOverlay extends View {
             final int fmx = mx, fn = n;
             final float[] fp = pts;
             final int[][] fh = hs;
-            o.post(new Runnable() {
-                @Override public void run() {
-                    o.hist[0] = fh[0]; o.hist[1] = fh[1]; o.hist[2] = fh[2]; o.hist[3] = fh[3];
-                    o.histMax = fmx; o.peakPts = fp; o.peakCount = fn; o.meanZone = zone;
-                    o.invalidate();
-                }
-            });
+            o.post(new Apply(o, fh, fmx, fp, fn, zone));
         }
         private static int lum(byte[] p, int i) {
             return ((p[i] & 255) * 54 + (p[i + 1] & 255) * 183 + (p[i + 2] & 255) * 19) >> 8;

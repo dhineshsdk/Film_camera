@@ -173,15 +173,7 @@ public class CameraEngine {
     /** Fixed sensor ISO (the shutter follows the scene); 0 returns to Auto. */
     public void setManualIso(int iso) {
         manualIso = Math.max(0, iso);
-        final CameraEngine self = this;
-        if (cameraHandler != null) cameraHandler.post(new Runnable() {
-            @Override public void run() {
-                if (self.manualAeActive && self.filmKey.isEmpty()) {
-                    self.chooseIsoAndShutter(self.currentIso * (self.currentExposureNs * 1e-9));
-                    self.applyManualExposure();
-                }
-            }
-        });
+        if (cameraHandler != null) cameraHandler.post(new IsoTask(this));
     }
     public int getManualIso() { return manualIso; }
     public int getDeviceMinIso() { return deviceMinIso; }
@@ -190,10 +182,7 @@ public class CameraEngine {
     /** Manual focus in diopters (0 = infinity .. max = closest); negative returns to continuous AF. */
     public void setManualFocus(float diopters) {
         manualFocusDiopters = diopters;
-        final CameraEngine self = this;
-        if (cameraHandler != null) cameraHandler.post(new Runnable() {
-            @Override public void run() { self.applyFocus(); }
-        });
+        if (cameraHandler != null) cameraHandler.post(new FocusTask(this));
     }
     public boolean isManualFocus() { return manualFocusDiopters >= 0f; }
 
@@ -287,6 +276,24 @@ public class CameraEngine {
             drainThread = null;
             drainHandler = null;
         }
+    }
+
+    // Named classes: d8 cannot take javac's anonymous $1 class files in this build.
+    static class IsoTask implements Runnable {
+        private final CameraEngine e;
+        IsoTask(CameraEngine e) { this.e = e; }
+        @Override public void run() {
+            if (e.manualAeActive && e.filmKey.isEmpty()) {
+                e.chooseIsoAndShutter(e.currentIso * (e.currentExposureNs * 1e-9));
+                e.applyManualExposure();
+            }
+        }
+    }
+
+    static class FocusTask implements Runnable {
+        private final CameraEngine e;
+        FocusTask(CameraEngine e) { this.e = e; }
+        @Override public void run() { e.applyFocus(); }
     }
 
     static class OpenCameraTask implements Runnable {
