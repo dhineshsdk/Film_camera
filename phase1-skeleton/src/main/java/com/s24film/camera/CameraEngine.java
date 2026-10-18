@@ -69,6 +69,9 @@ public class CameraEngine {
     private int rawHeight = 3060;
     private int rawStride = 4080;
     private int cfaCode = 2; // GBRG default for Cam 0
+    // Per camMatrixIdx (0 wide, 1 front, 2 UW, 3 tele) white-balance trims, see the capture callback.
+    private static final float[] LENS_TRIM_R = {1.03f, 1.0f, 1.0f, 1.0f};
+    private static final float[] LENS_TRIM_B = {1.0f, 1.0f, 1.065f, 1.0f};
     private int camMatrixIdx = 0; // 0=Wide, 1=Front, 2=UW, 3=Tele
     private float whiteLevel = 1023.0f;
 
@@ -1134,6 +1137,11 @@ public class CameraEngine {
                     engine.dngGainB = gains.getBlue() / g;
                 }
             }
+            // Residual lens-to-lens white offset measured on the same scene (Portra, grey cushion
+            // and mid-tones): UW rendered ~6.5% low in B/G, wide ~3% low in R/G vs the tele.
+            // Front has no same-scene reference yet, so it is left alone.
+            engine.dngGainR *= LENS_TRIM_R[engine.camMatrixIdx];
+            engine.dngGainB *= LENS_TRIM_B[engine.camMatrixIdx];
         }
     }
 
