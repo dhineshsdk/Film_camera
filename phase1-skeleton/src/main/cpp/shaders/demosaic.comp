@@ -1481,6 +1481,13 @@ void stageFilm() {
             float g = clamp(target / max(lumSdr, 1e-4), 1.0, hdrRatio);
             gainEnc = log2(g) / log2(hdrRatio);
         }
+
+        // Every look: the darkest blacks fade to neutral (tinted slide floors, violet blacks, raw
+        // chroma noise in the deepest shadows) while 20% of the colour stays at pure black.
+        float yG = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+        // Slides carry the strongest tinted floors (Kodachrome violet, Velvia teal), so their fade reaches further.
+        bool slideStock = (u_stock_type == 1u);
+        graded = mix(vec3(yG), graded, mix(slideStock ? 0.1 : 0.2, 1.0, smoothstep(0.0, slideStock ? 0.3 : 0.07, yG)));
     }
 
     if (master) {

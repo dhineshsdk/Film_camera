@@ -840,7 +840,9 @@ public class CameraEngine {
     private void computeFilmExposure(int boxIso, double isoSeconds) {
         if (videoMode) { computeFilmExposureVideo(boxIso, isoSeconds); return; }
         int push = pushStops;
-        double ei = boxIso * Math.pow(2.0, push);
+        // Nothing is rated slower than EI 50: the phone sensor has no ISO 5-25, and the 2-strip/3-strip
+        // and Kodachrome 25 looks came out black at night when rated at their box speed.
+        double ei = Math.max(50.0, boxIso * Math.pow(2.0, push));
         double tWanted = isoSeconds / ei;
         // Auto reaches 1/15 s in photo mode. The 17 Oct "1/15 wedges the HAL" hangs were the
         // undrained companion stream running out of buffers, not the long frame itself.
@@ -887,7 +889,7 @@ public class CameraEngine {
     // Video: shutter fixed by the angle, the exposure index floats so ISO solves exposure.
     private void computeFilmExposureVideo(int boxIso, double isoSeconds) {
         int push = pushStops;
-        double eiBox = boxIso * Math.pow(2.0, push);
+        double eiBox = Math.max(50.0, boxIso * Math.pow(2.0, push));
         long t = videoShutterNs();
         if (manualIso == 0) {
             // Out of ISO range at the chosen angle: shorten the shutter when too bright, open it
