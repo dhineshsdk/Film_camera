@@ -1005,9 +1005,14 @@ public class CameraEngine {
             // in the grip locked at shutter press, not whatever the accelerometer reads now.
             boolean capture = engine.captureRequested.compareAndSet(true, false);
             int activeOrient = capture ? engine.lockedCaptureOrient : engine.currentActiveOrient();
-            // The shader's 90/270 are mirrored against the accelerometer's landscape sense (live preview
-            // came out upside-down in landscape), so swap them on the way into the renderer.
-            int renderOrient = (activeOrient == 90) ? 270 : ((activeOrient == 270) ? 90 : activeOrient);
+            // Shader orientation cases (rear sensor, raw is the scene turned 90 deg CCW):
+            //   90 = scene upright for a portrait grip (full sensor), 270 = that turned 180,
+            //   0 / 180 = raw un-rotated (3:4 crop), i.e. the scene turned 270 / 90 deg CW.
+            // Live view is drawn in the screen frame, so it must counter-rotate the grip:
+            // grip 0 -> 90, 180 -> 270, 270 (left edge down) -> 180, 90 -> 0. The saved photo is
+            // always rendered upright-portrait (90) from the full sensor and turned by the grip
+            // in the JPEG step, which keeps the full 4080 x 3060 for landscape shots.
+            int renderOrient = capture ? 90 : (90 - activeOrient + 360) % 360;
             // Front sensor is mounted 180 degrees from the rear ones (SENSOR_ORIENTATION 270 vs 90).
             if (engine.camMatrixIdx == 1) renderOrient = (renderOrient + 180) % 360;
 
@@ -1051,7 +1056,7 @@ public class CameraEngine {
                     + ((System.nanoTime() - t0) / 1_000_000) + " ms (ISO " + engine.resultIso
                     + ", " + (engine.resultExposureNs / 1000) + " us)");
                 // Master render is portrait; a landscape grip (270 = +90 CW, 90 = -90) needs the JPEG turned upright.
-                engine.dngSaver.setJpegRotation(renderOrient == 270 ? 90 : (renderOrient == 90 ? 270 : 0));
+                engine.dngSaver.setJpegRotation(activeOrient);
                 engine.dngSaver.saveDngAndMasterAsync(
                     image, engine.characteristics, engine.latestCaptureResult,
                     engine.pendingStockShortName,
