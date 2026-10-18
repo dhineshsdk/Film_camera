@@ -1178,6 +1178,9 @@ vec3 denoiseScene(vec3 c0, vec2 uv) {
     // The sensor clips RAW at black 0, so read noise rectifies into a positive bias that the
     // WB gains turn into blue/magenta shadows. Fade chroma out near the noise floor.
     float tDark = 0.25 * sqrt(max(f_noise.x * g * lscG, 1e-8)) + 1.0 * sqrt(max(f_noise.y, 0.0)) * g * lscG;
+    // The front camera's shadows go violet at high gain (its noise floor is the highest and its
+    // red/blue shading gains the largest), so its chroma fades out over a wider dark range.
+    if (u_cam_matrix_idx == 1u) tDark *= 2.5;
     float keep = smoothstep(0.3 * tDark, tDark, Yd);
     col = mix(vec3(Yd), col, mix(1.0, keep, s));
     return max(col, vec3(0.0));
