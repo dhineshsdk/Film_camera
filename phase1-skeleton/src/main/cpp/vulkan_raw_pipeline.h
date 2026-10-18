@@ -214,7 +214,7 @@ public:
     // normalized 0 = far .. 1 = near, w x h; null = no depth, plain master path), FILM and the
     // readback exactly like renderMasterStill. Exactly one Finish must follow every successful Begin.
     bool masterBegin(int dstW, int dstH, std::vector<uint8_t>& outRgb);
-    bool masterFinish(const float* disparity, int dw, int dh, float focusDisp,
+    bool masterFinish(const float* disparity, const float* matte, int dw, int dh, float focusDisp,
                       std::vector<uint8_t>& outRgba, int& outW, int& outH);
     bool copyMasterGainmap(std::vector<uint8_t>& outGain, int& outW, int& outH);
 

@@ -120,7 +120,7 @@ public class MainActivity extends Activity implements
     private TextView tvEvLabel, tvGrainLabel, tvHalLabel;
     private SeekBar seekEv, seekGrain, seekHalation;
     private Button btn06x, btn1x, btn3x, btnFront, btnShutter, btnRecordVideo;
-    private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnWb, btnRotate;
+    private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnWb, btnRotate, btnPortrait;
     private final Button[] stockButtons = new Button[12];
     private HorizontalScrollView stripStocks;
     private final Button[] formatButtons = new Button[4];
@@ -245,6 +245,7 @@ public class MainActivity extends Activity implements
         btnGate = findViewById(R.id.btn_gate);
         btnStepPrint = findViewById(R.id.btn_step_print);
         btnBurst = findViewById(R.id.btn_burst);
+        btnPortrait = findViewById(R.id.btn_portrait);
         btnStack = findViewById(R.id.btn_stack);
         btnWb = findViewById(R.id.btn_wb);
         btnRotate = findViewById(R.id.btn_rotate);
@@ -321,6 +322,7 @@ public class MainActivity extends Activity implements
         btnGate.setOnClickListener(this);
         btnStepPrint.setOnClickListener(this);
         btnBurst.setOnClickListener(this);
+        btnPortrait.setOnClickListener(this);
         btnStack.setOnClickListener(this);
         btnWb.setOnClickListener(this);
         btnRotate.setOnClickListener(this);
@@ -351,6 +353,8 @@ public class MainActivity extends Activity implements
         uiTheme = getSharedPreferences("ui", 0).getInt("theme", 0);
         debugMenu = getSharedPreferences("ui", 0).getBoolean("debug", false);
         sheetTabs[4].setVisibility(debugMenu ? View.VISIBLE : View.GONE);
+        DepthBokeh.portrait = getSharedPreferences("ui", 0).getBoolean("portrait", false);
+        btnPortrait.setText(DepthBokeh.portrait ? "Portrait: On" : "Portrait: Off");
         setMode(false);
         applyTheme(uiTheme);
         loadLatestThumbnail();
@@ -1037,6 +1041,11 @@ public class MainActivity extends Activity implements
             anamorphicMode = (anamorphicMode + 1) % 3;
             btnAnamorphic.setText(ANAMORPHIC_LABELS[anamorphicMode]);
             syncLookToNative();
+        } else if (id == R.id.btn_portrait) {
+            DepthBokeh.portrait = !DepthBokeh.portrait;
+            getSharedPreferences("ui", 0).edit().putBoolean("portrait", DepthBokeh.portrait).apply();
+            btnPortrait.setText(DepthBokeh.portrait ? "Portrait: On" : "Portrait: Off");
+            showStatus(DepthBokeh.portrait ? "Portrait on: tap to focus, aperture sets blur" : "Portrait off", false);
         } else if (id == R.id.btn_gate) {
             cinemaGate = (cinemaGate + 1) % 3;
             btnGate.setText(GATE_LABELS[cinemaGate]);

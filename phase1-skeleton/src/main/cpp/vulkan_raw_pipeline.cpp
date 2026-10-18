@@ -1435,10 +1435,10 @@ bool VulkanRawPipeline::createSharedResources() {
     // Depth bokeh input: disparity grid + dilated near-side blur reach, written by masterFinish.
     {
         void* mapped = nullptr;
-        if (!createBuffer(2ull * kDepthMaxCells * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
+        if (!createBuffer(3ull * kDepthMaxCells * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
                           mDepthBuffer, mDepthMemory, &mapped)) return false;
         mDepthMapped = static_cast<float*>(mapped);
-        std::memset(mDepthMapped, 0, 2ull * kDepthMaxCells * sizeof(float));
+        std::memset(mDepthMapped, 0, 3ull * kDepthMaxCells * sizeof(float));
     }
 
     VkSamplerCreateInfo sampler = {};
@@ -1498,7 +1498,7 @@ bool VulkanRawPipeline::createTargets(FrameTargets& t, VkExtent2D extent, bool m
     if (!createImage(t.storageRgba16, VK_FORMAT_R16G16B16A16_SFLOAT, rgba16Extent.width, rgba16Extent.height, 1, rw)) return false;
 
     VkExtent2D cocExtent = master ? extent : VkExtent2D{1, 1};
-    if (!createImage(t.cocMap, VK_FORMAT_R32_SFLOAT, cocExtent.width, cocExtent.height, 1, rw)) return false;
+    if (!createImage(t.cocMap, VK_FORMAT_R32G32_SFLOAT, cocExtent.width, cocExtent.height, 1, rw)) return false;
     if (!createBuffer(sizeof(DepthParamsUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                       t.depthUbo, t.depthUboMemory, &t.depthUboMapped)) return false;
@@ -2682,7 +2682,7 @@ bool VulkanRawPipeline::masterBegin(int dstW, int dstH, std::vector<uint8_t>& ou
     return true;
 }
 
-bool VulkanRawPipeline::masterFinish(const float* disparity, int dw, int dh, float focusDisp,
+bool VulkanRawPipeline::masterFinish(const float* disparity, const float* matte, int dw, int dh, float focusDisp,
                                      std::vector<uint8_t>& outRgba, int& outW, int& outH) {
     std::unique_lock<std::mutex> lock(mRenderMutex);
     if (!mMasterPending) return false;
@@ -2719,9 +2719,14 @@ bool VulkanRawPipeline::masterFinish(const float* disparity, int dw, int dh, flo
         const size_t n = static_cast<size_t>(dw) * dh;
         float* d = mDepthMapped;
         float* reach = mDepthMapped + n;
-        for (size_t i = 0; i < n; ++i) d[i] = std::clamp(disparity[i], 0.0f, 1.0f);
+        float* mt = mDepthMapped + 2 * n;   // subject matte (portrait): 0 background .. 1 subject
+        for (size_t i = 0; i < n; ++i) {
+            d[i] = std::clamp(disparity[i], 0.0f, 1.0f);
+            mt[i] = matte ? std::clamp(matte[i], 0.0f, 1.0f) : 0.0f;
+        }
         fillDepthParams(t, true, std::clamp(focusDisp, 0.0f, 1.0f));
         DepthParamsUbo grid = *static_cast<const DepthParamsUbo*>(t.depthUboMapped);
+        grid.d[1] = matte ? 1.0f : 0.0f;
         grid.b[1] = static_cast<float>(dw);
         grid.b[2] = static_cast<float>(dh);
         std::memcpy(t.depthUboMapped, &grid, sizeof(grid));
@@ -2730,7 +2735,7 @@ bool VulkanRawPipeline::masterFinish(const float* disparity, int dw, int dh, flo
             float cc = std::clamp(grid.a[1] * (d[i] - grid.a[2]) / std::max(grid.a[2], 0.05f), -grid.b[0], grid.b[0]);
             const float ac = std::fabs(cc);
             const float x = std::clamp((ac - grid.a[3]) / (2.0f * grid.a[3]), 0.0f, 1.0f);
-            pos[i] = std::max(cc, 0.0f) * x * x * (3.0f - 2.0f * x);
+            pos[i] = std::max(cc, 0.0f) * x * x * (3.0f - 2.0f * x) * (1.0f - mt[i]);
         }
         const float cellPx = static_cast<float>(std::max(ext.width, ext.height)) / static_cast<float>(std::max(dw, dh));
         const int k = static_cast<int>(std::ceil(grid.b[0] / cellPx)) + 1;
@@ -3265,7 +3270,7 @@ Java_com_s24film_camera_VulkanRenderer_nativeMasterBegin(JNIEnv* env, jobject /*
         // No Java copy to run depth on: finish the render without it so the pending state clears.
         std::vector<uint8_t> dummy;
         int w = 0, h = 0;
-        gPipeline->masterFinish(nullptr, 0, 0, 0.0f, dummy, w, h);
+        gPipeline->masterFinish(nullptr, nullptr, 0, 0, 0.0f, dummy, w, h);
         return nullptr;
     }
     env->SetByteArrayRegion(arr, 0, static_cast<jsize>(rgb.size()), reinterpret_cast<const jbyte*>(rgb.data()));
@@ -3274,7 +3279,7 @@ Java_com_s24film_camera_VulkanRenderer_nativeMasterBegin(JNIEnv* env, jobject /*
 
 JNIEXPORT jbyteArray JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeMasterFinish(
-    JNIEnv* env, jobject /*thiz*/, jfloatArray disparity, jint dw, jint dh, jfloat focusDisp, jintArray outDims)
+    JNIEnv* env, jobject /*thiz*/, jfloatArray disparity, jfloatArray matteArr, jint dw, jint dh, jfloat focusDisp, jintArray outDims)
 {
     if (!gPipeline || !outDims) return nullptr;
     std::vector<float> disp;
@@ -3282,9 +3287,14 @@ Java_com_s24film_camera_VulkanRenderer_nativeMasterFinish(
         disp.resize(static_cast<size_t>(dw) * dh);
         env->GetFloatArrayRegion(disparity, 0, dw * dh, disp.data());
     }
+    std::vector<float> mat;
+    if (!disp.empty() && matteArr && env->GetArrayLength(matteArr) >= dw * dh) {
+        mat.resize(disp.size());
+        env->GetFloatArrayRegion(matteArr, 0, dw * dh, mat.data());
+    }
     std::vector<uint8_t> rgba;
     int w = 0, h = 0;
-    if (!gPipeline->masterFinish(disp.empty() ? nullptr : disp.data(), dw, dh, focusDisp, rgba, w, h)) return nullptr;
+    if (!gPipeline->masterFinish(disp.empty() ? nullptr : disp.data(), mat.empty() ? nullptr : mat.data(), dw, dh, focusDisp, rgba, w, h)) return nullptr;
     jint dims[2] = {w, h};
     env->SetIntArrayRegion(outDims, 0, 2, dims);
     jbyteArray arr = env->NewByteArray(static_cast<jsize>(rgba.size()));

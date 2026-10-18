@@ -475,6 +475,12 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
                     android:visibility="gone">
+                    <TextView style="@style/RowLabel" android:text="PORTRAIT" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_portrait" style="@style/Chip" android:text="Portrait: Off" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
                     <TextView style="@style/RowLabel" android:text="PRO CONTROLS" />
                     <TextView android:id="@+id/tv_pro_iso" style="@style/RowLabel" android:layout_marginTop="2dp" android:text="ISO  AUTO" />
                     <SeekBar android:id="@+id/seek_pro_iso" style="@style/SheetSeek" android:max="21" android:progress="0" />

@@ -21,7 +21,7 @@ import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtSession;
 
 /**
- * Depth-based bokeh for master captures. Monocular depth (Depth Anything V2 Small, int8 ONNX, CPU)
+ * Depth-based bokeh for master captures. Monocular depth (Depth Anything V2 Small, int8 ONNX, CPU) plus a MODNet subject matte
  * runs on its own thread so the camera callback only pays for the first half of the master render
  * (PREP + ISP + PYRAMID); the second half (depth bokeh + film + readback) and the save follow from
  * the worker. The RAW Image is owned here from tryCapture until it is handed to the DNG saver.
@@ -32,10 +32,15 @@ final class DepthBokeh {
     private static final String MODEL_ASSET = "depth_anything_v2_small_int8.onnx";
     static final int NET_W = 392;      // multiples of 14, 3:4 portrait
     static final int NET_H = 518;
-    static final float MAX_F_NUMBER = 5.6f;   // f/5.6 and slower: no synthetic depth of field
+    private static final String MATTE_ASSET = "modnet_int8.onnx";
+    private static final int MATTE_W = 384;   // MODNet: multiples of 32, same 3:4 portrait as the depth grid
+    private static final int MATTE_H = 512;
+    private static final float PERSON_MIN_MEAN = 0.02f;   // mean matte above this: a person is in the frame
 
-    /** adb: --es cmd depth --ez on false turns the effect off. */
+    /** adb: --es cmd depth --ez on false is a kill switch for the effect. */
     static volatile boolean enabled = true;
+    /** Portrait mode (UI chip, adb --es cmd portrait --ez on true): depth blur is opt-in; the aperture dial sets its strength. */
+    static volatile boolean portrait = false;
 
     private final Context context;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(new WorkerFactory());
@@ -43,6 +48,7 @@ final class DepthBokeh {
     private volatile boolean unavailable = false;
     private OrtEnvironment env;
     private OrtSession session;
+    private OrtSession matteSession;   // null when the matting model is missing: depth only
 
     static class WorkerFactory implements java.util.concurrent.ThreadFactory {
         @Override public Thread newThread(Runnable r) {
@@ -116,6 +122,12 @@ final class DepthBokeh {
         opts.addConfigEntry("session.intra_op.allow_spinning", "0");
         session = env.createSession(model, opts);
         Log.i(TAG, "Depth model loaded in " + ((System.nanoTime() - t0) / 1_000_000) + " ms");
+        try (InputStream in = context.getAssets().open(MATTE_ASSET)) {
+            matteSession = env.createSession(in.readAllBytes(), opts);
+            Log.i(TAG, "Matting model loaded, total " + ((System.nanoTime() - t0) / 1_000_000) + " ms");
+        } catch (Throwable t) {
+            Log.w(TAG, "Matting model unavailable, portrait uses depth only: " + t);
+        }
     }
 
     /**
@@ -132,7 +144,7 @@ final class DepthBokeh {
             new Handler(Looper.getMainLooper()).post(new RejectTask(callback));
             return true;
         }
-        if (!enabled || unavailable || !(fNumber < MAX_F_NUMBER)) return false;
+        if (!enabled || !portrait || unavailable) return false;
         busy.set(true);
         byte[] rgb = null;
         try {
@@ -163,6 +175,7 @@ final class DepthBokeh {
 
     private void runJob(JobTask j) {
         float[] disp = null;
+        float[] matte = null;
         float focusDisp = 0.5f;
         try {
             if (j.rgb != null) {
@@ -174,8 +187,26 @@ final class DepthBokeh {
                 disp = normalize(raw, stats);
                 if (disp != null) {
                     focusDisp = focusDisparity(disp, focusU, focusV);
+                    String who = "tap/centre";
+                    try {
+                        long t1 = System.nanoTime();
+                        matte = inferMatte(j.rgb);
+                        float mean = 0f;
+                        if (matte != null) {
+                            for (float m : matte) mean += m;
+                            mean /= matte.length;
+                            if (mean > PERSON_MIN_MEAN) {
+                                focusDisp = subjectDisparity(disp, matte, focusDisp);
+                                who = "subject";
+                            }
+                        }
+                        Log.i(TAG, "Matting " + ((System.nanoTime() - t1) / 1_000_000) + " ms, mean matte " + mean);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "Matting failed, depth only: " + t);
+                        matte = null;
+                    }
                     Log.i(TAG, "Depth inference+load " + ms + " ms, raw range " + stats[0] + ".." + stats[1]
-                        + " (p1 " + stats[2] + "), focus disparity " + focusDisp);
+                        + " (p1 " + stats[2] + "), focus disparity " + focusDisp + " (" + who + ")");
                 } else {
                     Log.w(TAG, "Depth map degenerate (flat), rendering without depth");
                 }
@@ -190,7 +221,7 @@ final class DepthBokeh {
         int[] masterDims = new int[2];
         int[] gainDims = new int[2];
         try {
-            master = VulkanRenderer.nativeMasterFinish(disp, NET_W, NET_H, focusDisp, masterDims);
+            master = VulkanRenderer.nativeMasterFinish(disp, matte, NET_W, NET_H, focusDisp, masterDims);
             if (master != null) gain = VulkanRenderer.nativeGetMasterGainmap(gainDims);
         } catch (Throwable t) {
             Log.e(TAG, "Master finish failed: " + t.getMessage(), t);
@@ -228,6 +259,87 @@ final class DepthBokeh {
             fb.get(d, 0, n);
             return d;
         }
+    }
+
+    /** MODNet alpha matte 0 (background) .. 1 (subject) on the depth grid, lightly smoothed; null if unavailable. */
+    private float[] inferMatte(byte[] rgb) throws Exception {
+        if (matteSession == null) return null;
+        final int n = MATTE_W * MATTE_H;
+        float[] chw = new float[3 * n];
+        for (int y = 0; y < MATTE_H; ++y) {
+            float sy = Math.min((y + 0.5f) * NET_H / MATTE_H - 0.5f, NET_H - 1f);
+            sy = Math.max(sy, 0f);
+            int y0 = (int) sy, y1 = Math.min(y0 + 1, NET_H - 1);
+            float fy = sy - y0;
+            for (int x = 0; x < MATTE_W; ++x) {
+                float sx = Math.max(Math.min((x + 0.5f) * NET_W / MATTE_W - 0.5f, NET_W - 1f), 0f);
+                int x0 = (int) sx, x1 = Math.min(x0 + 1, NET_W - 1);
+                float fx = sx - x0;
+                for (int c = 0; c < 3; ++c) {
+                    float a = (rgb[(y0 * NET_W + x0) * 3 + c] & 0xFF) * (1f - fx) + (rgb[(y0 * NET_W + x1) * 3 + c] & 0xFF) * fx;
+                    float b = (rgb[(y1 * NET_W + x0) * 3 + c] & 0xFF) * (1f - fx) + (rgb[(y1 * NET_W + x1) * 3 + c] & 0xFF) * fx;
+                    chw[c * n + y * MATTE_W + x] = ((a * (1f - fy) + b * fy) / 255f - 0.5f) / 0.5f;
+                }
+            }
+        }
+        float[] m = new float[n];
+        String inName = matteSession.getInputNames().iterator().next();
+        try (OnnxTensor in = OnnxTensor.createTensor(env, FloatBuffer.wrap(chw), new long[]{1, 3, MATTE_H, MATTE_W});
+             OrtSession.Result out = matteSession.run(Collections.singletonMap(inName, in))) {
+            FloatBuffer fb = ((OnnxTensor) out.get(0)).getFloatBuffer();
+            if (fb.remaining() < n) throw new IllegalStateException("matte output too small: " + fb.remaining());
+            fb.get(m, 0, n);
+        }
+        float[] r = new float[NET_W * NET_H];
+        for (int y = 0; y < NET_H; ++y) {
+            float sy = Math.max(Math.min((y + 0.5f) * MATTE_H / NET_H - 0.5f, MATTE_H - 1f), 0f);
+            int y0 = (int) sy, y1 = Math.min(y0 + 1, MATTE_H - 1);
+            float fy = sy - y0;
+            for (int x = 0; x < NET_W; ++x) {
+                float sx = Math.max(Math.min((x + 0.5f) * MATTE_W / NET_W - 0.5f, MATTE_W - 1f), 0f);
+                int x0 = (int) sx, x1 = Math.min(x0 + 1, MATTE_W - 1);
+                float fx = sx - x0;
+                float a = m[y0 * MATTE_W + x0] * (1f - fx) + m[y0 * MATTE_W + x1] * fx;
+                float b = m[y1 * MATTE_W + x0] * (1f - fx) + m[y1 * MATTE_W + x1] * fx;
+                float v = a * (1f - fy) + b * fy;
+                r[y * NET_W + x] = v < 0f ? 0f : (v > 1f ? 1f : v);
+            }
+        }
+        // Two 3x3 box passes: feather the edge so hair blends instead of cutting out.
+        float[] t = new float[r.length];
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int y = 0; y < NET_H; ++y) {
+                for (int x = 0; x < NET_W; ++x) {
+                    float sum = 0f;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        int yy = Math.max(0, Math.min(NET_H - 1, y + dy));
+                        for (int dx = -1; dx <= 1; ++dx) sum += r[yy * NET_W + Math.max(0, Math.min(NET_W - 1, x + dx))];
+                    }
+                    t[y * NET_W + x] = sum * (1f / 9f);
+                }
+            }
+            float[] sw = r; r = t; t = sw;
+        }
+        return r;
+    }
+
+    /** Matte-weighted median disparity of the subject; fallback when the matte carries no weight. */
+    static float subjectDisparity(float[] d, float[] m, float fallback) {
+        final int bins = 256;
+        float[] h = new float[bins];
+        float total = 0f;
+        for (int i = 0; i < d.length; ++i) {
+            float w = m[i] > 0.5f ? m[i] : 0f;
+            h[Math.min(bins - 1, (int) (d[i] * bins))] += w;
+            total += w;
+        }
+        if (!(total > 0f)) return fallback;
+        float acc = 0f;
+        for (int b = 0; b < bins; ++b) {
+            acc += h[b];
+            if (acc >= 0.5f * total) return (b + 0.5f) / bins;
+        }
+        return fallback;
     }
 
     /** 1st / 99th percentile stretch to 0 (far) .. 1 (near); null when the map is flat. */

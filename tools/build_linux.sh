@@ -19,6 +19,10 @@ ORT_SHA=67397e4a970e75617f765d2015ceaf911917e1d822276cfb5792744e8085cbce
 MODEL_URL="https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx"
 MODEL_SHA=fcf51f1b230362b28690bb9d1809bf0431f29cad20534e3f589bd7285547f20d
 MODEL_NAME=depth_anything_v2_small_int8.onnx
+# MODNet portrait matting (Apache-2.0), int8
+MATTE_URL="https://huggingface.co/Xenova/modnet/resolve/main/onnx/model_quantized.onnx"
+MATTE_SHA=92e49898c3e05a6d7a944fc67a8cb87c4aad754ffb6ebd949528c7d1105fee3a
+MATTE_NAME=modnet_int8.onnx
 fetch() {  # $1 url, $2 sha256, $3 file
   if [ -f "$3" ] && [ "$(sha256sum "$3" | cut -d' ' -f1)" = "$2" ]; then return; fi
   curl -fSL --retry 3 -o "$3" "$1"
@@ -26,6 +30,7 @@ fetch() {  # $1 url, $2 sha256, $3 file
 }
 fetch "$ORT_URL" "$ORT_SHA" "$CACHE/onnxruntime-android-$ORT_VER.aar"
 fetch "$MODEL_URL" "$MODEL_SHA" "$CACHE/$MODEL_NAME"
+fetch "$MATTE_URL" "$MATTE_SHA" "$CACHE/$MATTE_NAME"
 ORT_DIR="$CACHE/ort-$ORT_VER"
 [ -f "$ORT_DIR/classes.jar" ] || { rm -rf "$ORT_DIR"; mkdir -p "$ORT_DIR"; unzip -q "$CACHE/onnxruntime-android-$ORT_VER.aar" -d "$ORT_DIR"; }
 spv2h() {  # $1 spv, $2 header, $3 symbol
@@ -52,7 +57,7 @@ cmake -B "$NB" -S "$P/src/main/cpp" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$NDK/build/
 ninja -C "$NB"
 B="$P/build"; rm -rf "$B"; mkdir -p "$B/classes" "$B/gen" "$B/lib/arm64-v8a" "$B/assets_extra"
 cp "$NB/libs24film_vulkan.so" "$ORT_DIR"/jni/arm64-v8a/*.so "$B/lib/arm64-v8a/"
-cp "$CACHE/$MODEL_NAME" "$B/assets_extra/"
+cp "$CACHE/$MODEL_NAME" "$CACHE/$MATTE_NAME" "$B/assets_extra/"
 "$BT/aapt2" compile --dir "$P/src/main/res" -o "$B/res.zip"
 "$BT/aapt2" link -I "$PLAT/android.jar" "$B/res.zip" --manifest "$P/src/main/AndroidManifest.xml" \
   -A "$P/src/main/assets" -A "$B/assets_extra" -0 onnx --min-sdk-version 34 --target-sdk-version 34 --java "$B/gen" -o "$B/unaligned.apk" --auto-add-overlay
