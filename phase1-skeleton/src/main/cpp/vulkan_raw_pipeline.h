@@ -197,6 +197,7 @@ public:
     }
     int activeLookIndex() const { return mActiveLookIdx.load(); }
     void setLensFxEnabled(bool on) { mLensFxEnabled.store(on); }
+    void setPortraitMode(bool on) { mPortraitMode.store(on); }
     void setVirtualAperture(float fNumber) { mVirtualFNumber.store(std::clamp(fNumber, 0.95f, 22.0f)); }
     float lastRawMean() const { return mLastRawMean.load(); }
     bool setEncoderWindow(ANativeWindow* encoderWindow);
@@ -440,6 +441,7 @@ private:
     std::atomic<float> mPushStops{0.0f};
     std::atomic<float> mExposureSeconds{0.01f};
     std::atomic<float> mVirtualFNumber{2.0f};
+    std::atomic<bool> mPortraitMode{false};     // all out-of-focus blur (bokeh, swirl) only in Portrait
     std::atomic<bool> mLensFxEnabled{false};    // flare/ghost/streak/CA/distortion/swirl (testing)   // aperture ring: lens character / depth of field only
 
     // Per-frame capture metadata from CaptureResult (Java)

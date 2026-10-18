@@ -108,7 +108,7 @@ final class DebugControl extends BroadcastReceiver {
                 engine.setVirtualAperture(intent.getFloatExtra("f", 2.0f));
                 break;
             case "portrait":   // portrait mode (subject matte + depth bokeh): --ez on true|false
-                DepthBokeh.portrait = intent.getBooleanExtra("on", true);
+                DepthBokeh.setPortrait(intent.getBooleanExtra("on", true));
                 Log.i(TAG, "portrait " + DepthBokeh.portrait);
                 break;
             case "depth":   // depth bokeh (f/5.6 and wider masters): --ez on true|false

@@ -353,7 +353,7 @@ public class MainActivity extends Activity implements
         uiTheme = getSharedPreferences("ui", 0).getInt("theme", 0);
         debugMenu = getSharedPreferences("ui", 0).getBoolean("debug", false);
         sheetTabs[4].setVisibility(debugMenu ? View.VISIBLE : View.GONE);
-        DepthBokeh.portrait = getSharedPreferences("ui", 0).getBoolean("portrait", false);
+        DepthBokeh.setPortrait(getSharedPreferences("ui", 0).getBoolean("portrait", false));
         btnPortrait.setText(DepthBokeh.portrait ? "Portrait: On" : "Portrait: Off");
         setMode(false);
         applyTheme(uiTheme);
@@ -1042,7 +1042,7 @@ public class MainActivity extends Activity implements
             btnAnamorphic.setText(ANAMORPHIC_LABELS[anamorphicMode]);
             syncLookToNative();
         } else if (id == R.id.btn_portrait) {
-            DepthBokeh.portrait = !DepthBokeh.portrait;
+            DepthBokeh.setPortrait(!DepthBokeh.portrait);
             getSharedPreferences("ui", 0).edit().putBoolean("portrait", DepthBokeh.portrait).apply();
             btnPortrait.setText(DepthBokeh.portrait ? "Portrait: On" : "Portrait: Off");
             showStatus(DepthBokeh.portrait ? "Portrait on: tap to focus, aperture sets blur" : "Portrait off", false);

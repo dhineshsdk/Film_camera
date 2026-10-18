@@ -42,6 +42,12 @@ final class DepthBokeh {
     /** Portrait mode (UI chip, adb --es cmd portrait --ez on true): depth blur is opt-in; the aperture dial sets its strength. */
     static volatile boolean portrait = false;
 
+    /** Portrait off means no out-of-focus blur anywhere: depth bokeh, Super 70mm bokeh and lens swirl. */
+    static void setPortrait(boolean on) {
+        portrait = on;
+        try { VulkanRenderer.nativeSetPortraitMode(on); } catch (Throwable ignored) { }
+    }
+
     private final Context context;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(new WorkerFactory());
     private final AtomicBoolean busy = new AtomicBoolean(false);

@@ -12,6 +12,7 @@
 #include <thread>
 
 static VulkanRawPipeline* gPipeline = nullptr;
+static bool gPortraitMode = false;   // survives pipeline re-creation
 
 // -----------------------------------------------------------------------------
 // 120-look LUT domain. The .bin header carries only magic/version/rows/cols, so the
@@ -1838,7 +1839,7 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
         u.lfx1[3] = fx.veil;
         u.lfx2[0] = fx.ca * (0.6f + 0.4f * open);
         u.lfx2[1] = fx.distortionK1;
-        u.lfx2[2] = fx.swirl * open2;
+        u.lfx2[2] = mPortraitMode.load() ? fx.swirl * open2 : 0.0f;
         u.lfx2[3] = fx.starburst;
         u.lfx3[0] = fx.blades;
         u.lfx3[1] = fNum;
@@ -1876,7 +1877,7 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     u.diffW2[0] = dw[4] / dsum;
 
     // Super 70mm IMAX bokeh: background (infinity) CoC for the current focus distance.
-    const bool bokeh = (uiLens == kSuper70LensIndex);
+    const bool bokeh = (uiLens == kSuper70LensIndex) && mPortraitMode.load();
     if (bokeh) {
         float diopters = mFocusDiopters.load();
         float subjectM = (diopters > 0.05f) ? 1.0f / diopters : 20.0f;
@@ -3053,6 +3054,7 @@ Java_com_s24film_camera_VulkanRenderer_nativeInit(JNIEnv* env, jobject /*thiz*/,
         gPipeline = nullptr;
     }
     gPipeline = new VulkanRawPipeline();
+    gPipeline->setPortraitMode(gPortraitMode);
     if (!gPipeline->init(window, mgr)) {
         delete gPipeline;
         gPipeline = nullptr;
@@ -3133,6 +3135,12 @@ Java_com_s24film_camera_VulkanRenderer_nativeGetLookBoxIso(JNIEnv* /*env*/, jobj
 JNIEXPORT jint JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeGetActiveLookIndex(JNIEnv* /*env*/, jobject /*thiz*/) {
     return gPipeline ? static_cast<jint>(gPipeline->activeLookIndex()) : -1;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetPortraitMode(JNIEnv* /*env*/, jobject /*thiz*/, jboolean on) {
+    gPortraitMode = (on == JNI_TRUE);
+    if (gPipeline) gPipeline->setPortraitMode(gPortraitMode);
 }
 
 JNIEXPORT void JNICALL

@@ -36,6 +36,7 @@ public class VulkanRenderer {
     public static native void nativeSetVirtualAperture(float fNumber);
     // Lens character (ghosts, halo, anamorphic streak, starburst, veil, CA, distortion, swirl). Off by default.
     public static native void nativeSetLensFxEnabled(boolean enabled);
+    public static native void nativeSetPortraitMode(boolean on);
     public static native float nativeGetLastRawMean();
     public static native boolean nativeSetEncoderSurface(Surface encoderSurface);
     // Call before nativeSetEncoderSurface: true = encoder gets BT.2020 HLG (10-bit when the surface allows).
