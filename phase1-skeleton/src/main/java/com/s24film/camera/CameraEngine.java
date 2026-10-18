@@ -447,8 +447,30 @@ public class CameraEngine {
         aeConverged = false;
         aeWarmupFrames = 0;
         aeTargetRawMean = 0.0f;
+        meterLogL = Double.NaN;
         framesSinceAeApply = 0;
         previewBuilder = null;
+    }
+
+    // ---------------------------------------------------------------- Scene metering
+    // Scene luminance L (raw per ISO-second) comes from each frame's own capture result, so it does
+    // not depend on which request the pipeline had reached (the old error-chasing loop lagged the
+    // pipeline and had to be slowed to a crawl). Smoothed in log2, then the exposure the scene
+    // needs for the reference brightness is aeTargetRawMean / L.
+    private double meterLogL = Double.NaN;
+    private static final double LN2 = Math.log(2.0);
+
+    /** ISO x seconds (exposure index x shutter) that renders the reference brightness, or -1 if not ready. */
+    private double meterDesiredIsoSeconds(float mean) {
+        double es = resultIso * resultExposureNs * 1e-9;
+        if (es <= 0 || mean <= 1e-5f || aeTargetRawMean <= 0) return -1;
+        double logL = Math.log(mean / es) / LN2;
+        if (Double.isNaN(meterLogL)) meterLogL = logL;
+        double d = logL - meterLogL;
+        double a = videoMode ? 0.06 : 0.30;
+        if (Math.abs(d) > 1.0) a = videoMode ? 0.30 : 0.70;   // big scene change: catch up fast
+        meterLogL += a * d;
+        return aeTargetRawMean / Math.pow(2.0, meterLogL);
     }
 
     // Builds the preferred ISO ladder for the active camera, always skipping ISO 320.
@@ -629,7 +651,7 @@ public class CameraEngine {
 
     // ---------------------------------------------------------------- Video format
     private static final double VIDEO_MIN_DIGITAL_GAIN = 0.25;   // exposure index floor = min ISO x this
-    private static final double VIDEO_MAX_DIGITAL_GAIN = 4.0;    // exposure index ceiling = max ISO x this
+    private static final double VIDEO_MAX_DIGITAL_GAIN = 2.0;    // exposure index ceiling = max ISO x this (the shutter opens first)
     private volatile int videoFps = 24;
     private volatile float videoAngleDeg = 180f;
     private volatile boolean videoReapply = false;
@@ -745,6 +767,13 @@ public class CameraEngine {
             tWanted = isoSeconds / ei;
             under = (tWanted > tMax) ? Math.log(tWanted / tMax) / Math.log(2.0) : 0.0;
         }
+        // Fastest shutter reached and still too bright (e.g. ISO 800 film in daylight): lower the
+        // exposure index like an ND filter instead of blowing the frame out.
+        double tFast = minShutterNs * 1e-9;
+        if (manualShutterNs == 0 && manualIso == 0 && tWanted < tFast) {
+            ei = Math.max(deviceMinIso * 0.25, isoSeconds / tFast);
+            tWanted = isoSeconds / ei;
+        }
         int sensorIso = manualIso > 0 ? clampIso(manualIso) : nearestCleanIso(ei);
         long t = (long) (Math.max(minShutterNs * 1e-9, Math.min(tMax, tWanted)) * 1e9);
         if (manualShutterNs == 0 && t > 0) {   // 1/3-stop shutter ladder
@@ -771,6 +800,17 @@ public class CameraEngine {
         int push = pushStops;
         double eiBox = boxIso * Math.pow(2.0, push);
         long t = videoShutterNs();
+        if (manualIso == 0) {
+            // Out of ISO range at the chosen angle: shorten the shutter when too bright, open it
+            // (up to a full frame) when too dim, before leaning on digital gain.
+            double atAngle = isoSeconds / (t * 1e-9);
+            if (atAngle < deviceMinIso * VIDEO_MIN_DIGITAL_GAIN) {
+                t = Math.max(minShutterNs, (long) (isoSeconds / (deviceMinIso * VIDEO_MIN_DIGITAL_GAIN) * 1e9));
+            } else if (atAngle > deviceMaxIso) {
+                long full = Math.min(videoFrameDurationNs(), deviceMaxShutterNs);
+                t = Math.min(full, Math.max(t, (long) (isoSeconds / deviceMaxIso * 1e9)));
+            }
+        }
         double tSec = t * 1e-9;
         double need = isoSeconds / tSec;               // exposure index that meters correctly
         double ei;
@@ -814,6 +854,7 @@ public class CameraEngine {
             if (!ready || mean <= 1e-4f) return;
             aeTargetRawMean = mean;
             filmIsoSeconds = resultIso * (resultExposureNs * 1e-9);
+            Log.i(TAG, "Meter lock (film): raw mean " + mean + " ISO " + resultIso + " / " + (resultExposureNs / 1000) + " us");
             manualAeActive = true;
             fresh = true;
         } else if (filmKey.isEmpty()) {
@@ -822,27 +863,13 @@ public class CameraEngine {
         } else {
             String key = filmKeyFor(boxIso);
             framesSinceAeApply++;
-            if (key.equals(filmKey) && (framesSinceAeApply < FILM_AE_INTERVAL_FRAMES || mean <= 1e-5f)) return;
+            double want = meterDesiredIsoSeconds(mean);   // every frame: keeps the smoothing current
             if (key.equals(filmKey)) {
-                // Rendered brightness is raw x digital gain; steer it to the metered target.
-                float evErr = (float) (Math.log(aeTargetRawMean / (mean * filmDigitalGain)) / Math.log(2.0));
-                // What the scene needs, measured from this frame (not integrated, so a shutter
-                // pinned at its slowest speed doesn't wind the estimate up), then damped.
-                double effIso = currentIso * (double) filmDigitalGain;
-                double need = effIso * (currentExposureNs * 1e-9) * Math.pow(2.0, evErr);
-                double step = Math.log(need / filmIsoSeconds) / Math.log(2.0);
-                if (videoHold) { filmMoving = false; filmOutCount = 0; return; }
-                float absStep = (float) Math.abs(step);
-                if (!filmMoving) {
-                    if (absStep > FILM_LEAVE_EV) filmOutCount++; else filmOutCount = 0;
-                    if (filmOutCount < 2) return;
-                    filmMoving = true;
-                } else if (absStep <= FILM_SETTLE_EV) {
-                    filmMoving = false;
-                    filmOutCount = 0;
-                    return;
-                }
-                step = Math.max(-FILM_STEP_EV, Math.min(FILM_STEP_EV, FILM_GAIN * step));
+                if (want < 0 || framesSinceAeApply < (videoMode ? 2 : 3)) return;
+                double err = Math.log(want / filmIsoSeconds) / LN2;
+                if (Math.abs(err) < (videoMode ? 0.06 : 0.12)) return;
+                // Photos jump to the smoothed estimate; video eases in small steps so it never pumps.
+                double step = videoMode ? Math.max(-0.12, Math.min(0.12, err)) : err;
                 filmIsoSeconds *= Math.pow(2.0, step);
             }
         }
@@ -900,12 +927,13 @@ public class CameraEngine {
         }
 
         framesSinceAeApply++;
-        if (videoHold || framesSinceAeApply < FILM_AE_INTERVAL_FRAMES || mean <= 1e-5f) return;
-        float evErr = (float) (Math.log(aeTargetRawMean / mean) / Math.log(2.0));
-        if (Math.abs(evErr) <= FILM_HOLD_EV) return;
-        float step = Math.max(-AE_MAX_STEP_EV, Math.min(AE_MAX_STEP_EV, AE_GAIN * evErr));
-        // Video quantises ISO to the ladder, so integrate the exposure instead of re-deriving it.
-        double isoSeconds = (videoMode ? filmIsoSeconds : currentIso * (currentExposureNs * 1e-9)) * Math.pow(2.0, step);
+        double want = meterDesiredIsoSeconds(mean);
+        if (want < 0 || framesSinceAeApply < (videoMode ? 2 : 3)) return;
+        double cur = videoMode ? filmIsoSeconds : currentIso * (currentExposureNs * 1e-9);
+        double err = Math.log(want / cur) / LN2;
+        if (Math.abs(err) < (videoMode ? 0.06 : 0.12)) return;
+        double step = videoMode ? Math.max(-0.12, Math.min(0.12, err)) : err;
+        double isoSeconds = cur * Math.pow(2.0, step);
         if (videoMode) filmIsoSeconds = isoSeconds;
         int prevIso = currentIso;
         long prevExp = currentExposureNs;
