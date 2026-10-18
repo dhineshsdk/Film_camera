@@ -1544,7 +1544,8 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
         };
         const float ratio = std::sqrt(shotS(s24film::kS24SensorNoiseModels[camIdx]) /
                                       shotS(s24film::kS24SensorNoiseModels[0]));
-        lumaNr = std::clamp(1.0f - 0.55f / std::max(ratio, 1.0f), 0.45f, 0.75f);
+        // Exponent 1.25: strength 1/ratio left tele / UW ~30% noisier than the wide on device.
+        lumaNr = std::clamp(1.0f - 0.55f / std::pow(std::max(ratio, 1.0f), 1.25f), 0.45f, 0.88f);
     }
 
     u.lsc[0] = 1.0f;
