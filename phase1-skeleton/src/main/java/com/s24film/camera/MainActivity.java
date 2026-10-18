@@ -174,6 +174,17 @@ public class MainActivity extends Activity implements
     private boolean stepPrint8fps = false;
     private boolean burstModeEnabled = true;
     private int rollFrameCounter = 1;
+    private ProPanel proPanel;
+
+    static final class NewRoll implements ProPanel.Host {
+        private final MainActivity a;
+        NewRoll(MainActivity a) { this.a = a; }
+        @Override public void onNewRoll() {
+            a.rollFrameCounter = 1;
+            a.refreshReadout();
+            Toast.makeText(a, "New roll: 36 exposures", Toast.LENGTH_SHORT).show();
+        }
+    }
     private int magFeetRemaining = 400;
     private int magFramesRemaining = 0;
 
@@ -320,6 +331,7 @@ public class MainActivity extends Activity implements
         }
         fx = new FilmFx(this);
         filmUi = new FilmUi(this, filmRoot, new FilmCallbacks(this), fx);
+        proPanel = new ProPanel(this, cameraEngine, filmUi, new NewRoll(this));
         uiTheme = getSharedPreferences("ui", 0).getInt("theme", 0);
         debugMenu = getSharedPreferences("ui", 0).getBoolean("debug", false);
         sheetTabs[4].setVisibility(debugMenu ? View.VISIBLE : View.GONE);
@@ -472,7 +484,7 @@ public class MainActivity extends Activity implements
         if (videoRecorder != null && videoRecorder.isRecording()) {
             sb.append("   \u25cf REC");
         } else {
-            sb.append(String.format(Locale.US, "   %02d/36", rollFrameCounter));
+            sb.append(String.format(Locale.US, "   %02d/36 \u00b7 %d left", rollFrameCounter, 37 - rollFrameCounter));
         }
         tvReadout.setText(sb.toString());
     }
@@ -1035,7 +1047,7 @@ public class MainActivity extends Activity implements
         refreshSelection();
         showStatus("Switching to " + label + "…", false);
         cameraEngine.openCamera(camId);   // also clears the ROT override
-        btnRotate.setText("ROT +" + cameraEngine.getManualRotationOffset() + "°");
+        btnRotate.setText("ROT +" + cameraEngine.getManualRotationOffset() + "°");        if (proPanel != null) proPanel.onLensChanged();
     }
 
     private void checkPermissions() {
@@ -1070,6 +1082,7 @@ public class MainActivity extends Activity implements
     protected void onResume() {
         super.onResume();
         DebugControl.ui = this;
+        if (proPanel != null) proPanel.onResume();
         imuTelemetry.start();
         hideSystemUI();
 
@@ -1093,6 +1106,7 @@ public class MainActivity extends Activity implements
         if (videoRecorder != null && videoRecorder.isRecording()) {
             videoRecorder.stopRecording();
         }
+        if (proPanel != null) proPanel.onPause();
         cameraEngine.closeCamera();
         imuTelemetry.stop();
     }

@@ -287,6 +287,7 @@ final class FilmUi implements View.OnClickListener {
 
     int speedIndex() { return speedDial.idx; }
     int apertureIndex() { return apertureDial.idx; }
+    void setApertureIndex(int i) { apertureDial.idx = i; apertureDial.shown = i; apertureDial.invalidate(); }
 
     @Override
     public void onClick(View v) {

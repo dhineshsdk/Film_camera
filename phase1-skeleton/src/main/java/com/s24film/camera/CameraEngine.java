@@ -164,6 +164,70 @@ public class CameraEngine {
         this.frameCallback = frameCallback;
     }
 
+    // ---------------------------------------------------------------- Pro controls
+    private volatile int manualIso = 0;              // 0 = Auto (clean-ISO ladder)
+    private volatile float manualFocusDiopters = -1f; // < 0 = continuous AF
+
+    private int clampIso(int iso) { return Math.max(deviceMinIso, Math.min(deviceMaxIso, iso)); }
+
+    /** Fixed sensor ISO (the shutter follows the scene); 0 returns to Auto. */
+    public void setManualIso(int iso) {
+        manualIso = Math.max(0, iso);
+        final CameraEngine self = this;
+        if (cameraHandler != null) cameraHandler.post(new Runnable() {
+            @Override public void run() {
+                if (self.manualAeActive && self.filmKey.isEmpty()) {
+                    self.chooseIsoAndShutter(self.currentIso * (self.currentExposureNs * 1e-9));
+                    self.applyManualExposure();
+                }
+            }
+        });
+    }
+    public int getManualIso() { return manualIso; }
+    public int getDeviceMinIso() { return deviceMinIso; }
+    public int getDeviceMaxIso() { return deviceMaxIso; }
+
+    /** Manual focus in diopters (0 = infinity .. max = closest); negative returns to continuous AF. */
+    public void setManualFocus(float diopters) {
+        manualFocusDiopters = diopters;
+        final CameraEngine self = this;
+        if (cameraHandler != null) cameraHandler.post(new Runnable() {
+            @Override public void run() { self.applyFocus(); }
+        });
+    }
+    public boolean isManualFocus() { return manualFocusDiopters >= 0f; }
+
+    /** Closest focus in diopters for the open lens (0 when it is fixed-focus). */
+    public float getMinFocusDiopters() {
+        Float f = (characteristics != null)
+            ? characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) : null;
+        return (f != null) ? f : 0f;
+    }
+
+    private void applyFocus() {
+        if (captureSession == null || previewBuilder == null) return;
+        try {
+            if (manualFocusDiopters >= 0f) {
+                previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                previewBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, Math.min(manualFocusDiopters, getMinFocusDiopters()));
+            } else {
+                previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            }
+            captureSession.setRepeatingRequest(previewBuilder.build(), new CaptureCallback(this), cameraHandler);
+        } catch (Exception e) {
+            Log.e(TAG, "Focus update failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** White balance as a colour temperature of the light (K; 0 = as-shot) and a green/magenta tint (-1..1). */
+    public void setUserWbKelvin(int kelvin) {
+        userWbWarmth = (kelvin <= 0) ? 1.0f
+            : Math.max(0.5f, Math.min(1.5f, 1.0f + 0.6f * (float) Math.log(kelvin / 6500.0)));
+    }
+    public void setUserWbTintStops(float tint) {
+        userWbTint = Math.max(0.7f, Math.min(1.3f, 1.0f - 0.25f * tint));   // + = magenta (less green)
+    }
+
     public void setAutoSceneWb(boolean enabled) {
         this.autoSceneWb = enabled;
     }
@@ -457,6 +521,11 @@ public class CameraEngine {
     // the sweet-spot ISO would need a shutter shorter than 250 us.
     private void chooseIsoAndShutter(double isoSeconds) {
         if (isoLadder.length == 0) return;
+        if (manualIso > 0) {
+            currentIso = clampIso(manualIso);
+            currentExposureNs = Math.max(minShutterNs, Math.min(maxShutterNs, (long) (isoSeconds / currentIso * 1e9)));
+            return;
+        }
         int iso = isoLadder[isoLadder.length - 1];
         long t = (long) (isoSeconds / iso * 1e9);
         for (int candidate : isoLadder) {
@@ -606,7 +675,7 @@ public class CameraEngine {
             tWanted = isoSeconds / ei;
             under = (tWanted > tMax) ? Math.log(tWanted / tMax) / Math.log(2.0) : 0.0;
         }
-        int sensorIso = nearestCleanIso(ei);
+        int sensorIso = manualIso > 0 ? clampIso(manualIso) : nearestCleanIso(ei);
         long t = (long) (Math.max(minShutterNs * 1e-9, Math.min(tMax, tWanted)) * 1e9);
         if (manualShutterNs == 0 && t > 0) {   // 1/3-stop shutter ladder
             t = (long) (Math.pow(2.0, Math.round(Math.log((double) t) / Math.log(2.0) * 3.0) / 3.0));
@@ -645,7 +714,7 @@ public class CameraEngine {
             // Coming from a digital look: keep the exposure it had settled on.
             filmIsoSeconds = currentIso * (currentExposureNs * 1e-9);
         } else {
-            String key = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode;
+            String key = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode + "/" + manualIso;
             framesSinceAeApply++;
             if (key.equals(filmKey) && (framesSinceAeApply < FILM_AE_INTERVAL_FRAMES || mean <= 1e-5f)) return;
             if (key.equals(filmKey)) {
@@ -675,7 +744,7 @@ public class CameraEngine {
         double ei = boxIso * Math.pow(2.0, pushStops);
         filmIsoSeconds = Math.max(ei * minShutterNs * 1e-9 * 0.25,
             Math.min(ei * FILM_MAX_AUTO_SHUTTER_NS * 1e-9 * 256.0, filmIsoSeconds));
-        filmKey = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode;
+        filmKey = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode + "/" + manualIso;
         int prevIso = currentIso;
         long prevExp = currentExposureNs;
         computeFilmExposure(boxIso, filmIsoSeconds);
@@ -846,6 +915,10 @@ public class CameraEngine {
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
 
                 engine.previewBuilder = builder;
+                if (engine.manualFocusDiopters >= 0f) {
+                    builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                    builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, Math.min(engine.manualFocusDiopters, engine.getMinFocusDiopters()));
+                }
                 engine.defaultFpsRange = builder.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE);
                 session.setRepeatingRequest(builder.build(), new CaptureCallback(engine), engine.cameraHandler);
                 engine.fpsStartTimeNs = System.nanoTime();

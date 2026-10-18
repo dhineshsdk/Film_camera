@@ -19,6 +19,12 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <com.s24film.camera.ProOverlay
+        android:id="@+id/pro_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
     <!-- Top band -->
     <LinearLayout
         android:id="@+id/top_bar"
@@ -469,6 +475,28 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
                     android:visibility="gone">
+                    <TextView style="@style/RowLabel" android:text="PRO CONTROLS" />
+                    <TextView android:id="@+id/tv_pro_iso" style="@style/RowLabel" android:layout_marginTop="2dp" android:text="ISO  AUTO" />
+                    <SeekBar android:id="@+id/seek_pro_iso" style="@style/SheetSeek" android:max="21" android:progress="0" />
+                    <TextView android:id="@+id/tv_pro_wb" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="WHITE BALANCE  AUTO" />
+                    <SeekBar android:id="@+id/seek_pro_wb" style="@style/SheetSeek" android:max="70" android:progress="0" />
+                    <TextView android:id="@+id/tv_pro_tint" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="TINT  0" />
+                    <SeekBar android:id="@+id/seek_pro_tint" style="@style/SheetSeek" android:max="20" android:progress="10" />
+                    <TextView android:id="@+id/tv_pro_focus" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="FOCUS  AUTO" />
+                    <SeekBar android:id="@+id/seek_pro_focus" style="@style/SheetSeek" android:max="20" android:progress="0" />
+                    <TextView style="@style/RowLabel" android:text="APERTURE (f/)" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:id="@+id/row_pro_aperture" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="SHOOTING AIDS" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_pro_peaking" style="@style/Chip" android:text="Peaking: Off" />
+                            <Button android:id="@+id/btn_pro_histogram" style="@style/Chip" android:text="Histogram: Off" />
+                            <Button android:id="@+id/btn_pro_zones" style="@style/Chip" android:text="Zones: Off" />
+                            <Button android:id="@+id/btn_pro_roll" style="@style/Chip" android:text="New roll" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
                     <TextView style="@style/RowLabel" android:text="FRAME" />
                     <HorizontalScrollView style="@style/ChipRow">
                         <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
