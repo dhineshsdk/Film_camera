@@ -34,7 +34,7 @@ def add(i, n, p, iso, **o): L.append((i, n, p, iso, o))
 # --- CineStill / cine stocks run as stills ----------------------------------------------------
 add("cinestill_50d", "CineStill 50 Daylight", "kodak_vision3_50d", 50, hal=.30, c=1.02)
 add("cinestill_400d", "CineStill 400 Daylight", "kodak_vision3_250d", 400, hal=.32, g=1.35, c=1.05)
-add("cinestill_800t", "CineStill 800 Tungsten", "kodak_vision3_500t", 800, hal=.55, g=1.3, c=1.08, sh=(.12, 0, -.16))
+add("cinestill_800t", "CineStill 800 Tungsten", "kodak_vision3_500t", 800, hal=.55, g=1.3, c=1.08, sh=(.18, 0, -.26))
 add("cinestill_850d", "CineStill 850 Daylight", "kodak_vision3_500t", 800, hal=.50, sh=(.04, 0, -.06), g=1.4, c=1.1)
 add("cinestill_bwxx", "CineStill BwXX", "kodak_double_x_5222", 250, h=1.6)
 add("kodak_vision3_500t_bleach", "Vision3 500T Bleach Bypass", "kodak_vision3_500t", 500, c=1.28, s=.55, fog=.03, g=1.2)
@@ -73,8 +73,8 @@ add("agfa_vista_plus_400", "Agfa Vista Plus 400", "agfa_vista_400", 400, s=1.08,
 add("konica_centuria_400", "Konica Centuria 400", "konica_centuria_super_200", 400, g=1.3, c=1.04)
 add("konica_vx_400", "Konica VX 400", "konica_centuria_super_200", 400, c=1.08, s=1.1, g=1.25)
 # --- Harman / Lomography / creative colour ----------------------------------------------------
-add("harman_phoenix_200", "Harman Phoenix 200", "kodak_gold_200", 200, c=1.35, s=1.2, sh=(-.30, .10, .30),
-    fog=.10, tint=(1.0, .92, .62), g=1.8, h=1.6)
+add("harman_phoenix_200", "Harman Phoenix 200", "kodak_gold_200", 200, c=1.22, s=1.05, sh=(-.20, .06, .20),
+    fog=.10, tint=(1.0, .96, .80), g=1.8, h=1.6)
 add("harman_phoenix_ii_200", "Harman Phoenix II 200", "kodak_gold_200", 200, c=1.22, sh=(-.18, .06, .16),
     fog=.06, tint=(1.0, .95, .75), g=1.45, h=1.4)
 add("lomo_color_100", "Lomography Color Negative 100", "kodak_gold_200", 100, c=1.08, s=1.15)
@@ -200,6 +200,33 @@ def parse_header(text):
 def floats(s):
     return [float(x) for x in re.findall(r'-?\d+\.\d+', s)]
 
+SPLIT_LIMIT = 0.20
+CAST_GAIN = 1.5
+CAST_LIMIT = 0.30
+
+def gam_of(ent):
+    return np.array(floats(ent[3])[6:9])
+
+def creative_look(cat, o):
+    return CATS.index(cat) in (0, 1, 3, 6) and any(o.get(k) for k in ("sh", "fog", "tint"))
+
+def grey_split(row, gam):
+    """Largest per-channel deviation (log10) of the scanned neutral ramp, logE -2.5..+1.5."""
+    slide = row[0, 1] > row[-1, 1]
+    x = np.arange(int(COLS * (3 - 2.5) / 6), int(COLS * (3 + 1.5) / 6))
+    mid = 0.5 * (row[127, :3] + row[128, :3])
+    lg = (row[x, :3] - mid) / np.maximum(gam, .2) * (-0.8 if slide else 1.0)
+    return float(np.abs(lg - lg.mean(axis=1, keepdims=True)).max())
+
+def neutralise(row, gam):
+    """Give all three layers the same gamma-normalised curve (the print stage would have done this)."""
+    mid = 0.5 * (row[127, :3] + row[128, :3])
+    g = np.maximum(gam, .2)
+    n = ((row[:, :3] - mid) / g).mean(axis=1, keepdims=True)
+    out = row.copy()
+    out[:, :3] = mid + n * g
+    return out
+
 def transform(row, o):
     d = row.copy()
     mid = 0.5 * (COLS - 1)
@@ -253,16 +280,34 @@ def main():
         nums = floats(rest)
         dmin, dmax, gam, mat, hal, grain = nums[0:3], nums[3:6], nums[6:9], nums[9:18], nums[18], nums[19]
         o = dict(o)
-        if "sh" in o and CATS.index(cat) in (0, 1, 6) and any(o.get(k) for k in ("sh", "fog", "tint")):
-            o["sh"] = tuple(v * 1.5 for v in o["sh"])      # casts only survive in category 7: make them read
-        row = transform(lut[pidx], o)
+        src = lut[pidx]
+        is_creative = creative_look(cat, o)
+        cast = np.zeros(3)
+        if is_creative:
+            if CATS.index(cat) in (0, 1, 6):
+                src = neutralise(src, gam_of(ents[parent]))
+            # Casts go through the look's matrix (exposure scale per layer): the shader pins mid grey
+            # of the *curve* to neutral, so a curve shift only shows in the toe and shoulder. Capped,
+            # because there is no grey-axis correction in category 7 and big casts turn garish.
+            cast = np.array(o.pop("sh", (0, 0, 0)), dtype=float)
+            cast -= cast.mean()
+            cast *= CAST_GAIN
+            cast *= min(1.0, CAST_LIMIT / max(np.abs(cast).max(), 1e-6))
+        row = transform(src, o)
+        if is_creative:
+            for _ in range(40):                       # tints add slope differences: keep them bounded too
+                if grey_split(row, gam_of(ents[parent])) <= SPLIT_LIMIT: break
+                if o.get("tint"): o["tint"] = tuple(1 + (v - 1) * 0.92 for v in o["tint"])
+                row = transform(src, o)
+            print("%-34s cast %s tint-split %.2f" % (lid, np.round(cast, 2).tolist(), grey_split(row, gam_of(ents[parent]))))
         row[:, 3] = lut[pidx][:, 3]
         # shift sign: increasing curve keeps its max as D-max, decreasing (slide) as its min row start
-        creative = CATS.index(cat) in (0, 1, 3, 6) and any(o.get(k) for k in ("sh", "fog", "tint"))
-        if creative:
+        if is_creative:
             cat = "CREATIVE_INSTANT_EXPIRED"
             if CATS.index(ents[parent][1]) == 3:
                 mat = [0.2722, 0.6741, 0.0537] * 3          # panchromatic toned B&W: tint needs a colour output
+            for c in range(3):                              # +cast = layer sees less light
+                mat[3 * c:3 * c + 3] = [v * 10 ** (-cast[c]) for v in mat[3 * c:3 * c + 3]]
         new_dmax = [float(np.abs(row[:, k]).max()) if lut[pidx][:, :3].max() > 1.05 else dmax[k] for k in range(3)]
         gam2 = gam   # contrast comes from the stretched density; scaling gamma too would cancel it in the shader
         new_rows.append(row)
