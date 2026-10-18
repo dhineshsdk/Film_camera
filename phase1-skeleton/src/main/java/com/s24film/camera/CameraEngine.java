@@ -1041,7 +1041,13 @@ public class CameraEngine {
     private volatile int flashMode = FLASH_AUTO;
     private volatile boolean torchOn = false;
     private static final long FLASH_METER_MS = 1600;   // LED ramp-up plus the exposure loop settling (device: ~1.3 s)
+    private static final long FLASH_METER_MS_SCREEN = 900;   // no LED ramp-up, only the exposure loop
     private static final long FLASH_HOLD_MS = 2500;
+
+    /** The front camera has no LED: the UI turns the screen white instead. */
+    public interface ScreenFlash { void onScreenFlash(boolean on); }
+    private volatile ScreenFlash screenFlash = null;
+    public void setScreenFlash(ScreenFlash s) { screenFlash = s; }
 
     public void setFlashMode(int mode) { flashMode = Math.max(FLASH_OFF, Math.min(FLASH_ON, mode)); }
     public int getFlashMode() { return flashMode; }
@@ -1087,18 +1093,33 @@ public class CameraEngine {
     static class TorchOffTask implements Runnable {
         private final CameraEngine e;
         TorchOffTask(CameraEngine e) { this.e = e; }
-        @Override public void run() { if (e.torchOn) e.setTorch(false); }
+        @Override public void run() {
+            if (!e.torchOn) return;
+            if (e.camMatrixIdx == 1) {
+                e.torchOn = false;
+                ScreenFlash s = e.screenFlash;
+                if (s != null) s.onScreenFlash(false);
+            } else {
+                e.setTorch(false);
+            }
+        }
     }
 
     public synchronized void triggerCapture(String stockShortName, DngSaver.Callback callback) {
-        boolean wantFlash = !videoMode && !stackActive && manualAeActive && hasFlash()
+        boolean front = (camMatrixIdx == 1);
+        boolean wantFlash = !videoMode && !stackActive && manualAeActive && (hasFlash() || (front && screenFlash != null))
             && (flashMode == FLASH_ON || (flashMode == FLASH_AUTO && lowLightNow()));
         Log.i(TAG, "Flash: mode " + flashMode + " want " + wantFlash + " hasFlash " + hasFlash() + " lowLight " + lowLightNow() + " ae " + manualAeActive + " video " + videoMode + " stack " + stackActive);
         if (wantFlash && !torchOn && cameraHandler != null) {
             lockedCaptureOrient = currentActiveOrient();
-            setTorch(true);
+            if (front) {
+                torchOn = true;
+                screenFlash.onScreenFlash(true);
+            } else {
+                setTorch(true);
+            }
             postStack("Flash");
-            cameraHandler.postDelayed(new FlashShootTask(this, stockShortName, callback), FLASH_METER_MS);
+            cameraHandler.postDelayed(new FlashShootTask(this, stockShortName, callback), front ? FLASH_METER_MS_SCREEN : FLASH_METER_MS);
             return;
         }
         shootNow(stockShortName, callback);

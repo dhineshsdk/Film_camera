@@ -339,6 +339,7 @@ public class MainActivity extends Activity implements
         dngSaver = new DngSaver(this);
         videoRecorder = new CinemaVideoRecorder(this, imuTelemetry);
         cameraEngine = new CameraEngine(this, dngSaver, imuTelemetry, this);
+        cameraEngine.setScreenFlash(new ScreenFlashUi(this));
         cameraEngine.setStackStatus(new StackStatusBridge(this));
         applyStackChoice();
 
@@ -577,6 +578,40 @@ public class MainActivity extends Activity implements
         if (!testRunning) return;
         testWaitToken++;
         mainHandler.postDelayed(new TestTask(this, 0, 0), 500);
+    }
+
+    // Front-camera flash: a white overlay with the screen at full brightness lights the face.
+    private View screenFlashView;
+
+    void setScreenFlashShown(boolean on) {
+        android.view.ViewGroup root = (android.view.ViewGroup) findViewById(android.R.id.content);
+        android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
+        if (on) {
+            if (screenFlashView == null) {
+                screenFlashView = new View(this);
+                screenFlashView.setBackgroundColor(0xFFFFFFFF);
+            }
+            if (screenFlashView.getParent() == null) {
+                root.addView(screenFlashView, new android.view.ViewGroup.LayoutParams(-1, -1));
+            }
+            lp.screenBrightness = 1.0f;
+        } else {
+            if (screenFlashView != null && screenFlashView.getParent() != null) root.removeView(screenFlashView);
+            lp.screenBrightness = android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        }
+        getWindow().setAttributes(lp);
+    }
+
+    static class ScreenFlashUi implements CameraEngine.ScreenFlash {
+        private final MainActivity a;
+        ScreenFlashUi(MainActivity a) { this.a = a; }
+        @Override public void onScreenFlash(boolean on) { a.runOnUiThread(new ScreenFlashTask(a, on)); }
+    }
+
+    static class ScreenFlashTask implements Runnable {
+        private final MainActivity a; private final boolean on;
+        ScreenFlashTask(MainActivity a, boolean on) { this.a = a; this.on = on; }
+        @Override public void run() { a.setScreenFlashShown(on); }
     }
 
     static class TestTask implements Runnable {
