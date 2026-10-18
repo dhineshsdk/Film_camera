@@ -154,6 +154,13 @@ final class DepthBokeh {
         return true;
     }
 
+    // Last tap on the viewfinder (0..1 of the frame); the frame centre until the first tap.
+    private static volatile float focusU = 0.5f, focusV = 0.5f;
+    static void setFocusPoint(float u, float v) {
+        focusU = Math.max(0f, Math.min(1f, u));
+        focusV = Math.max(0f, Math.min(1f, v));
+    }
+
     private void runJob(JobTask j) {
         float[] disp = null;
         float focusDisp = 0.5f;
@@ -166,7 +173,7 @@ final class DepthBokeh {
                 float[] stats = new float[3];
                 disp = normalize(raw, stats);
                 if (disp != null) {
-                    focusDisp = focusDisparity(disp, 0.5f, 0.5f);
+                    focusDisp = focusDisparity(disp, focusU, focusV);
                     Log.i(TAG, "Depth inference+load " + ms + " ms, raw range " + stats[0] + ".." + stats[1]
                         + " (p1 " + stats[2] + "), focus disparity " + focusDisp);
                 } else {
@@ -245,7 +252,7 @@ final class DepthBokeh {
     /** Median disparity in a small window around the focus point (u, v in 0..1). */
     static float focusDisparity(float[] d, float u, float v) {
         int cx = (int) (u * NET_W), cy = (int) (v * NET_H);
-        int rx = Math.max(2, (int) (0.03f * NET_W)), ry = Math.max(2, (int) (0.03f * NET_H));
+        int rx = Math.max(2, (int) (0.05f * NET_W)), ry = Math.max(2, (int) (0.05f * NET_H));
         int x0 = Math.max(0, cx - rx), x1 = Math.min(NET_W - 1, cx + rx);
         int y0 = Math.max(0, cy - ry), y1 = Math.min(NET_H - 1, cy + ry);
         float[] w = new float[(x1 - x0 + 1) * (y1 - y0 + 1)];

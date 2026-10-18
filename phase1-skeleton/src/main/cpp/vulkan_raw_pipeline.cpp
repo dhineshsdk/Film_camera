@@ -56,7 +56,7 @@ static constexpr float kHdrSdrRatio = 3.0f;
 // Depth bokeh (master): virtual full-frame-equivalent lens, 50 mm.
 static constexpr float kDepthLensMm = 50.0f;
 static constexpr float kDepthSensorLongMm = 36.0f;
-static constexpr float kDepthMaxCocFrac = 0.03f;    // |CoC| cap, fraction of the long edge
+static constexpr float kDepthMaxCocFrac = 0.02f;    // |CoC| cap, fraction of the long edge
 static constexpr int kDepthBands = 4;               // BOKEH dispatches per master (live preview runs between them)
 
 // UI lens index -> kLegendaryLenses8 archetype (-1 = none).

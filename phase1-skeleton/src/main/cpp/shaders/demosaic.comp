@@ -659,10 +659,14 @@ void stageBokeh() {
 // STAGE 5 + depth mode of STAGE 3: monocular-depth bokeh (master only)
 // =============================================================================
 float depthCoc(float d) {
-    float c = d_a.y * (d - d_a.z) / max(d_a.z, 0.05);
+    // Relative disparity has no true zero at infinity, so the divisor is floored well above 0 and
+    // the strength scaled back: a far focus point no longer blows up every nearer object.
+    float dd = d - d_a.z;
+    float c = 0.6 * d_a.y * dd / max(d_a.z, 0.4);
     c = clamp(c, -d_b.x, d_b.x);
-    float ac = abs(c);
-    return c * smoothstep(d_a.w, 3.0 * d_a.w, ac);   // soft in-focus zone, no hard mask edge
+    // Depth-of-field band around the focus disparity, then a soft ramp in pixels: no mask edge.
+    c *= smoothstep(0.04, 0.16, abs(dd));
+    return c * smoothstep(d_a.w, 3.0 * d_a.w, abs(c));
 }
 
 vec3 depthGuide(vec3 c) {
@@ -686,10 +690,10 @@ void stageDepth() {
         for (int dx = -1; dx <= 2; ++dx) {
             ivec2 q = clamp(i0 + ivec2(dx, dy), ivec2(0), gs - 1);
             vec2 dq = vec2(q) - g;
-            float ws = exp(-dot(dq, dq) / (2.0 * 0.81));
+            float ws = exp(-dot(dq, dq) / (2.0 * 1.5));
             vec3 gq = depthGuide(textureLod(u_aces_pyramid, (vec2(q) + 0.5) / vec2(gs), 1.0).rgb);
             vec3 dg = gp - gq;
-            float wr = exp(-dot(dg, dg) / (2.0 * 0.01));
+            float wr = exp(-dot(dg, dg) / (2.0 * 0.06));   // loose: edges follow colour without a cut-out
             float w = ws * (wr + 1e-4);
             num += w * u_depth[q.y * gs.x + q.x];
             den += w;

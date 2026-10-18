@@ -208,6 +208,8 @@ public class MainActivity extends Activity implements
         setContentView(R.layout.activity_main);
 
         surfaceView = findViewById(R.id.camera_surface);
+        // A tap on the viewfinder picks the depth-bokeh focus point.
+        surfaceView.setOnTouchListener(new FocusTapListener());
         hudOverlay = findViewById(R.id.hud_overlay);
         tvShutterStatus = findViewById(R.id.tv_shutter_status);
         tvFilm = findViewById(R.id.btn_film);
@@ -768,6 +770,17 @@ public class MainActivity extends Activity implements
                     activity.setMode(false);
                     v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
                 }
+            }
+            return false;
+        }
+    }
+
+    private static final class FocusTapListener implements View.OnTouchListener {
+        @Override
+        public boolean onTouch(View v, MotionEvent e) {
+            if (e.getAction() == MotionEvent.ACTION_DOWN) return true;
+            if (e.getAction() == MotionEvent.ACTION_UP && v.getWidth() > 0 && v.getHeight() > 0) {
+                DepthBokeh.setFocusPoint(e.getX() / v.getWidth(), e.getY() / v.getHeight());
             }
             return false;
         }
