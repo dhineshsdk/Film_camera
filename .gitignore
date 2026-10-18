@@ -12,6 +12,9 @@ captures/
 *.class
 *.dex
 
+# Downloaded build dependencies (ONNX Runtime AAR, depth model)
+.build_cache/
+
 # Local config / secrets
 local.properties
 *.jks
@@ -48,3 +51,7 @@ phase0_dumpsys_camera.txt
 phase0_vulkan_caps.json
 phase0_lab_results.json
 /phase0-lab-bench/
+
+# Local agent worktrees / Python caches
+.claude/
+__pycache__/

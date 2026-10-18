@@ -12,7 +12,9 @@
 //   STAGE 1  ISP      output res   Hamilton-Adams demosaic, WB, Oklab highlight recovery,
 //                                  ForwardMatrix -> ACEScg, ACES RGC -> mLinearAcesImage mip 0
 //   STAGE 2  PYRAMID  per level    5-level Gaussian mip pyramid of mLinearAcesImage
-//   STAGE 3  BOKEH    half / full  Super 70mm (52.5 x 23 mm, 80 mm f/2.0) 64-tap gather
+//   STAGE 3  BOKEH    half / full  Super 70mm (52.5 x 23 mm, 80 mm f/2.0) 64-tap gather; master with a
+//                                  depth map: scatter-as-gather over the signed CoC map (STAGE 5)
+//   STAGE 5  DEPTH    output res   master only: monocular disparity -> signed CoC map (joint bilateral upsample)
 //   STAGE 4  FILM     output res   TIR halation + Pro-Mist diffusion from the pyramid,
 //                                  120-look spectral matrix + 2D LUT, DIR couplers,
 //                                  Gabor tile grain (live) / Newson Boolean grain (master),
@@ -28,6 +30,7 @@ const uint STAGE_ISP     = 1u;
 const uint STAGE_PYRAMID = 2u;
 const uint STAGE_BOKEH   = 3u;
 const uint STAGE_FILM    = 4u;
+const uint STAGE_DEPTH   = 5u;
 
 const uint FLAG_MASTER  = 1u;  // offline master still render
 const uint FLAG_SPATIAL = 2u;  // PREP: spatial Wiener shrinkage in the Anscombe domain
@@ -68,6 +71,13 @@ layout(std430, binding = 5) readonly buffer LookBuffer {
     LookGpu u_looks[];
 };
 
+// Spectral film model tables for the active look (SpectralFilm.h): [0] look index (-1 none),
+// [1] type (0 negative, 1 slide, 2 B&W), [2] log E offset, [3] print N, [4..6] density axis max,
+// [7] camera grid N, [8] curve N; camera table, curves and print table follow from float 16.
+layout(std430, binding = 18) readonly buffer SpectralBuffer {
+    float u_spec[];
+};
+
 layout(std140, binding = 6) uniform FrameParams {
     vec4 f_noise;    // x=S, y=O (normalized to [0,1] after black), z=black level DN, w=temporal tolerance
     vec4 f_lsc;      // x=enable, y=grid cols (17), z=grid rows (13), w=normalized RAW -> AP1 gain (noise scale)
@@ -106,6 +116,21 @@ layout(binding = 15) uniform sampler2D u_bokeh_tex;
 layout(binding = 16, rgba8) writeonly uniform image2D u_out_rgba8;     // mMasterStorageImage
 layout(binding = 17, rgba16f) writeonly uniform image2D u_out_rgba16;  // live viewfinder image
 
+// Depth bokeh (master only). u_depth: [0, n) normalized disparity (0 = far, 1 = near) on the
+// network's grid, [n, 2n) the nearer-side blur radius (px) max-dilated by the largest CoC, [2n, 3n) the portrait subject matte (0..1).
+layout(std430, binding = 20) readonly buffer DepthBuffer {
+    float u_depth[];
+};
+layout(binding = 21, rg32f) writeonly uniform image2D u_coc_out;   // r = signed CoC radius in output px (+ near, - far), g = subject matte
+layout(binding = 22) uniform sampler2D u_coc_tex;
+
+layout(std140, binding = 23) uniform DepthParams {
+    vec4 d_a;    // x=enable, y=CoC radius at infinity (px), z=focus disparity, w=in-focus tolerance (px)
+    vec4 d_b;    // x=max |CoC| (px), y=grid width, z=grid height, w=iris blades (0 = circle)
+    vec4 d_c;    // x=blade roundness, y=cat's-eye strength, z=rim brightness, w=max taps
+    vec4 d_d;    // x=highlight weight boost, y=portrait matte present
+};
+
 layout(push_constant) uniform PushConstants {
     uint u_width;              // 0   raw width
     uint u_height;             // 4   raw height
@@ -137,7 +162,7 @@ layout(push_constant) uniform PushConstants {
     uint u_packed_ring_info;   // 108 (bits 0..1 slot, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave)
     uint u_level;              // 112 PYRAMID destination level (1..5)
     uint u_flags;              // 116 FLAG_*
-    uint u_reserved0;          // 120
+    uint u_reserved0;          // 120 BOKEH (depth): first row of the band
     uint u_reserved1;          // 124
 };
 
@@ -585,6 +610,8 @@ void stagePyramid() {
 // =============================================================================
 // STAGE 3: Super 70mm IMAX shallow bokeh gather (CoC in output pixels)
 // =============================================================================
+void stageBokehDepth();
+
 float cocAt(vec2 uv, vec2 outSize) {
     vec2 d = (uv - f_bokeh.zw) * vec2(outSize.x / outSize.y, 1.0);
     float r = length(d);
@@ -592,6 +619,7 @@ float cocAt(vec2 uv, vec2 outSize) {
 }
 
 void stageBokeh() {
+    if (d_a.x > 0.5) { stageBokehDepth(); return; }
     ivec2 bSize = imageSize(u_bokeh_out);
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= bSize.x || p.y >= bSize.y) return;
@@ -625,6 +653,153 @@ void stageBokeh() {
     vec3 center = textureLod(u_aces_pyramid, uv, 0.0).rgb;
     vec3 result = (wAcc > 1e-4) ? acc / wAcc : center;
     imageStore(u_bokeh_out, p, vec4(result, coc));
+}
+
+// =============================================================================
+// STAGE 5 + depth mode of STAGE 3: monocular-depth bokeh (master only)
+// =============================================================================
+float depthCoc(float d) {
+    // Relative disparity has no true zero at infinity, so the divisor is floored well above 0 and
+    // the strength scaled back: a far focus point no longer blows up every nearer object.
+    float dd = d - d_a.z;
+    float c = 0.6 * d_a.y * dd / max(d_a.z, 0.4);
+    c = clamp(c, -d_b.x, d_b.x);
+    // Depth-of-field band around the focus disparity, then a soft ramp in pixels: no mask edge.
+    c *= smoothstep(0.04, 0.16, abs(dd));
+    return c * smoothstep(d_a.w, 3.0 * d_a.w, abs(c));
+}
+
+vec3 depthGuide(vec3 c) {
+    return c / (c + 0.25);
+}
+
+// Joint bilateral upsample of the network's disparity grid, guided by the scene.
+void stageDepth() {
+    ivec2 size = imageSize(u_coc_out);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) return;
+
+    ivec2 gs = ivec2(d_b.y, d_b.z);
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    vec2 g = uv * vec2(gs) - 0.5;
+    ivec2 i0 = ivec2(floor(g));
+    vec3 gp = depthGuide(textureLod(u_aces_pyramid, uv, 1.0).rgb);
+
+    float num = 0.0, den = 0.0, mnum = 0.0;
+    int gn = gs.x * gs.y;
+    for (int dy = -1; dy <= 2; ++dy) {
+        for (int dx = -1; dx <= 2; ++dx) {
+            ivec2 q = clamp(i0 + ivec2(dx, dy), ivec2(0), gs - 1);
+            vec2 dq = vec2(q) - g;
+            float ws = exp(-dot(dq, dq) / (2.0 * 1.5));
+            vec3 gq = depthGuide(textureLod(u_aces_pyramid, (vec2(q) + 0.5) / vec2(gs), 1.0).rgb);
+            vec3 dg = gp - gq;
+            float wr = exp(-dot(dg, dg) / (2.0 * 0.06));   // loose: edges follow colour without a cut-out
+            float w = ws * (wr + 1e-4);
+            num += w * u_depth[q.y * gs.x + q.x];
+            if (d_d.y > 0.5) mnum += w * u_depth[2 * gn + q.y * gs.x + q.x];
+            den += w;
+        }
+    }
+    // Portrait: the subject (feathered matte, bilaterally upsampled like depth) is not blurred; the
+    // blur grows with |disparity - focus| elsewhere. No hard cut-out: hair edges blend.
+    float matte = clamp(mnum / max(den, 1e-8), 0.0, 1.0);
+    matte = smoothstep(0.08, 0.92, matte);
+    imageStore(u_coc_out, p, vec4(depthCoc(num / max(den, 1e-8)) * (1.0 - matte), matte, 0.0, 0.0));
+}
+
+// Radius of the (unit-circumradius) iris polygon along direction th; the gather region is the
+// scatter shape turned 180 degrees.
+float irisRho(float th) {
+    int n = int(d_b.w + 0.5);
+    if (n < 3) return 1.0;
+    float seg = 6.2831853 / float(n);
+    float a = mod(th + 3.14159265, seg) - 0.5 * seg;
+    float poly = cos(3.14159265 / float(n)) / cos(a);
+    return mix(poly, 1.0, d_c.x);
+}
+
+float blendToAlpha(float s) {
+    // FILM mixes with smoothstep(0.75, 2.0, alpha): invert it so alpha carries the blend factor.
+    s = clamp(s, 0.0, 1.0);
+    return 0.75 + 1.25 * (0.5 - sin(asin(1.0 - 2.0 * s) / 3.0));
+}
+
+float depthFgReach(vec2 uv) {
+    ivec2 gs = ivec2(d_b.y, d_b.z);
+    int n = gs.x * gs.y;
+    vec2 g = uv * vec2(gs) - 0.5;
+    ivec2 i0 = ivec2(floor(g));
+    vec2 f = g - vec2(i0);
+    ivec2 a = clamp(i0, ivec2(0), gs - 1);
+    ivec2 b = clamp(i0 + 1, ivec2(0), gs - 1);
+    float v00 = u_depth[n + a.y * gs.x + a.x], v10 = u_depth[n + a.y * gs.x + b.x];
+    float v01 = u_depth[n + b.y * gs.x + a.x], v11 = u_depth[n + b.y * gs.x + b.x];
+    return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+}
+
+void stageBokehDepth() {
+    ivec2 bSize = imageSize(u_bokeh_out);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    p.y += int(u_reserved0);
+    if (p.x >= bSize.x || p.y >= bSize.y) return;
+
+    vec2 size = vec2(bSize);
+    vec2 uv = (vec2(p) + 0.5) / size;
+    vec2 cm = texelFetch(u_coc_tex, p, 0).rg;
+    float cc = cm.r;
+    float bgC = 1.0 - smoothstep(0.3, 0.7, cm.g);   // 1 for a background centre
+    float absCc = abs(cc);
+    float Rs = max(absCc, depthFgReach(uv));
+    vec3 centre = textureLod(u_aces_pyramid, uv, 0.0).rgb;
+    if (Rs < 0.6) {
+        imageStore(u_bokeh_out, p, vec4(centre, 0.0));
+        return;
+    }
+
+    int taps = int(clamp(Rs * 0.9 + 16.0, 16.0, d_c.w));
+    float spacing = Rs * 1.7725 / sqrt(float(taps));
+    float lod = clamp(log2(max(spacing, 1.0)), 0.0, 5.0);
+    const float GOLDEN_ANGLE = 2.39996323;
+    float rot = hash3f(uvec3(uint(p.x), uint(p.y), 0x9e37u)).x * 6.2831853;
+
+    // Cat's eye: toward the frame edge the aperture is clipped to a lens (two shifted circles).
+    vec2 dv = (uv - 0.5) * vec2(size.x / size.y, 1.0);
+    vec2 sh = 0.5 * d_c.y * dv / length(vec2(0.5 * size.x / size.y, 0.5));
+
+    vec3 acc = vec3(0.0);
+    float wAcc = 0.0, blur = 0.0;
+    for (int i = 0; i < taps; ++i) {
+        float rr = sqrt((float(i) + 0.5) / float(taps));
+        float th = float(i) * GOLDEN_ANGLE + rot;
+        float rho = irisRho(th);
+        vec2 o = rr * rho * vec2(cos(th), sin(th));
+        float shape = smoothstep(1.04, 0.96, max(length(o - sh), length(o + sh)));
+        vec2 tpos = vec2(p) + 0.5 + o * Rs;
+        vec2 csm = texelFetch(u_coc_tex, clamp(ivec2(tpos), ivec2(0), bSize - 1), 0).rg;
+        float cs = csm.r;
+        vec3 s = textureLod(u_aces_pyramid, tpos / size, lod).rgb;
+        float acs = abs(cs);
+        // Farther samples may not spread past the centre's own blur, so a sharp foreground
+        // stays clean; nearer (blurrier) samples spill over a sharp background.
+        float farther = smoothstep(0.0, 2.0, cc - cs);
+        float reachR = mix(acs, min(acs, absCc), farther);
+        float reach = clamp(reachR - rr * Rs + 1.0, 0.0, 1.0);
+        float w = reach / max(reachR * reachR, 1.0);
+        w *= mix(1.0, 1.0 - csm.g, bgC);                                // background never gathers the subject: no halos
+        w *= (1.0 + d_d.x * smoothstep(0.9, 2.5, luminanceAP1(s)))      // clipped highlights form discs
+           * (1.0 + d_c.z * smoothstep(0.75, 1.0, rr))                  // faint soap-bubble rim
+           * shape * rho * rho;
+        acc += s * w;
+        wAcc += w;
+        blur += w * smoothstep(0.75, 2.0, reachR);
+    }
+    float wc = (1.0 + d_d.x * smoothstep(0.9, 2.5, luminanceAP1(centre))) / max(absCc * absCc, 1.0);
+    acc += centre * wc;
+    wAcc += wc;
+
+    float amt = max(clamp(blur / max(wAcc, 1e-6), 0.0, 1.0), smoothstep(0.75, 2.0, absCc));
+    imageStore(u_bokeh_out, p, vec4(acc / max(wAcc, 1e-6), blendToAlpha(amt)));
 }
 
 // =============================================================================
@@ -807,6 +982,100 @@ vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, ou
     lin = max(lin - linFloor, vec3(0.0)) * (0.18 / (0.18 - linFloor));
     if (mono) lin = vec3(lin.g);
     return lin;
+}
+
+// =============================================================================
+// Spectral film model (Phase 3, spektrafilm method). The scene's upsampled spectrum exposes the
+// stock's three layers through their datasheet sensitivities (camera table over ACEScg
+// chromaticity), the datasheet curves develop them, and the negative is printed through a
+// simulated enlarger onto paper (Beer-Lambert, neutral-filtered for mid grey), a slide is viewed
+// on a light box, a B&W negative goes onto a neutral paper. Output is display-linear, white = 1.
+// =============================================================================
+const int SPEC_HDR = 16;
+
+vec3 specVec3(int f) { return vec3(u_spec[f], u_spec[f + 1], u_spec[f + 2]); }
+
+// Exposure per unit r+g+b at ACEScg chromaticity uv (bilinear on the camera grid).
+vec3 specCamera(vec2 uv) {
+    int n = int(u_spec[7] + 0.5);
+    vec2 g = clamp(uv, 0.0, 1.0) * float(n - 1);
+    ivec2 i0 = clamp(ivec2(floor(g)), ivec2(0), ivec2(n - 2));
+    vec2 t = g - vec2(i0);
+    int f00 = SPEC_HDR + (i0.y * n + i0.x) * 4;
+    int f01 = f00 + 4;
+    int f10 = f00 + n * 4;
+    int f11 = f10 + 4;
+    return mix(mix(specVec3(f00), specVec3(f01), t.x), mix(specVec3(f10), specVec3(f11), t.x), t.y);
+}
+
+int specCurveBase() { int n = int(u_spec[7] + 0.5); return SPEC_HDR + n * n * 4; }
+
+vec3 specCurves(vec3 logE) {
+    int cn = int(u_spec[8] + 0.5);
+    int base = specCurveBase();
+    vec3 x = clamp((logE + 3.0) / 7.0, 0.0, 1.0) * float(cn - 1);
+    vec3 D;
+    for (int k = 0; k < 3; ++k) {
+        int i0 = min(int(floor(x[k])), cn - 2);
+        float t = x[k] - float(i0);
+        D[k] = mix(u_spec[base + i0 * 4 + k], u_spec[base + (i0 + 1) * 4 + k], t);
+    }
+    return D;
+}
+
+// Print / light-box table: layer densities -> sRGB-encoded display value (trilinear).
+vec3 specPrint(vec3 D) {
+    int n = int(u_spec[3] + 0.5);
+    int base = specCurveBase() + int(u_spec[8] + 0.5) * 4;
+    vec3 q = clamp(D / max(specVec3(4), vec3(1e-3)), 0.0, 1.0) * float(n - 1);
+    ivec3 i0 = min(ivec3(floor(q)), ivec3(n - 2));
+    vec3 t = q - vec3(i0);
+    vec3 c[8];
+    for (int k = 0; k < 8; ++k) {
+        ivec3 o = i0 + ivec3(k >> 2, (k >> 1) & 1, k & 1);
+        c[k] = specVec3(base + ((o.x * n + o.y) * n + o.z) * 4);
+    }
+    vec3 y0 = mix(mix(c[0], c[1], t.z), mix(c[2], c[3], t.z), t.y);
+    vec3 y1 = mix(mix(c[4], c[5], t.z), mix(c[6], c[7], t.z), t.y);
+    return mix(y0, y1, t.x);
+}
+
+float specBwPrint(float D) {
+    int cn = int(u_spec[8] + 0.5);
+    int base = specCurveBase() + cn * 4;
+    float x = clamp(D / max(u_spec[4], 1e-3), 0.0, 1.0) * float(cn - 1);
+    int i0 = min(int(floor(x)), cn - 2);
+    return mix(u_spec[base + i0 * 4], u_spec[base + (i0 + 1) * 4], x - float(i0));
+}
+
+vec3 srgbEotf(vec3 v) {
+    return mix(v / 12.92, pow((v + 0.055) / 1.055, vec3(2.4)), greaterThan(v, vec3(0.04045)));
+}
+
+vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
+    LookGpu L = u_looks[idx];
+    int type = int(u_spec[1] + 0.5);
+    bool mono = type == 2;
+
+    vec3 rgb = max(scene, vec3(1e-6));
+    float s = rgb.r + rgb.g + rgb.b;
+    vec3 E = s * specCamera(rgb.rg / s);
+    float offset = u_spec[2];
+    vec3 logE = log2(max(E, vec3(1e-9)) / 0.18) * 0.30102999566 + offset;
+    vec3 D = specCurves(logE);
+    vec3 dMid = specCurves(vec3(offset));
+    vec3 dMax = max(specVec3(4) / 1.05, vec3(0.1));
+
+    // Push / pull development: contrast about mid grey (slides: their density runs the other way,
+    // the same expansion still steepens them) and grain, as in the curve model.
+    float push = f_bokeh2.z;
+    D = dMid + (D - dMid) * (1.0 + 0.12 * push);
+    float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+    D = max(D, vec3(0.0));
+
+    if (mono) return vec3(specBwPrint(D.g));
+    return srgbEotf(specPrint(D));
 }
 
 vec3 legacyEmulsion(vec3 acescg, ivec2 outCoord) {
@@ -1149,7 +1418,10 @@ void stageFilm() {
     bool encoded = false;
     bool printed = false;
     vec3 linearOut;
-    if (lookIdx >= 0) {
+    if (lookIdx >= 0 && int(u_spec[0] + 0.5) == lookIdx && u_spec[0] >= 0.0) {
+        linearOut = spectralEmulsion(lookIdx, scene, p);
+        printed = true;
+    } else if (lookIdx >= 0) {
         linearOut = emulsion120(lookIdx, scene, p, master, encoded, printed);
     } else {
         linearOut = legacyEmulsion(scene, p);
@@ -1224,6 +1496,8 @@ void main() {
         stagePyramid();
     } else if (STAGE == STAGE_BOKEH) {
         stageBokeh();
+    } else if (STAGE == STAGE_DEPTH) {
+        stageDepth();
     } else {
         stageFilm();
     }
