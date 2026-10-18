@@ -240,6 +240,8 @@ private:
         std::vector<float> den;
         std::vector<uint16_t> ref;
         std::vector<uint16_t> peak;
+        std::vector<float> refSmall;   // reference frame boxed down 8x (burst alignment)
+        int smallW = 0, smallH = 0;
     };
     StackState mStack;
     std::atomic<bool> mStackActive{false};

@@ -2863,6 +2863,69 @@ void parallelRows(int rows, Fn fn) {
 }
 } // namespace
 
+namespace {
+// 8x8 box average of a raw frame (black-subtracted), used to find the hand-shake shift between burst frames.
+void boxDown8(const uint16_t* src, int stride, int W, int H, float black, std::vector<float>& out, int& sw, int& sh) {
+    sw = W / 8; sh = H / 8;
+    out.assign(static_cast<size_t>(sw) * sh, 0.0f);
+    float* o = out.data();
+    parallelRows(sh, [=](int y0, int y1) {
+        for (int by = y0; by < y1; ++by) {
+            for (int bx = 0; bx < sw; ++bx) {
+                float sum = 0.0f;
+                for (int yy = 0; yy < 8; ++yy) {
+                    const uint16_t* r = src + static_cast<size_t>(by * 8 + yy) * stride + bx * 8;
+                    for (int xx = 0; xx < 8; ++xx) sum += std::max(static_cast<float>(r[xx]) - black, 0.0f);
+                }
+                o[static_cast<size_t>(by) * sw + bx] = sum * (1.0f / 64.0f);
+            }
+        }
+    });
+}
+
+inline float cellLum(const uint16_t* p, int stride, int x, int y) {
+    const uint16_t* r = p + static_cast<size_t>(y) * stride + x;
+    return 0.25f * (static_cast<float>(r[0]) + r[1] + r[stride] + r[stride + 1]);
+}
+} // namespace
+
+// Translation (even pixels) that maps this frame onto the reference: coarse 8x search, then a 2-pixel refine.
+static void estimateShift(const std::vector<float>& refSmall, const std::vector<float>& curSmall, int sw, int sh,
+                          const uint16_t* ref, int W, int H, const uint16_t* cur, int stride, int& outX, int& outY) {
+    const int R = 12, m = 14;
+    double best = 1e30; int bx = 0, by = 0;
+    for (int dy = -R; dy <= R; ++dy) {
+        for (int dx = -R; dx <= R; ++dx) {
+            double sad = 0.0; int cnt = 0;
+            for (int y = m; y < sh - m; y += 2) {
+                const float* a = &refSmall[static_cast<size_t>(y) * sw];
+                const float* b = &curSmall[static_cast<size_t>(y + dy) * sw + dx];
+                for (int x = m; x < sw - m; x += 2) { sad += std::fabs(a[x] - b[x]); ++cnt; }
+            }
+            sad /= std::max(cnt, 1);
+            if (sad < best) { best = sad; bx = dx; by = dy; }
+        }
+    }
+    // Refine at cell (2 px) resolution around the coarse answer.
+    const int cx0 = bx * 8, cy0 = by * 8;
+    double best2 = 1e30; int fx = cx0, fy = cy0;
+    for (int dy = -8; dy <= 8; dy += 2) {
+        for (int dx = -8; dx <= 8; dx += 2) {
+            const int sx = cx0 + dx, sy = cy0 + dy;
+            double sad = 0.0; int cnt = 0;
+            for (int y = 128; y < H - 128; y += 16) {
+                for (int x = 128; x < W - 128; x += 16) {
+                    sad += std::fabs(cellLum(ref, W, x, y) - cellLum(cur, stride, x + sx, y + sy));
+                    ++cnt;
+                }
+            }
+            sad /= std::max(cnt, 1);
+            if (sad < best2) { best2 = sad; fx = sx; fy = sy; }
+        }
+    }
+    outX = fx & ~1; outY = fy & ~1;
+}
+
 bool VulkanRawPipeline::stackBegin(int mode) {
     std::lock_guard<std::mutex> lock(mRenderMutex);
     if (!mDevice || !mLastFrame.valid || mode < 0 || mode > 3) return false;
@@ -2909,14 +2972,32 @@ bool VulkanRawPipeline::stackAdd(float relExposure) {
     uint16_t* ref = s.ref.data();
     uint16_t* peak = s.peak.data();
 
+    // Burst: line each frame up with the first one (hand shake), whole Bayer cells so the pattern holds.
+    int shx = 0, shy = 0;
+    if (mode == 0) {
+        std::vector<float> cur;
+        int sw = 0, sh = 0;
+        boxDown8(src, stride, W, H, black, cur, sw, sh);
+        if (first) {
+            s.refSmall = cur; s.smallW = sw; s.smallH = sh;
+        } else if (s.smallW == sw && s.smallH == sh) {
+            estimateShift(s.refSmall, cur, sw, sh, ref, W, H, src, stride, shx, shy);
+            LOGI("Stack align frame %d: shift %d,%d px", s.frames, shx, shy);
+        }
+    }
+
     parallelRows(H, [=](int y0, int y1) {
         for (int y = y0; y < y1; y += 2) {
-            const uint16_t* r0 = src + static_cast<size_t>(y) * stride;
+            const int sy = y + shy;
+            if (sy < 0 || sy + 1 >= H) continue;
+            const uint16_t* r0 = src + static_cast<size_t>(sy) * stride;
             const uint16_t* r1 = r0 + stride;
             const size_t o0 = static_cast<size_t>(y) * W;
             const size_t o1 = o0 + W;
             for (int x = 0; x < W; x += 2) {
-                const uint16_t v[4] = {r0[x], r0[x + 1], r1[x], r1[x + 1]};
+                const int sx = x + shx;
+                if (sx < 0 || sx + 1 >= W) continue;
+                const uint16_t v[4] = {r0[sx], r0[sx + 1], r1[sx], r1[sx + 1]};
                 const size_t idx[4] = {o0 + x, o0 + x + 1, o1 + x, o1 + x + 1};
                 if (mode == 3) {
                     for (int k = 0; k < 4; ++k) peak[idx[k]] = std::max(peak[idx[k]], v[k]);
