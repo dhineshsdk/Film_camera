@@ -771,7 +771,7 @@ public class CameraEngine {
         long autoCap = (nightAuto && manualShutterNs == 0) ? Math.min(filmMaxAutoShutterNs, MAX_SHUTTER_NS) : filmMaxAutoShutterNs;
         double tMax = Math.min(autoCap, slowestShutterNs()) * 1e-9;
         double under = (tWanted > tMax) ? Math.log(tWanted / tMax) / Math.log(2.0) : 0.0;
-        int pushCap = autoGain ? 3 : 2;
+        int pushCap = autoGain ? 3 : 4;   // night merge pays for up to +4 stops of gain
         if ((autoGain || nightAuto) && under > 0.05 && push < pushCap) {
             push = Math.min(pushCap, push + (int) Math.ceil(under - 0.05));
             ei = boxIso * Math.pow(2.0, push);
@@ -804,7 +804,7 @@ public class CameraEngine {
         underexposureEv = (float) under;
         effectiveEi = (int) Math.round(ei);
         DngSaver.setExposureIndex(effectiveEi);
-        VulkanRenderer.nativeSetFilmExposure(filmDigitalGain, push);
+        VulkanRenderer.nativeSetFilmExposure(filmDigitalGain, Math.min(push, 3));   // the look's push range stops at +3
     }
 
     // Video: shutter fixed by the angle, the exposure index floats so ISO solves exposure.
@@ -965,6 +965,9 @@ public class CameraEngine {
                 && (autoPushStops > 0.5f || underexposureEv > 0.3f || (filmKey.isEmpty() && currentIso >= 1000))) {
             stackMode = STACK_BURST;
             nightRestore = true;
+            burstTarget = (autoPushStops >= 3f) ? 12 : BURST_FRAMES;
+        } else if (stackMode == STACK_BURST) {
+            burstTarget = BURST_FRAMES;
         }
         if (stackMode != STACK_OFF && !stackActive && (stackMode != STACK_HDR || manualAeActive)) {
             // Multi-frame shot: the frame listener collects the frames, then takes the normal capture path.
@@ -986,6 +989,7 @@ public class CameraEngine {
     public static final int STACK_TRAILS = 4;   // long exposure, brightest value per pixel (stars, lights)
 
     private static final int BURST_FRAMES = 8;
+    private volatile int burstTarget = BURST_FRAMES;   // 12 when the night push is 3 or more stops
     private static final int MAX_STACK_FRAMES = 600;
     private static final int STACK_SETTLE_FRAMES = 5;
     private static final int STACK_TIMEOUT_FRAMES = 90;
@@ -1122,8 +1126,8 @@ public class CameraEngine {
             case STACK_BURST:
                 if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
                 stackFrames++;
-                postStack("Burst " + stackFrames + "/" + BURST_FRAMES);
-                if (stackFrames >= BURST_FRAMES) return stackFinish();
+                postStack("Burst " + stackFrames + "/" + burstTarget);
+                if (stackFrames >= burstTarget) return stackFinish();
                 return false;
 
             case STACK_LONG:
