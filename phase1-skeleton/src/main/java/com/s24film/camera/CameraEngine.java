@@ -1033,7 +1033,78 @@ public class CameraEngine {
         }
     }
 
+    // ---------------------------------------------------------------- Flash
+    // The LED runs as a steady torch while the frame is metered and shot: the exposure loop and the
+    // per-frame white balance both see the real mixed light, so there is no pre-flash guesswork and
+    // the merge/exposure paths work unchanged. The torch goes off again a moment after the shot.
+    public static final int FLASH_OFF = 0, FLASH_AUTO = 1, FLASH_ON = 2;
+    private volatile int flashMode = FLASH_AUTO;
+    private volatile boolean torchOn = false;
+    private static final long FLASH_METER_MS = 1600;   // LED ramp-up plus the exposure loop settling (device: ~1.3 s)
+    private static final long FLASH_HOLD_MS = 2500;
+
+    public void setFlashMode(int mode) { flashMode = Math.max(FLASH_OFF, Math.min(FLASH_ON, mode)); }
+    public int getFlashMode() { return flashMode; }
+
+    public boolean hasFlash() {
+        Boolean fl = (characteristics != null) ? characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) : null;
+        return fl != null && fl && camMatrixIdx != 1;   // the front camera has no LED
+    }
+
+    private boolean lowLightNow() {
+        return autoPushStops > 0.5f || underexposureEv > 0.3f || (filmKey.isEmpty() && currentIso >= 1000);
+    }
+
+    private void setTorch(boolean on) {
+        torchOn = on;
+        if (cameraHandler != null) cameraHandler.post(new TorchTask(this, on));
+    }
+
+    static class TorchTask implements Runnable {
+        private final CameraEngine e; private final boolean on;
+        TorchTask(CameraEngine e, boolean on) { this.e = e; this.on = on; }
+        @Override public void run() {
+            if (e.captureSession == null || e.previewBuilder == null) return;
+            try {
+                e.previewBuilder.set(CaptureRequest.FLASH_MODE,
+                    on ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
+                e.captureSession.setRepeatingRequest(e.previewBuilder.build(), new CaptureCallback(e), e.cameraHandler);
+            } catch (Exception ex) {
+                Log.e(TAG, "Torch update failed: " + ex.getMessage(), ex);
+            }
+        }
+    }
+
+    static class FlashShootTask implements Runnable {
+        private final CameraEngine e; private final String stock; private final DngSaver.Callback cb;
+        FlashShootTask(CameraEngine e, String stock, DngSaver.Callback cb) { this.e = e; this.stock = stock; this.cb = cb; }
+        @Override public void run() {
+            e.shootNow(stock, cb);
+            if (e.cameraHandler != null) e.cameraHandler.postDelayed(new TorchOffTask(e), FLASH_HOLD_MS);
+        }
+    }
+
+    static class TorchOffTask implements Runnable {
+        private final CameraEngine e;
+        TorchOffTask(CameraEngine e) { this.e = e; }
+        @Override public void run() { if (e.torchOn) e.setTorch(false); }
+    }
+
     public synchronized void triggerCapture(String stockShortName, DngSaver.Callback callback) {
+        boolean wantFlash = !videoMode && !stackActive && manualAeActive && hasFlash()
+            && (flashMode == FLASH_ON || (flashMode == FLASH_AUTO && lowLightNow()));
+        Log.i(TAG, "Flash: mode " + flashMode + " want " + wantFlash + " hasFlash " + hasFlash() + " lowLight " + lowLightNow() + " ae " + manualAeActive + " video " + videoMode + " stack " + stackActive);
+        if (wantFlash && !torchOn && cameraHandler != null) {
+            lockedCaptureOrient = currentActiveOrient();
+            setTorch(true);
+            postStack("Flash");
+            cameraHandler.postDelayed(new FlashShootTask(this, stockShortName, callback), FLASH_METER_MS);
+            return;
+        }
+        shootNow(stockShortName, callback);
+    }
+
+    private synchronized void shootNow(String stockShortName, DngSaver.Callback callback) {
         this.pendingStockShortName = stockShortName;
         this.pendingDngCallback = callback;
         // Lock the grip now: the shutter tap itself can jolt the phone before the next frame lands.

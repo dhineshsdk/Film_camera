@@ -121,7 +121,7 @@ public class MainActivity extends Activity implements
     private SeekBar seekEv, seekGrain, seekHalation;
     private Button btn06x, btn1x, btn3x, btnFront, btnShutter, btnRecordVideo;
     private View viewShutterFlash;
-    private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnWb, btnRotate, btnPortrait;
+    private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnFlash, btnWb, btnRotate, btnPortrait;
     private final Button[] stockButtons = new Button[12];
     private HorizontalScrollView stripStocks;
     private final Button[] formatButtons = new Button[4];
@@ -249,6 +249,7 @@ public class MainActivity extends Activity implements
         btnBurst = findViewById(R.id.btn_burst);
         btnPortrait = findViewById(R.id.btn_portrait);
         btnStack = findViewById(R.id.btn_stack);
+        btnFlash = findViewById(R.id.btn_flash);
         btnWb = findViewById(R.id.btn_wb);
         btnRotate = findViewById(R.id.btn_rotate);
 
@@ -326,6 +327,7 @@ public class MainActivity extends Activity implements
         btnBurst.setOnClickListener(this);
         btnPortrait.setOnClickListener(this);
         btnStack.setOnClickListener(this);
+        btnFlash.setOnClickListener(this);
         btnWb.setOnClickListener(this);
         btnRotate.setOnClickListener(this);
 
@@ -1097,6 +1099,9 @@ public class MainActivity extends Activity implements
             burstModeEnabled = !burstModeEnabled;
             btnBurst.setText(burstModeEnabled ? "4F Burst" : "1F Fast");
             syncLookToNative();
+        } else if (id == R.id.btn_flash) {
+            cameraEngine.setFlashMode((cameraEngine.getFlashMode() + 1) % 3);
+            btnFlash.setText("Flash: " + new String[] {"Off", "Auto", "On"}[cameraEngine.getFlashMode()]);
         } else if (id == R.id.btn_stack) {
             stackChoice = (stackChoice + 1) % STACK_CHOICES.length;
             applyStackChoice();
