@@ -404,6 +404,7 @@
             <TextView android:id="@+id/tab_tune" style="@style/SheetTab" android:text="Tune" />
             <TextView android:id="@+id/tab_film" style="@style/SheetTab" android:text="Film" />
             <TextView android:id="@+id/tab_camera" style="@style/SheetTab" android:text="Camera" />
+            <TextView android:id="@+id/tab_pro" style="@style/SheetTab" android:text="Pro" />
             <TextView android:id="@+id/tab_display" style="@style/SheetTab" android:text="Display" />
             <TextView android:id="@+id/tab_debug" style="@style/SheetTab" android:text="Debug" android:visibility="gone" />
         </LinearLayout>
@@ -488,28 +489,6 @@
                             <Button android:id="@+id/btn_portrait" style="@style/Chip" android:text="Portrait: Off" />
                         </LinearLayout>
                     </HorizontalScrollView>
-                    <TextView style="@style/RowLabel" android:text="PRO CONTROLS" />
-                    <TextView android:id="@+id/tv_pro_iso" style="@style/RowLabel" android:layout_marginTop="2dp" android:text="ISO  AUTO" />
-                    <SeekBar android:id="@+id/seek_pro_iso" style="@style/SheetSeek" android:max="21" android:progress="0" />
-                    <TextView android:id="@+id/tv_pro_wb" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="WHITE BALANCE  AUTO" />
-                    <SeekBar android:id="@+id/seek_pro_wb" style="@style/SheetSeek" android:max="70" android:progress="0" />
-                    <TextView android:id="@+id/tv_pro_tint" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="TINT  0" />
-                    <SeekBar android:id="@+id/seek_pro_tint" style="@style/SheetSeek" android:max="20" android:progress="10" />
-                    <TextView android:id="@+id/tv_pro_focus" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="FOCUS  AUTO" />
-                    <SeekBar android:id="@+id/seek_pro_focus" style="@style/SheetSeek" android:max="20" android:progress="0" />
-                    <TextView style="@style/RowLabel" android:text="APERTURE (f/)" />
-                    <HorizontalScrollView style="@style/ChipRow">
-                        <LinearLayout android:id="@+id/row_pro_aperture" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
-                    </HorizontalScrollView>
-                    <TextView style="@style/RowLabel" android:text="SHOOTING AIDS" />
-                    <HorizontalScrollView style="@style/ChipRow">
-                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
-                            <Button android:id="@+id/btn_pro_peaking" style="@style/Chip" android:text="Peaking: Off" />
-                            <Button android:id="@+id/btn_pro_histogram" style="@style/Chip" android:text="Histogram: Off" />
-                            <Button android:id="@+id/btn_pro_zones" style="@style/Chip" android:text="Zones: Off" />
-                            <Button android:id="@+id/btn_pro_roll" style="@style/Chip" android:text="New roll" />
-                        </LinearLayout>
-                    </HorizontalScrollView>
                     <TextView style="@style/RowLabel" android:text="FRAME" />
                     <HorizontalScrollView style="@style/ChipRow">
                         <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
@@ -517,6 +496,7 @@
                             <Button android:id="@+id/btn_anamorphic" style="@style/Chip" android:text="Desqueeze: 1.0x" />
                         </LinearLayout>
                     </HorizontalScrollView>
+                    <LinearLayout android:id="@+id/group_video" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
                     <TextView style="@style/RowLabel" android:text="VIDEO  FPS" />
                     <HorizontalScrollView style="@style/ChipRow">
                         <LinearLayout android:id="@+id/row_video_fps" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
@@ -537,6 +517,7 @@
                     <HorizontalScrollView style="@style/ChipRow">
                         <LinearLayout android:id="@+id/row_video_audio" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
                     </HorizontalScrollView>
+                    </LinearLayout>
                     <TextView style="@style/RowLabel" android:text="LENS CHARACTER" />
                     <HorizontalScrollView style="@style/ChipRow">
                         <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
@@ -549,6 +530,32 @@
                             <Button android:id="@+id/btn_burst" style="@style/Chip" android:text="4F Burst" />
                             <Button android:id="@+id/btn_stack" style="@style/Chip" android:text="Single" />
                             <Button android:id="@+id/btn_step_print" style="@style/Chip" android:text="24fps Normal" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+                </LinearLayout>
+
+                <!-- Pro: manual exposure, focus and shooting aids -->
+                <LinearLayout android:id="@+id/page_pro" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+                    <TextView style="@style/RowLabel" android:text="PRO CONTROLS" />
+                    <TextView android:id="@+id/tv_pro_iso" style="@style/RowLabel" android:layout_marginTop="2dp" android:text="ISO  AUTO" />
+                    <SeekBar android:id="@+id/seek_pro_iso" style="@style/SheetSeek" android:max="21" android:progress="0" />
+                    <TextView android:id="@+id/tv_pro_wb" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="WHITE BALANCE  AUTO" />
+                    <SeekBar android:id="@+id/seek_pro_wb" style="@style/SheetSeek" android:max="70" android:progress="0" />
+                    <TextView android:id="@+id/tv_pro_tint" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="TINT  0" />
+                    <SeekBar android:id="@+id/seek_pro_tint" style="@style/SheetSeek" android:max="20" android:progress="10" />
+                    <TextView android:id="@+id/tv_pro_focus" style="@style/RowLabel" android:layout_marginTop="6dp" android:text="FOCUS  AUTO" />
+                    <SeekBar android:id="@+id/seek_pro_focus" style="@style/SheetSeek" android:max="20" android:progress="0" />
+                    <TextView style="@style/RowLabel" android:text="APERTURE (f/)" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:id="@+id/row_pro_aperture" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="SHOOTING AIDS" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_pro_peaking" style="@style/Chip" android:text="Peaking: Off" />
+                            <Button android:id="@+id/btn_pro_histogram" style="@style/Chip" android:text="Histogram: Off" />
+                            <Button android:id="@+id/btn_pro_zones" style="@style/Chip" android:text="Zones: Off" />
+                            <Button android:id="@+id/btn_pro_roll" style="@style/Chip" android:text="New roll" />
                         </LinearLayout>
                     </HorizontalScrollView>
                 </LinearLayout>

@@ -111,8 +111,8 @@ public class MainActivity extends Activity implements
     private TextView tvFilm, tvReadout;
     private View settingsSheet, sheetScrim;
     private ImageButton btnSettings, btnTune;
-    private final TextView[] sheetTabs = new TextView[5];   // Tune, Film, Camera, Display, Debug
-    private final View[] sheetPages = new View[5];
+    private final TextView[] sheetTabs = new TextView[6];   // Tune, Film, Camera, Display, Debug, Pro
+    private final View[] sheetPages = new View[6];
     private int sheetTab = 0;
     private boolean debugMenu = false;   // Debug tab unlocked (long-press the sheet title)
     private boolean showStats = false;   // pipeline stats pill
@@ -221,9 +221,9 @@ public class MainActivity extends Activity implements
         btnSettings = findViewById(R.id.btn_settings);
         btnTune = findViewById(R.id.btn_tune);
         btnStats = findViewById(R.id.btn_stats);
-        int[] tabIds = {R.id.tab_tune, R.id.tab_film, R.id.tab_camera, R.id.tab_display, R.id.tab_debug};
-        int[] pageIds = {R.id.page_tune, R.id.page_film, R.id.page_camera, R.id.page_display, R.id.page_debug};
-        for (int i = 0; i < 5; i++) {
+        int[] tabIds = {R.id.tab_tune, R.id.tab_film, R.id.tab_camera, R.id.tab_display, R.id.tab_debug, R.id.tab_pro};
+        int[] pageIds = {R.id.page_tune, R.id.page_film, R.id.page_camera, R.id.page_display, R.id.page_debug, R.id.page_pro};
+        for (int i = 0; i < 6; i++) {
             sheetTabs[i] = findViewById(tabIds[i]);
             sheetTabs[i].setOnClickListener(this);
             sheetPages[i] = findViewById(pageIds[i]);
@@ -472,6 +472,7 @@ public class MainActivity extends Activity implements
             sheetPages[i].setVisibility(i == sheetTab ? View.VISIBLE : View.GONE);
         }
         boolean sheetOpen = settingsSheet.getVisibility() == View.VISIBLE;
+        findViewById(R.id.group_video).setVisibility(videoMode ? View.VISIBLE : View.GONE);
         btnSettings.setSelected(sheetOpen && sheetTab != 0);
         btnTune.setSelected(sheetOpen && sheetTab == 0);
     }
@@ -1154,9 +1155,9 @@ public class MainActivity extends Activity implements
             showStats = !showStats;
             refreshSelection();
         } else if (id == R.id.tab_tune || id == R.id.tab_film || id == R.id.tab_camera
-                   || id == R.id.tab_display || id == R.id.tab_debug) {
+                   || id == R.id.tab_display || id == R.id.tab_debug || id == R.id.tab_pro) {
             sheetTab = (id == R.id.tab_tune) ? 0 : (id == R.id.tab_film) ? 1 : (id == R.id.tab_camera) ? 2
-                     : (id == R.id.tab_display) ? 3 : 4;
+                     : (id == R.id.tab_display) ? 3 : (id == R.id.tab_pro) ? 5 : 4;
             refreshSelection();
         } else {
             int[] stockBtnIds = {
