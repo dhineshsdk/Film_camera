@@ -60,4 +60,11 @@ public class VulkanRenderer {
     public static native byte[] nativeRenderMasterStill(int[] outDims);
     // Ultra HDR gain plane from the last master render (log2(gain)/log2(3), 8-bit).
     public static native byte[] nativeGetMasterGainmap(int[] outDims);
+    // Multi-frame stacking on the frames already in the RAW ring. Mode: 0 burst average, 1 HDR bracket,
+    // 2 long exposure average, 3 long exposure lighten. Add folds in the newest frame (relExposure =
+    // its ISO x shutter over the reference frame's). Finish merges into the newest ring slot.
+    public static native boolean nativeStackBegin(int mode);
+    public static native boolean nativeStackAdd(float relExposure);
+    public static native boolean nativeStackFinish();
+    public static native void nativeStackEnd();
 }

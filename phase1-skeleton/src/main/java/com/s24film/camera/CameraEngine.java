@@ -862,6 +862,7 @@ public class CameraEngine {
 
     // Runs on the camera thread once per rendered RAW frame.
     private void updateAutoIso() {
+        if (stackActive) return;       // a stack shot owns the exposure until it is merged
         if (isoLadder.length == 0 || captureSession == null || previewBuilder == null) return;
         float mean = VulkanRenderer.nativeGetLastRawMean();
         int boxIso = filmIsoMode ? activeBoxIso() : 0;
@@ -920,10 +921,243 @@ public class CameraEngine {
         this.pendingDngCallback = callback;
         // Lock the grip now: the shutter tap itself can jolt the phone before the next frame lands.
         this.lockedCaptureOrient = currentActiveOrient();
+        if (stackMode != STACK_OFF && !stackActive && (stackMode != STACK_HDR || manualAeActive)) {
+            // Multi-frame shot: the frame listener collects the frames, then takes the normal capture path.
+            this.stackBegun = false;
+            this.stackActive = true;
+            return;
+        }
         this.captureRequested.set(true);
     }
 
+    // ---------------------------------------------------------------- Burst / HDR / long-exposure stacking
+    // Every mode reads the frames the existing RAW stream already delivers (no extra streams: the
+    // Samsung HAL restarts the phone when a stream is left unread). HDR only moves the exposure of
+    // the preview request, then puts it back.
+    public static final int STACK_OFF = 0;
+    public static final int STACK_BURST = 1;    // 8 frames, ghost-rejecting average (cleaner shadows)
+    public static final int STACK_HDR = 2;      // base, -2 EV, +2 EV bracket merged in linear RAW
+    public static final int STACK_LONG = 3;     // long exposure, mean of frames (water, crowds)
+    public static final int STACK_TRAILS = 4;   // long exposure, brightest value per pixel (stars, lights)
+
+    private static final int BURST_FRAMES = 8;
+    private static final int MAX_STACK_FRAMES = 600;
+    private static final int STACK_SETTLE_FRAMES = 5;
+    private static final int STACK_TIMEOUT_FRAMES = 90;
+    private static final long HDR_MAX_SHUTTER_NS = 125_000_000L;   // 1/8 s: the +2 EV frame stays hand-holdable on a rest
+    private static final float HDR_STEP_UNDER = 0.25f;
+    private static final float HDR_STEP_OVER = 4.0f;
+
+    public interface StackStatus {
+        void onStackStatus(String text);
+        void onStackCancelled();
+    }
+
+    private volatile int stackMode = STACK_OFF;
+    private volatile long longExposureMs = 4000L;
+    private volatile StackStatus stackStatus;
+    private volatile boolean stackActive = false;
+    private boolean stackBegun = false;
+    private int stackPhase = 0;
+    private int stackFrames = 0;
+    private int stackSettle = 0;
+    private int stackWait = 0;
+    private long stackStartNs = 0L;
+    private long stackStatusNs = 0L;
+    private int stackBaseIso = 100;
+    private long stackBaseExpNs = 10_000_000L;
+    private double stackBaseProd = 1.0;
+    private int stackTargetIso = 100;
+    private long stackTargetExpNs = 10_000_000L;
+
+    public void setStackMode(int mode) { stackMode = Math.max(STACK_OFF, Math.min(STACK_TRAILS, mode)); }
+    public int getStackMode() { return stackMode; }
+    public void setLongExposureMs(long ms) { longExposureMs = Math.max(500L, Math.min(30_000L, ms)); }
+    public long getLongExposureMs() { return longExposureMs; }
+    public void setStackStatus(StackStatus listener) { stackStatus = listener; }
+    public boolean isStackActive() { return stackActive; }
+
+    private void postStack(String text) {
+        StackStatus s = stackStatus;
+        if (s != null) s.onStackStatus(text);
+    }
+
+    private void postStackThrottled(String text) {
+        long now = System.nanoTime();
+        if (now - stackStatusNs < 200_000_000L) return;
+        stackStatusNs = now;
+        postStack(text);
+    }
+
+    private static int nativeStackMode(int mode) {
+        switch (mode) {
+            case STACK_HDR: return 1;
+            case STACK_LONG: return 2;
+            case STACK_TRAILS: return 3;
+            default: return 0;
+        }
+    }
+
+    /** Puts the exposure back to what the shot started with (HDR moved it). */
+    private void restoreBaseExposure() {
+        if (stackMode == STACK_HDR && stackBegun
+            && (currentIso != stackBaseIso || currentExposureNs != stackBaseExpNs)) {
+            currentIso = stackBaseIso;
+            currentExposureNs = stackBaseExpNs;
+            applyManualExposure();
+        }
+    }
+
+    /** Gives up on the stack: the frame in hand is taken as a normal single capture. */
+    private boolean stackAbort(String why) {
+        Log.w(TAG, "Stack aborted: " + why);
+        restoreBaseExposure();
+        VulkanRenderer.nativeStackEnd();
+        stackActive = false;
+        stackBegun = false;
+        postStack("Stack failed, single frame");
+        return true;
+    }
+
+    private void stackDone() {
+        stackActive = false;
+        stackBegun = false;
+    }
+
+    /** Exposure for a bracket step: shutter first, ISO makes up what the shutter range cannot. */
+    private void planBracket(float factor) {
+        long hi = Math.max(minShutterNs, Math.min(deviceMaxShutterNs, HDR_MAX_SHUTTER_NS));
+        long t = Math.max(minShutterNs, Math.min(hi, (long) (stackBaseExpNs * (double) factor)));
+        double left = (double) factor * stackBaseExpNs / (double) t;
+        stackTargetExpNs = t;
+        stackTargetIso = clampIso((int) Math.round(stackBaseIso * left));
+    }
+
+    private boolean resultMatches(int iso, long expNs) {
+        long e = resultExposureNs;
+        int i = resultIso;
+        return Math.abs(e - expNs) <= expNs * 0.03 + 20_000L && Math.abs(i - iso) <= Math.max(2, iso / 33);
+    }
+
+    /**
+     * Runs on the camera thread once per rendered RAW frame while a stack shot is active.
+     * Returns true when the merge is in the ring and the frame in hand should be captured now.
+     */
+    private boolean stackStep() {
+        long now = System.nanoTime();
+        if (!stackBegun) {
+            if (!VulkanRenderer.nativeStackBegin(nativeStackMode(stackMode))) {
+                stackActive = false;
+                return true;
+            }
+            stackBegun = true;
+            stackPhase = 0;
+            stackFrames = 0;
+            stackSettle = 0;
+            stackWait = 0;
+            stackStartNs = now;
+            stackBaseIso = currentIso;
+            stackBaseExpNs = currentExposureNs;
+            stackBaseProd = (double) resultIso * (double) resultExposureNs;
+            if (stackBaseProd <= 0.0) stackBaseProd = (double) currentIso * currentExposureNs;
+        }
+        stackWait++;
+        if (stackWait > MAX_STACK_FRAMES + STACK_TIMEOUT_FRAMES) return stackAbort("timeout");
+
+        switch (stackMode) {
+            case STACK_BURST:
+                if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
+                stackFrames++;
+                postStack("Burst " + stackFrames + "/" + BURST_FRAMES);
+                if (stackFrames >= BURST_FRAMES) return stackFinish();
+                return false;
+
+            case STACK_LONG:
+            case STACK_TRAILS: {
+                if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
+                stackFrames++;
+                long elapsedMs = (now - stackStartNs) / 1_000_000L;
+                postStackThrottled(String.format(java.util.Locale.US, "Exposing %.1f / %.1f s",
+                    elapsedMs / 1000.0, longExposureMs / 1000.0));
+                if ((elapsedMs >= longExposureMs && stackFrames >= 2) || stackFrames >= MAX_STACK_FRAMES) return stackFinish();
+                return false;
+            }
+
+            case STACK_HDR:
+                return hdrStep();
+
+            default:
+                return stackAbort("bad mode");
+        }
+    }
+
+    // Phases: 0 base frame, 1 under (-2 EV), 2 over (+2 EV), 3 back to base, then merge.
+    private boolean hdrStep() {
+        if (stackPhase == 0) {
+            if (++stackSettle < 2) return false;           // one steady frame after the tap
+            if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
+            stackFrames++;
+            postStack("HDR 1/3");
+            planBracket(HDR_STEP_UNDER);
+            stackPhase = 1;
+            stackSettle = 0;
+            stackWait = 0;
+            currentIso = stackTargetIso;
+            currentExposureNs = stackTargetExpNs;
+            applyManualExposure();
+            return false;
+        }
+        if (stackWait > STACK_TIMEOUT_FRAMES) return stackAbort("exposure never settled");
+        stackSettle = resultMatches(stackTargetIso, stackTargetExpNs) ? stackSettle + 1 : 0;
+        if (stackSettle < STACK_SETTLE_FRAMES) return false;
+
+        double prod = (double) resultIso * (double) resultExposureNs;
+        float rel = (float) (prod / stackBaseProd);
+        if (!VulkanRenderer.nativeStackAdd(rel)) return stackAbort("add failed");
+        stackFrames++;
+        Log.i(TAG, "HDR frame " + stackFrames + " at " + String.format(java.util.Locale.US, "%+.2f EV", Math.log(rel) / Math.log(2.0))
+            + " (ISO " + resultIso + ", " + (resultExposureNs / 1000) + " us)");
+        stackSettle = 0;
+        stackWait = 0;
+        if (stackPhase == 1) {
+            postStack("HDR 2/3");
+            planBracket(HDR_STEP_OVER);
+            stackPhase = 2;
+        } else if (stackPhase == 2) {
+            postStack("HDR 3/3");
+            stackTargetIso = stackBaseIso;
+            stackTargetExpNs = stackBaseExpNs;
+            stackPhase = 3;
+        } else {
+            return stackFinish();
+        }
+        currentIso = stackTargetIso;
+        currentExposureNs = stackTargetExpNs;
+        applyManualExposure();
+        return false;
+    }
+
+    private boolean stackFinish() {
+        boolean ok = VulkanRenderer.nativeStackFinish();
+        restoreBaseExposure();
+        stackDone();
+        if (!ok) {
+            VulkanRenderer.nativeStackEnd();
+            postStack("Stack failed, single frame");
+        } else {
+            postStack("Merged " + stackFrames + " frames");
+        }
+        return true;
+    }
+
     private void closeCameraInternal() {
+        if (stackActive) {
+            stackActive = false;
+            stackBegun = false;
+            VulkanRenderer.nativeStackEnd();
+            StackStatus s = stackStatus;
+            if (s != null) s.onStackCancelled();
+        }
         if (captureSession != null) {
             try {
                 captureSession.stopRepeating();
@@ -1194,6 +1428,7 @@ public class CameraEngine {
             // in the grip locked at shutter press, not whatever the accelerometer reads now.
             boolean capture = engine.captureRequested.compareAndSet(true, false);
             int activeOrient = capture ? engine.lockedCaptureOrient : engine.currentActiveOrient();
+            boolean stacked = false;
             // Shader orientation cases (rear sensor, raw is the scene turned 90 deg CCW):
             //   90 = scene upright for a portrait grip (full sensor), 270 = that turned 180,
             //   0 / 180 = raw un-rotated (3:4 crop), i.e. the scene turned 270 / 90 deg CW.
@@ -1220,6 +1455,17 @@ public class CameraEngine {
                 }
             }
 
+            if (!capture && engine.stackActive) {
+                stacked = true;
+                try {
+                    capture = engine.stackStep();
+                } catch (Throwable t) {
+                    Log.e(TAG, "Stack step failed: " + t.getMessage(), t);
+                    capture = engine.stackAbort("exception");
+                }
+                if (capture) activeOrient = engine.lockedCaptureOrient;
+            }
+
             engine.updateAutoIso();
 
             if (capture) {
@@ -1241,6 +1487,7 @@ public class CameraEngine {
                     master = null;
                     gain = null;
                 }
+                if (stacked) VulkanRenderer.nativeStackEnd();
                 Log.i(TAG, "Master still " + masterDims[0] + "x" + masterDims[1] + " in "
                     + ((System.nanoTime() - t0) / 1_000_000) + " ms (ISO " + engine.resultIso
                     + ", " + (engine.resultExposureNs / 1000) + " us)");

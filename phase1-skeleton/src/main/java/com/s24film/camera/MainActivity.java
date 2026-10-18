@@ -120,7 +120,7 @@ public class MainActivity extends Activity implements
     private TextView tvEvLabel, tvGrainLabel, tvHalLabel;
     private SeekBar seekEv, seekGrain, seekHalation;
     private Button btn06x, btn1x, btn3x, btnFront, btnShutter, btnRecordVideo;
-    private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnWb, btnRotate;
+    private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnWb, btnRotate;
     private final Button[] stockButtons = new Button[12];
     private HorizontalScrollView stripStocks;
     private final Button[] formatButtons = new Button[4];
@@ -243,6 +243,7 @@ public class MainActivity extends Activity implements
         btnGate = findViewById(R.id.btn_gate);
         btnStepPrint = findViewById(R.id.btn_step_print);
         btnBurst = findViewById(R.id.btn_burst);
+        btnStack = findViewById(R.id.btn_stack);
         btnWb = findViewById(R.id.btn_wb);
         btnRotate = findViewById(R.id.btn_rotate);
 
@@ -318,6 +319,7 @@ public class MainActivity extends Activity implements
         btnGate.setOnClickListener(this);
         btnStepPrint.setOnClickListener(this);
         btnBurst.setOnClickListener(this);
+        btnStack.setOnClickListener(this);
         btnWb.setOnClickListener(this);
         btnRotate.setOnClickListener(this);
 
@@ -329,6 +331,8 @@ public class MainActivity extends Activity implements
         dngSaver = new DngSaver(this);
         videoRecorder = new CinemaVideoRecorder(this, imuTelemetry);
         cameraEngine = new CameraEngine(this, dngSaver, imuTelemetry, this);
+        cameraEngine.setStackStatus(new StackStatusBridge(this));
+        applyStackChoice();
 
         topBar = findViewById(R.id.top_bar);
         bottomBar = findViewById(R.id.bottom_bar);
@@ -810,6 +814,59 @@ public class MainActivity extends Activity implements
     private final Runnable hideStatusTask = new HideStatusTask(this);
 
     // Status pill under the top band. Sticky messages (recording, test series) stay until replaced.
+    // Multi-frame shot choices on the CAPTURE row: mode, long-exposure length (ms), chip label.
+    private static final int[] STACK_MODES = {
+        CameraEngine.STACK_OFF, CameraEngine.STACK_BURST, CameraEngine.STACK_HDR,
+        CameraEngine.STACK_LONG, CameraEngine.STACK_LONG, CameraEngine.STACK_LONG, CameraEngine.STACK_TRAILS};
+    private static final long[] STACK_LONG_MS = {0, 0, 0, 2000, 4000, 8000, 8000};
+    private static final String[] STACK_CHOICES = {
+        "Single", "Burst 8", "HDR 3", "Long 2s", "Long 4s", "Long 8s", "Trails 8s"};
+    private int stackChoice = 0;
+
+    private void applyStackChoice() {
+        cameraEngine.setStackMode(STACK_MODES[stackChoice]);
+        if (STACK_LONG_MS[stackChoice] > 0) cameraEngine.setLongExposureMs(STACK_LONG_MS[stackChoice]);
+        btnStack.setText(STACK_CHOICES[stackChoice]);
+    }
+
+    static class StackStatusBridge implements CameraEngine.StackStatus {
+        private final MainActivity a;
+
+        StackStatusBridge(MainActivity a) {
+            this.a = a;
+        }
+
+        @Override
+        public void onStackStatus(String text) {
+            a.mainHandler.post(new StackStatusTask(a, text));
+        }
+
+        @Override
+        public void onStackCancelled() {
+            a.mainHandler.post(new StackStatusTask(a, null));
+        }
+    }
+
+    static class StackStatusTask implements Runnable {
+        private final MainActivity a;
+        private final String text;
+
+        StackStatusTask(MainActivity a, String text) {
+            this.a = a;
+            this.text = text;
+        }
+
+        @Override
+        public void run() {
+            if (text == null) {
+                a.btnShutter.setEnabled(true);
+                a.showStatus("Stack cancelled", false);
+            } else {
+                a.showStatus(text, true);
+            }
+        }
+    }
+
     private void showStatus(String text, boolean sticky) {
         mainHandler.removeCallbacks(hideStatusTask);
         tvShutterStatus.animate().cancel();
@@ -979,6 +1036,9 @@ public class MainActivity extends Activity implements
             burstModeEnabled = !burstModeEnabled;
             btnBurst.setText(burstModeEnabled ? "4F Burst" : "1F Fast");
             syncLookToNative();
+        } else if (id == R.id.btn_stack) {
+            stackChoice = (stackChoice + 1) % STACK_CHOICES.length;
+            applyStackChoice();
         } else if (id == R.id.btn_wb) {
             boolean nextWb = !cameraEngine.isAutoSceneWb();
             cameraEngine.setAutoSceneWb(nextWb);

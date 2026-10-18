@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <thread>
 
 static VulkanRawPipeline* gPipeline = nullptr;
 
@@ -1998,7 +1999,7 @@ float VulkanRawPipeline::renderRawFrame(
     }
 
     mFrameCounter++;
-    bool stepPrintHold = mStepPrint8fps.load() && (mValidRingFrames > 0) && ((mFrameCounter % 3u) != 0u);
+    bool stepPrintHold = !mStackActive.load() && mStepPrint8fps.load() && (mValidRingFrames > 0) && ((mFrameCounter % 3u) != 0u);
     uint32_t currentSlot = mRingSlot & 3u;
 
     if (!stepPrintHold) {
@@ -2050,7 +2051,7 @@ float VulkanRawPipeline::renderRawFrame(
     mLastFrame.sensorOrientation = sensorOrientation;
     mLastFrame.camMatrixIdx = camMatrixIdx;
     mLastFrame.slot = currentSlot;
-    mLastFrame.burstCount = mBurstModeEnabled.load() ? std::max(mValidRingFrames, 1u) : 1u;
+    mLastFrame.burstCount = (mBurstModeEnabled.load() && !mForceSingleFrame.load()) ? std::max(mValidRingFrames, 1u) : 1u;
 
     vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
     vkResetFences(mDevice, 1, &mInFlightFence);
@@ -2438,6 +2439,199 @@ bool VulkanRawPipeline::copyMasterGainmap(std::vector<uint8_t>& outGain, int& ou
     return true;
 }
 
+
+// =============================================================================
+// Multi-frame stacking (burst average, HDR bracket, long exposure) on the RAW ring
+// =============================================================================
+namespace {
+template <typename Fn>
+void parallelRows(int rows, Fn fn) {
+    unsigned n = std::max(1u, std::min(4u, std::thread::hardware_concurrency()));
+    if (n == 1 || rows < 64) { fn(0, rows); return; }
+    std::vector<std::thread> pool;
+    int chunk = ((rows + static_cast<int>(n) - 1) / static_cast<int>(n) + 1) & ~1;   // even: keeps Bayer cells whole
+    for (int y0 = 0; y0 < rows; y0 += chunk) {
+        int y1 = std::min(rows, y0 + chunk);
+        pool.emplace_back([=]() { fn(y0, y1); });
+    }
+    for (auto& t : pool) t.join();
+}
+} // namespace
+
+bool VulkanRawPipeline::stackBegin(int mode) {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    if (!mDevice || !mLastFrame.valid || mode < 0 || mode > 3) return false;
+    StackState s;
+    s.mode = mode;
+    s.width = mLastFrame.width & ~1;
+    s.height = mLastFrame.height & ~1;
+    s.stride = mLastFrame.stride;
+    s.black = std::max(mBlackLevel.load(), 0.0f);
+    s.white = mLastFrame.whiteLevel;
+    size_t px = static_cast<size_t>(s.width) * static_cast<size_t>(s.height);
+    if (mode == 3) {
+        s.peak.assign(px, 0);
+    } else {
+        s.num.assign(px, 0.0f);
+        s.den.assign(px, 0.0f);
+        if (mode == 0 || mode == 1) s.ref.assign(px, 0);
+    }
+    mStack = std::move(s);
+    mStackActive.store(true);
+    mForceSingleFrame.store(false);
+    LOGI("Stack begin mode %d %dx%d black %.1f white %.1f", mode, mStack.width, mStack.height, mStack.black, mStack.white);
+    return true;
+}
+
+bool VulkanRawPipeline::stackAdd(float relExposure) {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    StackState& s = mStack;
+    if (!mStackActive.load() || s.mode < 0 || !mMappedRawBuffer || !mLastFrame.valid) return false;
+    if (mLastFrame.width < s.width || mLastFrame.height < s.height || mLastFrame.stride != s.stride) return false;
+    const size_t frameBytes = static_cast<size_t>(mLastFrame.height) * static_cast<size_t>(s.stride) * 2;
+    if (frameBytes * 4 > mRawStorageBufferSize) return false;
+    const uint16_t* src = reinterpret_cast<const uint16_t*>(
+        static_cast<const uint8_t*>(mMappedRawBuffer) + static_cast<size_t>(mLastFrame.slot) * frameBytes);
+
+    const int W = s.width, H = s.height, stride = s.stride;
+    const float black = s.black;
+    const float range = std::max(s.white - s.black, 1.0f);
+    const float e = std::max(relExposure, 1e-3f);
+    const bool first = (s.frames == 0);
+    const int mode = s.mode;
+    float* num = s.num.data();
+    float* den = s.den.data();
+    uint16_t* ref = s.ref.data();
+    uint16_t* peak = s.peak.data();
+
+    parallelRows(H, [=](int y0, int y1) {
+        for (int y = y0; y < y1; y += 2) {
+            const uint16_t* r0 = src + static_cast<size_t>(y) * stride;
+            const uint16_t* r1 = r0 + stride;
+            const size_t o0 = static_cast<size_t>(y) * W;
+            const size_t o1 = o0 + W;
+            for (int x = 0; x < W; x += 2) {
+                const uint16_t v[4] = {r0[x], r0[x + 1], r1[x], r1[x + 1]};
+                const size_t idx[4] = {o0 + x, o0 + x + 1, o1 + x, o1 + x + 1};
+                if (mode == 3) {
+                    for (int k = 0; k < 4; ++k) peak[idx[k]] = std::max(peak[idx[k]], v[k]);
+                    continue;
+                }
+                float l[4];
+                float cellMax = 0.0f, cellSum = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    l[k] = std::max(static_cast<float>(v[k]) - black, 0.0f);
+                    cellMax = std::max(cellMax, l[k]);
+                    cellSum += l[k];
+                }
+                if (mode == 2) {
+                    for (int k = 0; k < 4; ++k) { num[idx[k]] += l[k]; den[idx[k]] += 1.0f; }
+                    continue;
+                }
+                if (first) {
+                    // Reference frame: kept as is (burst) or weighted like the rest (HDR).
+                    for (int k = 0; k < 4; ++k) ref[idx[k]] = v[k];
+                }
+                // Ghost test against the reference cell, scaled to this frame's exposure.
+                float refSum = 0.0f, refMax = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    float rl = std::max(static_cast<float>(ref[idx[k]]) - black, 0.0f);
+                    refSum += rl;
+                    refMax = std::max(refMax, rl);
+                }
+                const float zc = cellMax / range;
+                float w;
+                if (mode == 0) {
+                    float tol = 0.03f * range + 0.18f * std::max(refSum, cellSum) * 0.25f;
+                    w = (first || std::fabs(cellSum - refSum) * 0.25f <= tol) ? 1.0f : 0.0f;
+                    for (int k = 0; k < 4; ++k) { num[idx[k]] += w * l[k]; den[idx[k]] += w; }
+                } else {
+                    // Hat weight on the whole Bayer cell so all four channels pick the same frames;
+                    // saturated cells carry no information.
+                    if (zc >= 0.97f) { w = 0.0f; }
+                    else {
+                        w = (zc < 0.5f) ? (zc + 0.02f) : (1.02f - zc);
+                        w = std::max(w, 0.01f);
+                        const float refSc = refSum * 0.25f * e;
+                        const float curAvg = cellSum * 0.25f;
+                        const float refZ = refMax / range;
+                        if (!first && refZ < 0.9f && refSc > 0.005f * range) {
+                            float tol = 0.03f * range * e + 0.25f * std::max(refSc, curAvg);
+                            if (std::fabs(curAvg - refSc) > tol) w = 0.0f;
+                        }
+                    }
+                    // Longer exposures are cleaner: weight by exposure, then divide it back out.
+                    for (int k = 0; k < 4; ++k) { num[idx[k]] += w * l[k]; den[idx[k]] += w * e; }
+                }
+            }
+        }
+    });
+    s.frames++;
+    return true;
+}
+
+bool VulkanRawPipeline::stackFinish() {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    StackState& s = mStack;
+    if (!mStackActive.load() || s.mode < 0 || s.frames < 1 || !mMappedRawBuffer || !mLastFrame.valid) return false;
+    // The live render of the newest slot may still be reading it.
+    vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
+
+    const size_t frameBytes = static_cast<size_t>(mLastFrame.height) * static_cast<size_t>(s.stride) * 2;
+    uint16_t* dst = reinterpret_cast<uint16_t*>(
+        static_cast<uint8_t*>(mMappedRawBuffer) + static_cast<size_t>(mLastFrame.slot) * frameBytes);
+    const int W = s.width, H = s.height, stride = s.stride;
+    const float black = s.black;
+    const float range = std::max(s.white - s.black, 1.0f);
+    const float maxOut = s.white;
+    const int mode = s.mode;
+    const float* num = s.num.data();
+    const float* den = s.den.data();
+    const uint16_t* peak = s.peak.data();
+    const uint16_t* ref = s.ref.data();
+
+    parallelRows(H, [=](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            uint16_t* row = dst + static_cast<size_t>(y) * stride;
+            const size_t o = static_cast<size_t>(y) * W;
+            for (int x = 0; x < W; ++x) {
+                float out;
+                if (mode == 3) {
+                    out = static_cast<float>(peak[o + x]);
+                } else {
+                    float d = den[o + x];
+                    float lin;
+                    if (d > 1e-6f) {
+                        lin = num[o + x] / d;
+                    } else {
+                        // Every frame rejected or clipped here: fall back to the reference.
+                        lin = std::max(static_cast<float>(ref ? ref[o + x] : 0) - black, 0.0f);
+                    }
+                    if (mode == 1) {
+                        // Merged radiance can exceed the base frame's range: roll the top off
+                        // (linear below 0.6, smooth shoulder to 0.98 of full scale).
+                        float xr = lin / range;
+                        if (xr > 0.6f) xr = 0.6f + 0.38f * (1.0f - std::exp(-(xr - 0.6f) / 0.38f));
+                        lin = xr * range;
+                    }
+                    out = lin + black;
+                }
+                row[x] = static_cast<uint16_t>(std::min(std::max(out + 0.5f, 0.0f), maxOut));
+            }
+        }
+    });
+    mForceSingleFrame.store(true);
+    LOGI("Stack finish mode %d, %d frames merged into slot %u", s.mode, s.frames, mLastFrame.slot);
+    return true;
+}
+
+void VulkanRawPipeline::stackEnd() {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    mStackActive.store(false);
+    mForceSingleFrame.store(false);
+    mStack = StackState();
+}
+
 // =============================================================================
 // JNI
 // =============================================================================
@@ -2676,6 +2870,26 @@ Java_com_s24film_camera_VulkanRenderer_nativeGetMasterGainmap(
     if (!arr) return nullptr;
     env->SetByteArrayRegion(arr, 0, static_cast<jsize>(gain.size()), reinterpret_cast<const jbyte*>(gain.data()));
     return arr;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeStackBegin(JNIEnv* /*env*/, jobject /*thiz*/, jint mode) {
+    return (gPipeline && gPipeline->stackBegin(mode)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeStackAdd(JNIEnv* /*env*/, jobject /*thiz*/, jfloat relExposure) {
+    return (gPipeline && gPipeline->stackAdd(relExposure)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeStackFinish(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return (gPipeline && gPipeline->stackFinish()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeStackEnd(JNIEnv* /*env*/, jobject /*thiz*/) {
+    if (gPipeline) gPipeline->stackEnd();
 }
 
 } // extern "C"
