@@ -54,8 +54,13 @@ public class CameraEngine {
     private CameraCaptureSession captureSession;
     private CameraCharacteristics characteristics;
 
-    private SurfaceTexture companionTexture;
+    // 1080p companion stream the HAL runs its 3A on. It must be drained: an undrained
+    // SurfaceTexture let the HAL run out of preview buffers (8 s buffer timeouts, stalled
+    // session), so frames go to an ImageReader that is emptied on its own thread.
+    private ImageReader companionReader;
     private Surface companionSurface;
+    private HandlerThread drainThread;
+    private Handler drainHandler;
     private ImageReader rawImageReader;
 
     private String activeCameraId = "0";
@@ -213,6 +218,11 @@ public class CameraEngine {
             cameraThread = null;
             cameraHandler = null;
         }
+        if (drainThread != null) {
+            drainThread.quitSafely();
+            drainThread = null;
+            drainHandler = null;
+        }
     }
 
     static class OpenCameraTask implements Runnable {
@@ -336,9 +346,14 @@ public class CameraEngine {
 
             configureAutoIsoForCamera();
 
-            companionTexture = new SurfaceTexture(10);
-            companionTexture.setDefaultBufferSize(1920, 1080);
-            companionSurface = new Surface(companionTexture);
+            if (drainThread == null) {
+                drainThread = new HandlerThread("CompanionDrain");
+                drainThread.start();
+                drainHandler = new Handler(drainThread.getLooper());
+            }
+            companionReader = ImageReader.newInstance(1920, 1080, ImageFormat.YUV_420_888, 3);
+            companionReader.setOnImageAvailableListener(new DrainListener(), drainHandler);
+            companionSurface = companionReader.getSurface();
 
             rawImageReader = ImageReader.newInstance(rawWidth, rawHeight, ImageFormat.RAW_SENSOR, 4);
             rawImageReader.setOnImageAvailableListener(new ImageListener(this), cameraHandler);
@@ -471,7 +486,7 @@ public class CameraEngine {
             previewBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentExposureNs);
             previewBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, Math.max(currentExposureNs, MAX_SHUTTER_NS));
             if (defaultFpsRange == null) defaultFpsRange = previewBuilder.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE);
-            Range<Integer> fps = (currentExposureNs > MAX_SHUTTER_NS && slowFpsRange != null) ? slowFpsRange : defaultFpsRange;
+            Range<Integer> fps = ((currentExposureNs > MAX_SHUTTER_NS || slowFpsAlways) && slowFpsRange != null) ? slowFpsRange : defaultFpsRange;
             if (fps != null) previewBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fps);
             captureSession.setRepeatingRequest(previewBuilder.build(), new CaptureCallback(this), cameraHandler);
         } catch (Exception e) {
@@ -485,6 +500,15 @@ public class CameraEngine {
     // moves only the shutter. Out of light, the frame underexposes (getUnderexposureEv) unless
     // auto gain is on, which pushes the film up to +3 stops instead.
     private static final long FILM_MAX_AUTO_SHUTTER_NS = 66_666_667L;   // 1/15 s
+
+    // Slowest speed Auto may pick in photo mode (video stays at 1/30 s). 1/15 s is safe since the
+    // companion stream is drained; debug "autoslow" changes it for testing.
+    private volatile long filmMaxAutoShutterNs = FILM_MAX_AUTO_SHUTTER_NS;
+    // Debug "fpslock": request the slow AE fps range on every manual frame, not only on frames
+    // longer than 1/30 s, so the range never toggles while Auto walks across 1/30.
+    private volatile boolean slowFpsAlways = false;
+    public void setFilmMaxAutoShutterNs(long ns) { filmMaxAutoShutterNs = Math.max(MAX_SHUTTER_NS, ns); }
+    public void setSlowFpsAlways(boolean on) { slowFpsAlways = on; }
 
     private volatile boolean filmIsoMode = true;
     private volatile int pushStops = 0;
@@ -572,9 +596,9 @@ public class CameraEngine {
         int push = pushStops;
         double ei = boxIso * Math.pow(2.0, push);
         double tWanted = isoSeconds / ei;
-        // Auto stays at 1/30 s: an auto 1/15 s wedged the HAL's preview path on 17 Oct (twice).
-        // Slower speeds are manual only (dial 1/15 s), with the slow fps range in the request.
-        double tMax = Math.min(FILM_MAX_AUTO_SHUTTER_NS, maxShutterNs) * 1e-9;
+        // Auto reaches 1/15 s in photo mode. The 17 Oct "1/15 wedges the HAL" hangs were the
+        // undrained companion stream running out of buffers, not the long frame itself.
+        double tMax = Math.min(filmMaxAutoShutterNs, slowestShutterNs()) * 1e-9;
         double under = (tWanted > tMax) ? Math.log(tWanted / tMax) / Math.log(2.0) : 0.0;
         if (autoGain && under > 0.05 && push < 3) {
             push = Math.min(3, push + (int) Math.ceil(under - 0.05));
@@ -736,13 +760,10 @@ public class CameraEngine {
             try { rawImageReader.close(); } catch (Exception ignored) {}
             rawImageReader = null;
         }
-        if (companionSurface != null) {
-            try { companionSurface.release(); } catch (Exception ignored) {}
-            companionSurface = null;
-        }
-        if (companionTexture != null) {
-            try { companionTexture.release(); } catch (Exception ignored) {}
-            companionTexture = null;
+        companionSurface = null;
+        if (companionReader != null) {
+            try { companionReader.close(); } catch (Exception ignored) {}
+            companionReader = null;
         }
     }
 
@@ -790,6 +811,8 @@ public class CameraEngine {
 
         @Override
         public void onError(CameraDevice device, int error) {
+            Log.e(TAG, "Camera device error " + error + " at ISO " + engine.currentIso + " / "
+                + (engine.currentExposureNs / 1000) + " us");
             engine.closeCameraInternal();
         }
     }
@@ -845,6 +868,12 @@ public class CameraEngine {
 
         CaptureCallback(CameraEngine engine) {
             this.engine = engine;
+        }
+
+        @Override
+        public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, android.hardware.camera2.CaptureFailure failure) {
+            Log.w(TAG, "Capture failed frame " + failure.getFrameNumber() + " reason " + failure.getReason()
+                + " at " + (engine.currentExposureNs / 1000) + " us");
         }
 
         @Override
@@ -923,6 +952,18 @@ public class CameraEngine {
                     engine.dngGainG = 1.0f;
                     engine.dngGainB = gains.getBlue() / g;
                 }
+            }
+        }
+    }
+
+    /** Returns every companion frame straight away so the HAL never waits on that stream. */
+    static class DrainListener implements ImageReader.OnImageAvailableListener {
+        @Override
+        public void onImageAvailable(ImageReader reader) {
+            try {
+                Image image = reader.acquireLatestImage();
+                if (image != null) image.close();
+            } catch (Exception ignored) {
             }
         }
     }

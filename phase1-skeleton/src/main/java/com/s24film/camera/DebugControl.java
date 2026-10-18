@@ -96,6 +96,12 @@ final class DebugControl extends BroadcastReceiver {
             case "shutter":
                 engine.setManualShutterNs(intent.getLongExtra("ns", 0L));
                 break;
+            case "autoslow":   // slowest Auto shutter, ns (33333333 = 1/30 default)
+                engine.setFilmMaxAutoShutterNs(intent.getLongExtra("ns", 33_333_333L));
+                break;
+            case "fpslock":
+                engine.setSlowFpsAlways(intent.getBooleanExtra("on", false));
+                break;
             case "aperture":
                 engine.setVirtualAperture(intent.getFloatExtra("f", 2.0f));
                 break;
