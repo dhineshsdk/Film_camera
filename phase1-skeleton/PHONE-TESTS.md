@@ -62,3 +62,17 @@ Install the build, then check:
 8. Render check (item 4 of the TODO): shoot the same scene on a few stocks per category and note any that are very dark, have a colour cast, or show a wrong ISO in the list. Report their names.
 
 Not done in this batch: real-pipeline thumbnails (the list shows a category-colour swatch with the box ISO), Aerochrome IR profile (button still uses the legacy path), per-stock push/pull control.
+
+## Batch F: video (branch `claude/project-thread-6f6h1x`)
+
+Logcat tags: `S24FilmCinema` (one `Recording WxH @fps ...` line per take, with the renderer's `10-bit HLG` / `8-bit SDR`), `S24FilmVulkan` (`Zero-Copy MediaCodec Vulkan Swapchain active ... colorspace N`), `S24FilmSoak` (every 10 s). Soak CSVs: `Android/data/com.s24film.camera/files/soak/`.
+
+1. Switch to video. The first time, the app asks for the microphone. Settings sheet, Camera tab, VIDEO section: FPS, SHUTTER, RANGE, SIZE, AUDIO chips; one selected per row; they don't react while recording.
+2. 24 fps, 180°, SDR, 1440p, audio on: record 20 s of a moving scene with sound. Status reads `● REC 00:12 · 24 fps · 180° · SDR · NNN ft`. Saved line reads `Saved N MB · X fps · N dropped · SDR`. The clip plays in Samsung Gallery with the film look, sound in sync (clap on camera), not stretched.
+3. Shutter angle: 24 fps at 45° then 360°, panning: 45° is crisp and stuttery, 360° smeared. Brightness stays about the same (ISO takes up the change; the readout ISO moves). Repeat at 30 fps.
+4. HLG: RANGE = HLG 10-bit, record 15 s. The start toast shows any fallback ("HLG not supported", "HLG rejected by encoder"). Check the `S24FilmVulkan` line: `10-bit HLG` with colorspace 1000104008 is the good case. Gallery should show the HDR badge and the clip should look like the SDR one, a bit brighter in highlights, not washed out or with wrong colours. If the clip is garbage/green or the encoder errors, note it and use SDR.
+5. Orientation: record 5 s in portrait, both landscapes and upside down. Each should play upright in Gallery (same as photos shot in that pose).
+6. 4K soak: SIZE = 4K, 24 fps, SDR, record 10 minutes on a table. Note the last `S24FilmSoak` line (fps, drops, max gap, thermal) and whether the take stopped itself ("Stopped: phone too hot"). Send the soak CSV. Repeat with HLG if 4 passed.
+7. Stop/start: stop, then press record again straight away; a second take starts once the first has saved. Lock the phone mid-take: the take saves.
+
+Known limits: the film render runs at the viewfinder size, so 4K is upscaled from it (the soak test checks encoder heat and dropped frames, not 4K detail). The take runs at the RAW preview rate, so if the preview only manages ~22 fps the soak line and drop count will show it.

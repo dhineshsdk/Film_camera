@@ -175,6 +175,15 @@ public class MainActivity extends Activity implements
     private boolean burstModeEnabled = true;
     private int rollFrameCounter = 1;
     private ProPanel proPanel;
+    private VideoPanel videoPanel;
+    private String recFormatLabel = "";
+    private static final int AUDIO_PERMISSION_REQ_CODE = 1002;
+
+    static final class VideoHost implements VideoPanel.Host {
+        private final MainActivity a;
+        VideoHost(MainActivity a) { this.a = a; }
+        @Override public boolean isRecording() { return a.videoRecorder != null && a.videoRecorder.isRecording(); }
+    }
 
     static final class NewRoll implements ProPanel.Host {
         private final MainActivity a;
@@ -332,6 +341,7 @@ public class MainActivity extends Activity implements
         fx = new FilmFx(this);
         filmUi = new FilmUi(this, filmRoot, new FilmCallbacks(this), fx);
         proPanel = new ProPanel(this, cameraEngine, filmUi, new NewRoll(this));
+        videoPanel = new VideoPanel(this, cameraEngine, new VideoHost(this));
         uiTheme = getSharedPreferences("ui", 0).getInt("theme", 0);
         debugMenu = getSharedPreferences("ui", 0).getBoolean("debug", false);
         sheetTabs[4].setVisibility(debugMenu ? View.VISIBLE : View.GONE);
@@ -723,6 +733,10 @@ public class MainActivity extends Activity implements
         if (videoRecorder != null && videoRecorder.isRecording()) return;
         videoMode = video;
         if (cameraEngine != null) cameraEngine.setVideoMode(video);
+        if (video) {
+            if (videoPanel != null) videoPanel.apply();
+            requestAudioPermissionOnce();
+        }
         modePhoto.setSelected(!video);
         modeVideo.setSelected(video);
         btnShutter.setVisibility(video ? View.GONE : View.VISIBLE);
@@ -939,7 +953,15 @@ public class MainActivity extends Activity implements
                 showStatus("Saving video…", true);
                 videoRecorder.stopRecording();
             } else {
-                videoRecorder.startRecording(STOCK_FILE_TAGS[activeStockIndex], 1440, 1920, this);
+                VideoSettings vs = videoPanel.settings.copy();
+                recFormatLabel = vs.fps + " fps \u00b7 " + VideoSettings.angleLabel(vs.angle);
+                // Same grip value the still path hands to DngSaver.setJpegRotation (grip + ROT), so a
+                // photo and a take in one pose display alike; the muxer hint is clockwise degrees.
+                // TODO: verify on device that frames render upright for orientation 0 (portrait) and
+                // that the 90/270 hints are not swapped for the video path.
+                videoRecorder.startRecording(STOCK_FILE_TAGS[activeStockIndex], vs,
+                    cameraEngine.currentActiveOrient(), this);
+                videoPanel.refresh();
                 syncLookToNative();
             }
         } else if (id == R.id.btn_lens) {
@@ -1050,6 +1072,15 @@ public class MainActivity extends Activity implements
         btnRotate.setText("ROT +" + cameraEngine.getManualRotationOffset() + "°");        if (proPanel != null) proPanel.onLensChanged();
     }
 
+    // Microphone is asked for the first time video mode is entered; a take is silent if denied.
+    private void requestAudioPermissionOnce() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) return;
+        android.content.SharedPreferences p = getSharedPreferences("ui", 0);
+        if (p.getBoolean("audio_perm_asked", false)) return;
+        p.edit().putBoolean("audio_perm_asked", true).apply();
+        requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, AUDIO_PERMISSION_REQ_CODE);
+    }
+
     private void checkPermissions() {
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{
@@ -1061,6 +1092,11 @@ public class MainActivity extends Activity implements
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == AUDIO_PERMISSION_REQ_CODE) {
+            boolean ok = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            if (!ok) Toast.makeText(this, "Microphone denied: video will be silent", Toast.LENGTH_LONG).show();
+            return;
+        }
         if (requestCode == PERMISSION_REQ_CODE) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 if (currentHolder != null && currentHolder.getSurface().isValid()) {
@@ -1236,10 +1272,13 @@ public class MainActivity extends Activity implements
 
     // CinemaVideoRecorder.Callback
     @Override
-    public void onRecordingStarted(String mp4Path) {
+    public void onRecordingStarted(String mp4Path, String rangeLabel, String note) {
         btnRecordVideo.setEnabled(true);
         btnRecordVideo.setSelected(true);
-        showStatus("● Recording", true);
+        recFormatLabel = recFormatLabel + " \u00b7 " + rangeLabel;
+        videoPanel.refresh();
+        showStatus("\u25cf REC 00:00 \u00b7 " + recFormatLabel, true);
+        if (note != null) Toast.makeText(this, note, Toast.LENGTH_LONG).show();
     }
 
     @Override
@@ -1248,22 +1287,23 @@ public class MainActivity extends Activity implements
         this.magFramesRemaining = framesRemaining;
         int min = elapsedSec / 60;
         int sec = elapsedSec % 60;
-        showStatus(String.format(Locale.US, "● %02d:%02d · %03d ft", min, sec, feetRemaining), true);
+        showStatus(String.format(Locale.US, "\u25cf REC %02d:%02d \u00b7 %s \u00b7 %03d ft", min, sec, recFormatLabel, feetRemaining), true);
     }
 
     @Override
-    public void onRecordingSaved(String mp4Path, String gcsvPath, long mp4Bytes, int gyroSamples) {
+    public void onRecordingSaved(String mp4Path, String gcsvPath, long mp4Bytes, int gyroSamples, String summary) {
         btnRecordVideo.setEnabled(true);
         btnRecordVideo.setSelected(false);
+        videoPanel.refresh();
         syncLookToNative();
-        double mb = mp4Bytes / (1024.0 * 1024.0);
-        showStatus(String.format(Locale.US, "Saved video (%.1f MB) + %d gyro samples", mb, gyroSamples), false);
+        showStatus(summary, false);
     }
 
     @Override
     public void onRecordingError(String error) {
         btnRecordVideo.setEnabled(true);
         btnRecordVideo.setSelected(false);
+        videoPanel.refresh();
         showStatus("Video error: " + error, false);
         Toast.makeText(this, "Video Error: " + error, Toast.LENGTH_LONG).show();
     }

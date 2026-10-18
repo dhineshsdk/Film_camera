@@ -38,6 +38,10 @@ public class VulkanRenderer {
     public static native void nativeSetLensFxEnabled(boolean enabled);
     public static native float nativeGetLastRawMean();
     public static native boolean nativeSetEncoderSurface(Surface encoderSurface);
+    // Call before nativeSetEncoderSurface: true = encoder gets BT.2020 HLG (10-bit when the surface allows).
+    public static native void nativeSetEncoderHlg(boolean hlg);
+    // Attached encoder target, e.g. "10-bit HLG", "8-bit SDR", or "off".
+    public static native String nativeGetEncoderInfo();
     public static native float nativeRenderRaw(
         HardwareBuffer buffer,
         int width,

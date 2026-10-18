@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <string>
 
 #define LOG_TAG "S24FilmVulkan"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -55,6 +56,14 @@ struct PushConstants {
     uint32_t reserved0;          // 120
     uint32_t reserved1;          // 124
 };
+// Push constants of shaders/encode_hlg.comp.
+struct EncodePush {
+    float srcRect[4];    // x0, y0, width, height in live-image pixels
+    int32_t dstSize[2];
+    int32_t srcSize[2];
+};
+static_assert(sizeof(EncodePush) == 32, "EncodePush must match encode_hlg.comp");
+
 static_assert(sizeof(PushConstants) == 128, "PushConstants must stay within the 128-byte guaranteed limit");
 
 // std140 mirror of FrameParams in demosaic.comp (binding 6).
@@ -176,6 +185,9 @@ public:
     void setVirtualAperture(float fNumber) { mVirtualFNumber.store(std::clamp(fNumber, 0.95f, 22.0f)); }
     float lastRawMean() const { return mLastRawMean.load(); }
     bool setEncoderWindow(ANativeWindow* encoderWindow);
+    // Applies to the next setEncoderWindow: true = BT.2020 HLG (10-bit when the surface allows it).
+    void setEncoderHlg(bool hlg) { mEncoderHlgRequested.store(hlg); }
+    std::string encoderInfo();
     float renderRawFrame(AHardwareBuffer* ahb, int width, int height, int stride,
                          int cfa, float whiteLevel, float gainR, float gainG, float gainB,
                          int sensorOrientation, int camMatrixIdx);
@@ -191,6 +203,8 @@ private:
     void destroySwapchain();
     bool createEncoderSwapchainLocked(ANativeWindow* encoderWindow);
     void destroyEncoderSwapchainLocked();
+    bool createEncodePipelineLocked();
+    void destroyEncodePipeline();
     bool createComputeResources();
     void destroyComputeResources();
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
@@ -253,6 +267,18 @@ private:
     std::vector<VkImage> mEncoderImages;
     VkSemaphore mEncoderImageAvailableSemaphore = VK_NULL_HANDLE;
     VkSemaphore mEncoderRenderFinishedSemaphore = VK_NULL_HANDLE;
+    VkColorSpaceKHR mEncoderColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    std::atomic<bool> mEncoderHlgRequested{false};
+    bool mEncoderHlg = false;                 // HLG pass active for the current encoder surface
+    bool mHasSwapchainColorspaceExt = false;
+    std::string mEncoderInfo = "off";
+    // HLG pass: live rgba16 -> encoder-sized rgba16f staging (crop, scale, BT.2020 HLG) -> blit.
+    GpuImage mEncoderStaging;
+    VkDescriptorSetLayout mEncodeSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout mEncodePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline mEncodePipeline = VK_NULL_HANDLE;
+    VkDescriptorPool mEncodePool = VK_NULL_HANDLE;
+    VkDescriptorSet mEncodeSet = VK_NULL_HANDLE;
 
     // Shared engine resources
     VkBuffer mRawStorageBuffer = VK_NULL_HANDLE;

@@ -504,6 +504,26 @@
                             <Button android:id="@+id/btn_anamorphic" style="@style/Chip" android:text="Desqueeze: 1.0x" />
                         </LinearLayout>
                     </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="VIDEO  FPS" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:id="@+id/row_video_fps" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="VIDEO  SHUTTER" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:id="@+id/row_video_angle" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="VIDEO  RANGE" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:id="@+id/row_video_range" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="VIDEO  SIZE" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:id="@+id/row_video_size" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
+                    </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="VIDEO  AUDIO" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:id="@+id/row_video_audio" android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal" />
+                    </HorizontalScrollView>
                     <TextView style="@style/RowLabel" android:text="LENS CHARACTER" />
                     <HorizontalScrollView style="@style/ChipRow">
                         <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
