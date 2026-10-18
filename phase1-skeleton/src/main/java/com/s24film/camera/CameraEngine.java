@@ -626,6 +626,13 @@ public class CameraEngine {
     private volatile boolean filmIsoMode = true;
     private volatile int pushStops = 0;
     private volatile boolean autoGain = false;
+    // Night merge (default on): in the dark the film speed floats up to +2 stops and a still shot
+    // becomes an 8-frame ghost-rejecting RAW merge, which is what makes the push usable.
+    private volatile boolean nightAuto = true;
+    private boolean nightRestore = false;
+    private volatile float autoPushStops = 0f;
+    public void setNightAuto(boolean on) { nightAuto = on; }
+    public boolean isNightAuto() { return nightAuto; }
     private volatile float underexposureEv = 0.0f;
     private volatile int effectiveEi = 0;
     private float filmDigitalGain = 1.0f;
@@ -761,14 +768,17 @@ public class CameraEngine {
         double tWanted = isoSeconds / ei;
         // Auto reaches 1/15 s in photo mode. The 17 Oct "1/15 wedges the HAL" hangs were the
         // undrained companion stream running out of buffers, not the long frame itself.
-        double tMax = Math.min(filmMaxAutoShutterNs, slowestShutterNs()) * 1e-9;
+        long autoCap = (nightAuto && manualShutterNs == 0) ? Math.min(filmMaxAutoShutterNs, MAX_SHUTTER_NS) : filmMaxAutoShutterNs;
+        double tMax = Math.min(autoCap, slowestShutterNs()) * 1e-9;
         double under = (tWanted > tMax) ? Math.log(tWanted / tMax) / Math.log(2.0) : 0.0;
-        if (autoGain && under > 0.05 && push < 3) {
-            push = Math.min(3, push + (int) Math.ceil(under - 0.05));
+        int pushCap = autoGain ? 3 : 2;
+        if ((autoGain || nightAuto) && under > 0.05 && push < pushCap) {
+            push = Math.min(pushCap, push + (int) Math.ceil(under - 0.05));
             ei = boxIso * Math.pow(2.0, push);
             tWanted = isoSeconds / ei;
             under = (tWanted > tMax) ? Math.log(tWanted / tMax) / Math.log(2.0) : 0.0;
         }
+        autoPushStops = push - pushStops;
         // Fastest shutter reached and still too bright (e.g. ISO 800 film in daylight): lower the
         // exposure index like an ND filter instead of blowing the frame out.
         double tFast = minShutterNs * 1e-9;
@@ -840,7 +850,7 @@ public class CameraEngine {
     }
 
     private String filmKeyFor(int boxIso) {
-        return boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode + "/" + manualIso
+        return boxIso + "/" + pushStops + "/" + autoGain + "/" + nightAuto + "/" + manualShutterNs + "/" + videoMode + "/" + manualIso
             + "/" + videoFps + "/" + videoAngleDeg;
     }
 
@@ -951,6 +961,11 @@ public class CameraEngine {
         this.pendingDngCallback = callback;
         // Lock the grip now: the shutter tap itself can jolt the phone before the next frame lands.
         this.lockedCaptureOrient = currentActiveOrient();
+        if (stackMode == STACK_OFF && nightAuto && !videoMode && !stackActive && manualAeActive
+                && (autoPushStops > 0.5f || underexposureEv > 0.3f || (filmKey.isEmpty() && currentIso >= 1000))) {
+            stackMode = STACK_BURST;
+            nightRestore = true;
+        }
         if (stackMode != STACK_OFF && !stackActive && (stackMode != STACK_HDR || manualAeActive)) {
             // Multi-frame shot: the frame listener collects the frames, then takes the normal capture path.
             this.stackBegun = false;
@@ -1045,6 +1060,7 @@ public class CameraEngine {
         VulkanRenderer.nativeStackEnd();
         stackActive = false;
         stackBegun = false;
+        endNightRestore();
         postStack("Stack failed, single frame");
         return true;
     }
@@ -1052,6 +1068,14 @@ public class CameraEngine {
     private void stackDone() {
         stackActive = false;
         stackBegun = false;
+        endNightRestore();
+    }
+
+    private void endNightRestore() {
+        if (nightRestore) {
+            stackMode = STACK_OFF;
+            nightRestore = false;
+        }
     }
 
     /** Exposure for a bracket step: shutter first, ISO makes up what the shutter range cannot. */
@@ -1184,6 +1208,7 @@ public class CameraEngine {
         if (stackActive) {
             stackActive = false;
             stackBegun = false;
+            endNightRestore();
             VulkanRenderer.nativeStackEnd();
             StackStatus s = stackStatus;
             if (s != null) s.onStackCancelled();
