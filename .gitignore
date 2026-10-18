@@ -55,3 +55,4 @@ phase0_lab_results.json
 # Local agent worktrees / Python caches
 .claude/
 __pycache__/
+reff/

@@ -87,6 +87,8 @@ public class CameraEngine {
     private DebugControl debugControl = null;
     private volatile int manualRotationOffset = 0; // 0, 90, 180, 270 user override
     private volatile int lockedCaptureOrient = 0;  // grip + ROT at the moment the shutter was pressed
+    private volatile boolean hasOis = false;
+    private volatile boolean hasVideoStabilization = false;
 
     private final AtomicBoolean captureRequested = new AtomicBoolean(false);
     private String lastRequestedCameraId = null;
@@ -207,6 +209,7 @@ public class CameraEngine {
             } else {
                 previewBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
             }
+            applyStabilization(previewBuilder);
             captureSession.setRepeatingRequest(previewBuilder.build(), new CaptureCallback(this), cameraHandler);
         } catch (Exception e) {
             Log.e(TAG, "Focus update failed: " + e.getMessage(), e);
@@ -537,6 +540,57 @@ public class CameraEngine {
         Log.i(TAG, "Auto-ISO cam " + camMatrixIdx + ": ladder " + Arrays.toString(isoLadder)
             + " sub-sweet " + Arrays.toString(subSweetLadder)
             + " shutter " + minShutterNs + ".." + maxShutterNs + " ns, black " + staticBlackLevel);
+        checkStabilizationSupport();
+    }
+
+    private void checkStabilizationSupport() {
+        hasOis = false;
+        hasVideoStabilization = false;
+        if (characteristics == null) return;
+
+        int[] oisModes = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION);
+        if (oisModes != null) {
+            for (int mode : oisModes) {
+                if (mode == CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON) {
+                    hasOis = true;
+                    break;
+                }
+            }
+        }
+
+        int[] vsModes = characteristics.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES);
+        if (vsModes != null) {
+            for (int mode : vsModes) {
+                if (mode == CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) {
+                    hasVideoStabilization = true;
+                    break;
+                }
+            }
+        }
+        Log.i(TAG, "Stabilization for " + activeCameraId + ": OIS=" + hasOis + ", VideoStab=" + hasVideoStabilization);
+    }
+
+    private void applyStabilization(CaptureRequest.Builder builder) {
+        if (builder == null) return;
+        if (hasOis) {
+            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON);
+        } else {
+            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF);
+        }
+
+        if (videoMode && hasVideoStabilization) {
+            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON);
+        } else {
+            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
+        }
+    }
+
+    public boolean hasOis() {
+        return hasOis;
+    }
+
+    public boolean hasVideoStabilization() {
+        return hasVideoStabilization;
     }
 
     private void addIso(ArrayList<Integer> list, int iso) {
@@ -601,6 +655,7 @@ public class CameraEngine {
             Range<Integer> fps = ((currentExposureNs > MAX_SHUTTER_NS || slowFpsAlways) && slowFpsRange != null) ? slowFpsRange : defaultFpsRange;
             if (videoMode) fps = videoFpsRange();
             if (fps != null) previewBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fps);
+            applyStabilization(previewBuilder);
             captureSession.setRepeatingRequest(previewBuilder.build(), new CaptureCallback(this), cameraHandler);
         } catch (Exception e) {
             Log.e(TAG, "Manual exposure update failed: " + e.getMessage(), e);
@@ -1288,6 +1343,7 @@ public class CameraEngine {
                 builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                engine.applyStabilization(builder);
 
                 engine.previewBuilder = builder;
                 if (engine.manualFocusDiopters >= 0f) {
@@ -1327,6 +1383,12 @@ public class CameraEngine {
         @Override
         public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
             engine.latestCaptureResult = result;
+            if (engine.frameCount == 1) {
+                Integer oisState = result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE);
+                Integer vsState = result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE);
+                Log.i(TAG, "HAL active stabilization: OIS=" + (oisState != null && oisState == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                    + ", VideoEIS=" + (vsState != null && vsState == CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON));
+            }
 
             Integer aeState = result.get(CaptureResult.CONTROL_AE_STATE);
             engine.aeConverged = aeState != null
