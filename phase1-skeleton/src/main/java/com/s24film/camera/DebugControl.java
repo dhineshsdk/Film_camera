@@ -31,6 +31,14 @@ final class DebugControl extends BroadcastReceiver {
         @Override public void run() { a.debugTheme(t); }
     }
 
+    static class CaptureTask implements Runnable {
+        private final MainActivity a;
+        CaptureTask(MainActivity a) { this.a = a; }
+        @Override public void run() {
+            a.triggerUiCapture();
+        }
+    }
+
     private final CameraEngine engine;
     private int lookIdx = 24;
 
@@ -67,7 +75,11 @@ final class DebugControl extends BroadcastReceiver {
         Log.i(TAG, "cmd " + cmd);
         switch (cmd) {
             case "capture":
-                engine.triggerCapture("look" + lookIdx, new LogCallback());
+                if (ui != null) {
+                    ui.runOnUiThread(new CaptureTask(ui));
+                } else {
+                    engine.triggerCapture("look" + lookIdx, new LogCallback());
+                }
                 break;
             case "lens":
                 String id = intent.getStringExtra("id");
@@ -113,6 +125,10 @@ final class DebugControl extends BroadcastReceiver {
             case "portrait":   // portrait mode (subject matte + depth bokeh): --ez on true|false
                 DepthBokeh.setPortrait(intent.getBooleanExtra("on", true));
                 Log.i(TAG, "portrait " + DepthBokeh.portrait);
+                break;
+            case "video":      // video mode toggle: --ez on true|false
+                engine.setVideoMode(intent.getBooleanExtra("on", true));
+                Log.i(TAG, "videoMode " + intent.getBooleanExtra("on", true));
                 break;
             case "depth":   // depth bokeh (f/5.6 and wider masters): --ez on true|false
                 DepthBokeh.enabled = intent.getBooleanExtra("on", true);

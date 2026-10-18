@@ -120,6 +120,7 @@ public class MainActivity extends Activity implements
     private TextView tvEvLabel, tvGrainLabel, tvHalLabel;
     private SeekBar seekEv, seekGrain, seekHalation;
     private Button btn06x, btn1x, btn3x, btnFront, btnShutter, btnRecordVideo;
+    private View viewShutterFlash;
     private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnWb, btnRotate, btnPortrait;
     private final Button[] stockButtons = new Button[12];
     private HorizontalScrollView stripStocks;
@@ -208,6 +209,7 @@ public class MainActivity extends Activity implements
         setContentView(R.layout.activity_main);
 
         surfaceView = findViewById(R.id.camera_surface);
+        viewShutterFlash = findViewById(R.id.view_shutter_flash);
         // A tap on the viewfinder picks the depth-bokeh focus point.
         surfaceView.setOnTouchListener(new FocusTapListener());
         hudOverlay = findViewById(R.id.hud_overlay);
@@ -499,6 +501,9 @@ public class MainActivity extends Activity implements
         String lens = "2".equals(currentCameraId) ? ".6×" : ("0".equals(currentCameraId) ? "1×"
             : ("6".equals(currentCameraId) ? "3×" : "Front"));
         sb.append("   ").append(lens);
+        if (cameraEngine != null && cameraEngine.hasOis()) {
+            sb.append(" \u00b7 OIS");
+        }
         int rot = cameraEngine.getManualRotationOffset();
         if (rot != 0) sb.append("  ROT ").append(rot).append('\u00b0');
         if (videoRecorder != null && videoRecorder.isRecording()) {
@@ -678,6 +683,38 @@ public class MainActivity extends Activity implements
                 a.cocked = true;
                 a.refreshFilmData();
             }
+        }
+    }
+
+    static class ShutterBounceTask implements Runnable {
+        private final View v;
+        ShutterBounceTask(View v) { this.v = v; }
+        @Override public void run() {
+            if (v != null) v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(80).start();
+        }
+    }
+
+    static class FlashDismissTask implements Runnable {
+        private final View v;
+        FlashDismissTask(View v) { this.v = v; }
+        @Override public void run() {
+            if (v != null) v.setVisibility(View.GONE);
+        }
+    }
+
+    private void triggerShutterFeedback() {
+        if (fx != null) {
+            fx.shutterOpen();
+        }
+        if (btnShutter != null) {
+            btnShutter.animate().scaleX(0.85f).scaleY(0.85f).setDuration(50)
+                .withEndAction(new ShutterBounceTask(btnShutter)).start();
+        }
+        if (viewShutterFlash != null) {
+            viewShutterFlash.setAlpha(0.85f);
+            viewShutterFlash.setVisibility(View.VISIBLE);
+            viewShutterFlash.animate().alpha(0.0f).setDuration(120)
+                .withEndAction(new FlashDismissTask(viewShutterFlash)).start();
         }
     }
 
@@ -1013,6 +1050,7 @@ public class MainActivity extends Activity implements
         } else if (id == R.id.btn_front) {
             switchCamera("1", "Front Selfie (ISOCELL S5K3LU)");
         } else if (id == R.id.btn_shutter) {
+            triggerShutterFeedback();
             showStatus("Developing " + activeLookLabel() + "…", true);
             btnShutter.setEnabled(false);
             cameraEngine.triggerCapture(activeFileTag(), this);
@@ -1138,12 +1176,19 @@ public class MainActivity extends Activity implements
         }
     }
 
+    void triggerUiCapture() {
+        if (btnShutter != null && btnShutter.isEnabled()) {
+            btnShutter.performClick();
+        }
+    }
+
     private void switchCamera(String camId, String label) {
         if (videoRecorder != null && videoRecorder.isRecording()) {
             videoRecorder.stopRecording();
         }
         currentCameraId = camId;
         refreshSelection();
+        refreshReadout();
         showStatus("Switching to " + label + "…", false);
         cameraEngine.openCamera(camId);   // also clears the ROT override
         btnRotate.setText("ROT +" + cameraEngine.getManualRotationOffset() + "°");        if (proPanel != null) proPanel.onLensChanged();
@@ -1327,6 +1372,7 @@ public class MainActivity extends Activity implements
     // DngSaver.Callback
     @Override
     public void onCaptureSaved(String dngPath, String jpgPath, long dngBytes, long jpgBytes) {
+        if (fx != null) fx.shutterClose();
         btnShutter.setEnabled(true);
         rollFrameCounter = (rollFrameCounter % 36) + 1;
         testShotFinished();
@@ -1341,6 +1387,7 @@ public class MainActivity extends Activity implements
 
     @Override
     public void onDngError(String message) {
+        if (fx != null) fx.shutterClose();
         btnShutter.setEnabled(true);
         testShotFinished();
         showStatus("Capture failed: " + message, false);
