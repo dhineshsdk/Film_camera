@@ -823,7 +823,8 @@ public class CameraEngine {
         double tWanted = isoSeconds / ei;
         // Auto reaches 1/15 s in photo mode. The 17 Oct "1/15 wedges the HAL" hangs were the
         // undrained companion stream running out of buffers, not the long frame itself.
-        long autoCap = (nightAuto && manualShutterNs == 0) ? Math.min(filmMaxAutoShutterNs, MAX_SHUTTER_NS) : filmMaxAutoShutterNs;
+        // Stabilised lenses (wide, tele) can hold 1/15 s by hand, which is one stop less gain; the others stay at 1/30 s.
+        long autoCap = (nightAuto && manualShutterNs == 0 && !hasOis) ? Math.min(filmMaxAutoShutterNs, MAX_SHUTTER_NS) : filmMaxAutoShutterNs;
         double tMax = Math.min(autoCap, slowestShutterNs()) * 1e-9;
         double under = (tWanted > tMax) ? Math.log(tWanted / tMax) / Math.log(2.0) : 0.0;
         int pushCap = autoGain ? 3 : 4;   // night merge pays for up to +4 stops of gain
