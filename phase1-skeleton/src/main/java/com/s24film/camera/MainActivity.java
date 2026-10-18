@@ -871,12 +871,7 @@ public class MainActivity extends Activity implements
     }
 
     private void openGallery() {
-        try {
-            Intent i = getPackageManager().getLaunchIntentForPackage("com.sec.android.gallery3d");
-            if (i != null) startActivity(i);
-        } catch (Throwable t) {
-            Toast.makeText(this, "Gallery unavailable", Toast.LENGTH_SHORT).show();
-        }
+        startActivity(new Intent(this, LibraryActivity.class));
     }
 
     // Long-press any stock button: open the stock browser (all 120 looks).

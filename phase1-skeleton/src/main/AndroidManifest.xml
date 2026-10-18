@@ -23,5 +23,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name="com.s24film.camera.LibraryActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+        <activity
+            android:name="com.s24film.camera.EditorActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
     </application>
 </manifest>
