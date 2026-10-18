@@ -465,6 +465,27 @@ public class CameraEngine {
     private double meterLogL = Double.NaN;
     private static final double LN2 = Math.log(2.0);
 
+    // Centre-weighted 5x5 matrix: the whole frame counts (a bright sky pulls exposure down), the middle
+    // counts most, and a clipped-pixel fraction above 1% lowers the exposure further so highlights keep detail.
+    private final float[] zoneBuf = new float[26];
+    private static final float[] ZONE_W = {
+        1, 1, 1, 1, 1,
+        1, 2, 2, 2, 1,
+        1, 2, 4, 2, 1,
+        1, 2, 2, 2, 1,
+        1, 1, 1, 1, 1};
+
+    private float meterMean(float centreMean) {
+        VulkanRenderer.nativeGetMeterZones(zoneBuf);
+        double sum = 0.0, ws = 0.0;
+        for (int i = 0; i < 25; i++) { sum += ZONE_W[i] * zoneBuf[i]; ws += ZONE_W[i]; }
+        float m = (float) (sum / ws);
+        if (m <= 1e-5f) return centreMean;
+        float clip = zoneBuf[25];
+        if (clip > 0.01f) m *= 1f + Math.min(2.0f, 8f * (clip - 0.01f));   // up to ~1.6 stops lower
+        return m;
+    }
+
     /** ISO x seconds (exposure index x shutter) that renders the reference brightness, or -1 if not ready. */
     private double meterDesiredIsoSeconds(float mean) {
         double es = resultIso * resultExposureNs * 1e-9;
@@ -959,7 +980,7 @@ public class CameraEngine {
     private void updateAutoIso() {
         if (stackActive) return;       // a stack shot owns the exposure until it is merged
         if (isoLadder.length == 0 || captureSession == null || previewBuilder == null) return;
-        float mean = VulkanRenderer.nativeGetLastRawMean();
+        float mean = meterMean(VulkanRenderer.nativeGetLastRawMean());
         int boxIso = filmIsoMode ? activeBoxIso() : 0;
         if (boxIso > 0) {
             updateFilmExposure(boxIso, mean);
@@ -1049,7 +1070,7 @@ public class CameraEngine {
     private static final int MAX_STACK_FRAMES = 600;
     private static final int STACK_SETTLE_FRAMES = 5;
     private static final int STACK_TIMEOUT_FRAMES = 90;
-    private static final long HDR_MAX_SHUTTER_NS = 125_000_000L;   // 1/8 s: the +2 EV frame stays hand-holdable on a rest
+    private static final long HDR_MAX_SHUTTER_NS = 33_333_333L;    // 1/30 s: no long frame to blur by hand; ISO and the aligned merge make up the rest
     private static final float HDR_STEP_UNDER = 0.25f;
     private static final float HDR_STEP_OVER = 4.0f;
 

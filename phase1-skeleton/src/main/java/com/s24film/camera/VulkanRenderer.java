@@ -38,6 +38,8 @@ public class VulkanRenderer {
     public static native void nativeSetLensFxEnabled(boolean enabled);
     public static native void nativeSetPortraitMode(boolean on);
     public static native float nativeGetLastRawMean();
+    /** 25 zone means (5x5, row-major, 0..1 of range) then the clipped-pixel fraction. */
+    public static native void nativeGetMeterZones(float[] out26);
     public static native boolean nativeSetEncoderSurface(Surface encoderSurface);
     // Call before nativeSetEncoderSurface: true = encoder gets BT.2020 HLG (10-bit when the surface allows).
     public static native void nativeSetEncoderHlg(boolean hlg);

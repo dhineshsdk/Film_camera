@@ -200,6 +200,7 @@ public:
     void setPortraitMode(bool on) { mPortraitMode.store(on); }
     void setVirtualAperture(float fNumber) { mVirtualFNumber.store(std::clamp(fNumber, 0.95f, 22.0f)); }
     float lastRawMean() const { return mLastRawMean.load(); }
+    void meterZones(float* out26) const { for (int i = 0; i < 26; ++i) out26[i] = mMeterZones[i].load(); }
     bool setEncoderWindow(ANativeWindow* encoderWindow);
     // Applies to the next setEncoderWindow: true = BT.2020 HLG (10-bit when the surface allows it).
     void setEncoderHlg(bool hlg) { mEncoderHlgRequested.store(hlg); }
@@ -453,6 +454,7 @@ private:
     std::atomic<float> mNoiseO{0.0f};
     std::atomic<float> mBlackLevel{0.0f};
     std::atomic<float> mLastRawMean{0.0f};
+    std::atomic<float> mMeterZones[26];   // 5x5 zone means (0..1 of range) + clipped-pixel fraction
 
     // CCT-interpolated ForwardMatrix from CameraCharacteristics (Java), row-major.
     std::mutex mFmMutex;

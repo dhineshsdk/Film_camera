@@ -110,6 +110,9 @@ final class DebugControl extends BroadcastReceiver {
             case "shutter":
                 engine.setManualShutterNs(intent.getLongExtra("ns", 0L));
                 break;
+            case "stack":   // 0 single/auto, 1 burst, 2 HDR, 3 long, 4 trails
+                engine.setStackMode(intent.getIntExtra("mode", 0));
+                break;
             case "night":
                 engine.setNightAuto(intent.getBooleanExtra("on", true));
                 break;

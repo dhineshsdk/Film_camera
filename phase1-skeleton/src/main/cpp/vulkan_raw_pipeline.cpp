@@ -2125,6 +2125,29 @@ float VulkanRawPipeline::renderRawFrame(
                     float mean = (static_cast<float>(sum / n) - black) / std::max(whiteLevel - black, 1.0f);
                     mLastRawMean.store(std::max(mean, 0.0f));
                 }
+                // Whole-frame 5x5 zone means and the clipped-pixel fraction for matrix metering.
+                {
+                    float blk = std::max(mBlackLevel.load(), 0.0f);
+                    float rng = std::max(whiteLevel - blk, 1.0f);
+                    double zs[25] = {0.0}; uint32_t zn[25] = {0}; uint32_t clipped = 0, total = 0;
+                    const float clipAt = blk + 0.95f * rng;
+                    for (int y = 0; y < height; y += 16) {
+                        const uint16_t* row = px + static_cast<size_t>(y) * static_cast<size_t>(stride);
+                        const int zy = std::min(4, y * 5 / height);
+                        for (int x = 0; x < width; x += 16) {
+                            const int zx = std::min(4, x * 5 / width);
+                            const float v = static_cast<float>(row[x]);
+                            zs[zy * 5 + zx] += v; zn[zy * 5 + zx]++;
+                            if (v >= clipAt) clipped++;
+                            total++;
+                        }
+                    }
+                    for (int i = 0; i < 25; ++i) {
+                        float m = zn[i] ? static_cast<float>(zs[i] / zn[i]) : blk;
+                        mMeterZones[i].store(std::max((m - blk) / rng, 0.0f));
+                    }
+                    mMeterZones[25].store(total ? static_cast<float>(clipped) / static_cast<float>(total) : 0.0f);
+                }
             }
             AHardwareBuffer_unlock(ahb, nullptr);
         } else {
@@ -2891,7 +2914,7 @@ inline float cellLum(const uint16_t* p, int stride, int x, int y) {
 
 // Translation (even pixels) that maps this frame onto the reference: coarse 8x search, then a 2-pixel refine.
 static void estimateShift(const std::vector<float>& refSmall, const std::vector<float>& curSmall, int sw, int sh,
-                          const uint16_t* ref, int W, int H, const uint16_t* cur, int stride, int& outX, int& outY) {
+                          const uint16_t* ref, int W, int H, const uint16_t* cur, int stride, float curScale, int& outX, int& outY) {
     const int R = 12, m = 14;
     double best = 1e30; int bx = 0, by = 0;
     for (int dy = -R; dy <= R; ++dy) {
@@ -2915,7 +2938,7 @@ static void estimateShift(const std::vector<float>& refSmall, const std::vector<
             double sad = 0.0; int cnt = 0;
             for (int y = 128; y < H - 128; y += 16) {
                 for (int x = 128; x < W - 128; x += 16) {
-                    sad += std::fabs(cellLum(ref, W, x, y) - cellLum(cur, stride, x + sx, y + sy));
+                    sad += std::fabs(cellLum(ref, W, x, y) - curScale * cellLum(cur, stride, x + sx, y + sy));
                     ++cnt;
                 }
             }
@@ -2974,14 +2997,21 @@ bool VulkanRawPipeline::stackAdd(float relExposure) {
 
     // Burst: line each frame up with the first one (hand shake), whole Bayer cells so the pattern holds.
     int shx = 0, shy = 0;
-    if (mode == 0) {
+    if (mode == 0 || mode == 1) {
         std::vector<float> cur;
         int sw = 0, sh = 0;
         boxDown8(src, stride, W, H, black, cur, sw, sh);
         if (first) {
             s.refSmall = cur; s.smallW = sw; s.smallH = sh;
         } else if (s.smallW == sw && s.smallH == sh) {
-            estimateShift(s.refSmall, cur, sw, sh, ref, W, H, src, stride, shx, shy);
+            float scale = 1.0f;   // HDR frames differ in exposure: match brightness before comparing
+            if (mode == 1) {
+                double ra = 0.0, ca = 0.0;
+                for (size_t i = 0; i < cur.size(); ++i) { ra += s.refSmall[i]; ca += cur[i]; }
+                scale = (ca > 1e-6) ? static_cast<float>(ra / ca) : 1.0f;
+                for (auto& v : cur) v *= scale;
+            }
+            estimateShift(s.refSmall, cur, sw, sh, ref, W, H, src, stride, scale, shx, shy);
             LOGI("Stack align frame %d: shift %d,%d px", s.frames, shx, shy);
         }
     }
@@ -3273,6 +3303,14 @@ Java_com_s24film_camera_VulkanRenderer_nativeSetCaptureState(
 JNIEXPORT jfloat JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeGetLastRawMean(JNIEnv* /*env*/, jobject /*thiz*/) {
     return gPipeline ? gPipeline->lastRawMean() : 0.0f;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeGetMeterZones(JNIEnv* env, jobject /*thiz*/, jfloatArray out) {
+    if (!gPipeline || !out || env->GetArrayLength(out) < 26) return;
+    float z[26];
+    gPipeline->meterZones(z);
+    env->SetFloatArrayRegion(out, 0, 26, z);
 }
 
 JNIEXPORT jboolean JNICALL
