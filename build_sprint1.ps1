@@ -73,7 +73,7 @@ Write-Host "Linking APK with aapt2..." -ForegroundColor Yellow
 Write-Host "Compiling Java with javac..." -ForegroundColor Yellow
 $javaSources = Get-ChildItem -Path "phase1-skeleton\src\main\java" -Filter "*.java" -Recurse | ForEach-Object { $_.FullName }
 $rJava = Get-ChildItem -Path "$buildDir\gen" -Filter "R.java" -Recurse | ForEach-Object { $_.FullName }
-& "$javaBin\javac.exe" -XDstringConcat=inline -source 17 -target 17 -cp "$platform\android.jar" -d "$buildDir\classes" ($javaSources + $rJava)
+& "$javaBin\javac.exe" -XDstringConcat=inline -parameters -source 17 -target 17 -cp "$platform\android.jar" -d "$buildDir\classes" ($javaSources + $rJava)
 
 # 7. DEX with d8
 Write-Host "Creating classes.dex with d8..." -ForegroundColor Yellow
