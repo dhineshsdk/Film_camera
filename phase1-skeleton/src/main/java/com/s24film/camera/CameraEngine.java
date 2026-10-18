@@ -284,6 +284,7 @@ public class CameraEngine {
         IsoTask(CameraEngine e) { this.e = e; }
         @Override public void run() {
             if (e.manualAeActive && e.filmKey.isEmpty()) {
+                if (e.videoMode) e.filmIsoSeconds = e.currentIso * (e.currentExposureNs * 1e-9);
                 e.chooseIsoAndShutter(e.currentIso * (e.currentExposureNs * 1e-9));
                 e.applyManualExposure();
             }
@@ -528,6 +529,13 @@ public class CameraEngine {
     // the sweet-spot ISO would need a shutter shorter than 250 us.
     private void chooseIsoAndShutter(double isoSeconds) {
         if (isoLadder.length == 0) return;
+        if (videoMode) {
+            // Video: the shutter angle fixes the shutter, ISO takes up the exposure.
+            long tv = videoShutterNs();
+            currentExposureNs = tv;
+            currentIso = (manualIso > 0) ? clampIso(manualIso) : nearestCleanIso(isoSeconds / (tv * 1e-9));
+            return;
+        }
         if (manualIso > 0) {
             currentIso = clampIso(manualIso);
             currentExposureNs = Math.max(minShutterNs, Math.min(maxShutterNs, (long) (isoSeconds / currentIso * 1e9)));
@@ -560,9 +568,11 @@ public class CameraEngine {
             previewBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
             previewBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, currentIso);
             previewBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentExposureNs);
-            previewBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, Math.max(currentExposureNs, MAX_SHUTTER_NS));
+            previewBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION,
+                videoMode ? videoFrameDurationNs() : Math.max(currentExposureNs, MAX_SHUTTER_NS));
             if (defaultFpsRange == null) defaultFpsRange = previewBuilder.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE);
             Range<Integer> fps = ((currentExposureNs > MAX_SHUTTER_NS || slowFpsAlways) && slowFpsRange != null) ? slowFpsRange : defaultFpsRange;
+            if (videoMode) fps = videoFpsRange();
             if (fps != null) previewBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fps);
             captureSession.setRepeatingRequest(previewBuilder.build(), new CaptureCallback(this), cameraHandler);
         } catch (Exception e) {
@@ -608,9 +618,58 @@ public class CameraEngine {
      */
     public void setManualShutterNs(long ns) { manualShutterNs = Math.max(0L, ns); }
     /** Video mode keeps the shutter at 1/30 s or faster so the take runs at 30 fps. */
-    public void setVideoMode(boolean video) { videoMode = video; }
-    /** Slowest shutter the preview stream can run: 1/15 s for photos, 1/30 s for video. */
-    private long slowestShutterNs() { return videoMode ? maxShutterNs : Math.max(maxShutterNs, slowestFrameNs); }
+    public void setVideoMode(boolean video) {
+        boolean changed = (videoMode != video);
+        videoMode = video;
+        if (changed) requestVideoReapply();
+    }
+
+    // ---------------------------------------------------------------- Video format
+    private static final double VIDEO_MIN_DIGITAL_GAIN = 0.25;   // exposure index floor = min ISO x this
+    private static final double VIDEO_MAX_DIGITAL_GAIN = 4.0;    // exposure index ceiling = max ISO x this
+    private volatile int videoFps = 24;
+    private volatile float videoAngleDeg = 180f;
+    private volatile boolean videoReapply = false;
+
+    /** Video frame rate and shutter angle. Only affects exposure while in video mode. */
+    public void setVideoFormat(int fps, float shutterAngleDeg) {
+        videoFps = Math.max(1, fps);
+        videoAngleDeg = Math.max(1f, Math.min(360f, shutterAngleDeg));
+        if (videoMode) requestVideoReapply();
+    }
+
+    private void requestVideoReapply() {
+        videoReapply = true;
+        if (cameraHandler != null) cameraHandler.post(new IsoTask(this));
+    }
+
+    private long videoFrameDurationNs() { return 1_000_000_000L / videoFps; }
+
+    private long videoShutterNs() {
+        long fd = videoFrameDurationNs();
+        long t = (long) (videoAngleDeg / 360.0 * fd);
+        long hi = Math.max(minShutterNs, Math.min(fd, deviceMaxShutterNs));
+        return Math.max(minShutterNs, Math.min(hi, t));
+    }
+
+    /** [fps,fps] if the device lists it, else the narrowest range topping out at fps, else the default. */
+    private Range<Integer> videoFpsRange() {
+        Range<Integer> best = null;
+        Range<Integer>[] rs = (characteristics != null)
+            ? characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) : null;
+        int fps = videoFps;
+        if (rs != null) {
+            for (Range<Integer> r : rs) {
+                int lo = r.getLower().intValue(), hi = r.getUpper().intValue();
+                if (lo == fps && hi == fps) return r;
+                if (hi == fps && (best == null || hi - lo < best.getUpper().intValue() - best.getLower().intValue())) best = r;
+            }
+        }
+        return best != null ? best : defaultFpsRange;
+    }
+
+    /** Slowest shutter the preview stream can run: 1/15 s for photos, one video frame for video. */
+    private long slowestShutterNs() { return videoMode ? videoFrameDurationNs() : Math.max(maxShutterNs, slowestFrameNs); }
     public long getManualShutterNs() { return manualShutterNs; }
     /** Shutter speed actually in use, ns. */
     public long getCurrentShutterNs() { return currentExposureNs; }
@@ -669,6 +728,7 @@ public class CameraEngine {
 
     // isoSeconds: exposure the scene needs, as (exposure index x seconds).
     private void computeFilmExposure(int boxIso, double isoSeconds) {
+        if (videoMode) { computeFilmExposureVideo(boxIso, isoSeconds); return; }
         int push = pushStops;
         double ei = boxIso * Math.pow(2.0, push);
         double tWanted = isoSeconds / ei;
@@ -703,6 +763,42 @@ public class CameraEngine {
         VulkanRenderer.nativeSetFilmExposure(filmDigitalGain, push);
     }
 
+    // Video: shutter fixed by the angle, the exposure index floats so ISO solves exposure.
+    private void computeFilmExposureVideo(int boxIso, double isoSeconds) {
+        int push = pushStops;
+        double eiBox = boxIso * Math.pow(2.0, push);
+        long t = videoShutterNs();
+        double tSec = t * 1e-9;
+        double need = isoSeconds / tSec;               // exposure index that meters correctly
+        double ei;
+        int sensorIso;
+        double under = 0.0;
+        if (manualIso > 0) {
+            sensorIso = clampIso(manualIso);
+            ei = eiBox;                                // look stays put; meterEv shows the error
+        } else {
+            double eiMin = deviceMinIso * VIDEO_MIN_DIGITAL_GAIN;
+            double eiMax = deviceMaxIso * VIDEO_MAX_DIGITAL_GAIN;
+            ei = Math.max(eiMin, Math.min(eiMax, need));
+            if (need > eiMax) under = Math.log(need / eiMax) / Math.log(2.0);
+            sensorIso = nearestCleanIso(ei);
+        }
+        double tWanted = isoSeconds / ei;
+        meterEv = (float) (Math.log(tSec / tWanted) / Math.log(2.0));
+        currentIso = sensorIso;
+        currentExposureNs = t;
+        filmDigitalGain = (float) (ei / sensorIso);
+        underexposureEv = (float) under;
+        effectiveEi = (int) Math.round(eiBox);
+        DngSaver.setExposureIndex(effectiveEi);
+        VulkanRenderer.nativeSetFilmExposure(filmDigitalGain, push);
+    }
+
+    private String filmKeyFor(int boxIso) {
+        return boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode + "/" + manualIso
+            + "/" + videoFps + "/" + videoAngleDeg;
+    }
+
     private void updateFilmExposure(int boxIso, float mean) {
         // A new session (lens switch) starts on the HAL's own AE: the film exposure must be sent
         // again even when it equals the previous lens's, or the HAL keeps choosing its own ISO.
@@ -721,7 +817,7 @@ public class CameraEngine {
             // Coming from a digital look: keep the exposure it had settled on.
             filmIsoSeconds = currentIso * (currentExposureNs * 1e-9);
         } else {
-            String key = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode + "/" + manualIso;
+            String key = filmKeyFor(boxIso);
             framesSinceAeApply++;
             if (key.equals(filmKey) && (framesSinceAeApply < FILM_AE_INTERVAL_FRAMES || mean <= 1e-5f)) return;
             if (key.equals(filmKey)) {
@@ -751,12 +847,14 @@ public class CameraEngine {
         double ei = boxIso * Math.pow(2.0, pushStops);
         filmIsoSeconds = Math.max(ei * minShutterNs * 1e-9 * 0.25,
             Math.min(ei * FILM_MAX_AUTO_SHUTTER_NS * 1e-9 * 256.0, filmIsoSeconds));
-        filmKey = boxIso + "/" + pushStops + "/" + autoGain + "/" + manualShutterNs + "/" + videoMode + "/" + manualIso;
+        filmKey = filmKeyFor(boxIso);
         int prevIso = currentIso;
         long prevExp = currentExposureNs;
         computeFilmExposure(boxIso, filmIsoSeconds);
         framesSinceAeApply = 0;
-        if (fresh || currentIso != prevIso || currentExposureNs != prevExp) applyManualExposure();
+        boolean reapply = videoReapply;
+        videoReapply = false;
+        if (fresh || reapply || currentIso != prevIso || currentExposureNs != prevExp) applyManualExposure();
     }
 
     // Runs on the camera thread once per rendered RAW frame.
@@ -787,6 +885,7 @@ public class CameraEngine {
             if (!ready || mean <= 1e-4f) return;
             aeTargetRawMean = mean;
             double isoSeconds = resultIso * (resultExposureNs * 1e-9);
+            filmIsoSeconds = isoSeconds;
             chooseIsoAndShutter(isoSeconds);
             manualAeActive = true;
             framesSinceAeApply = 0;
@@ -801,7 +900,9 @@ public class CameraEngine {
         float evErr = (float) (Math.log(aeTargetRawMean / mean) / Math.log(2.0));
         if (Math.abs(evErr) <= FILM_HOLD_EV) return;
         float step = Math.max(-AE_MAX_STEP_EV, Math.min(AE_MAX_STEP_EV, AE_GAIN * evErr));
-        double isoSeconds = currentIso * (currentExposureNs * 1e-9) * Math.pow(2.0, step);
+        // Video quantises ISO to the ladder, so integrate the exposure instead of re-deriving it.
+        double isoSeconds = (videoMode ? filmIsoSeconds : currentIso * (currentExposureNs * 1e-9)) * Math.pow(2.0, step);
+        if (videoMode) filmIsoSeconds = isoSeconds;
         int prevIso = currentIso;
         long prevExp = currentExposureNs;
         chooseIsoAndShutter(isoSeconds);

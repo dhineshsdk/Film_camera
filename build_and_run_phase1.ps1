@@ -37,6 +37,23 @@ with open(r'phase1-skeleton\src\main\cpp\shaders\demosaic_spv.h', 'w') as f:
     f.write(f'const size_t demosaic_spv_size = {len(data)};\n')
 "
 
+# Compile encode_hlg.comp (video HLG pass) and generate encode_hlg_spv.h
+& "$glslc" -fshader-stage=compute "phase1-skeleton\src\main\cpp\shaders\encode_hlg.comp" -o "phase1-skeleton\src\main\cpp\shaders\encode_hlg.spv"
+python -c "
+with open(r'phase1-skeleton\src\main\cpp\shaders\encode_hlg.spv', 'rb') as f:
+    data = f.read()
+with open(r'phase1-skeleton\src\main\cpp\shaders\encode_hlg_spv.h', 'w') as f:
+    f.write('// Auto-generated SPIR-V header\n#pragma once\n#include <cstdint>\n#include <cstddef>\n\n')
+    f.write('alignas(4) const uint32_t encode_hlg_spv[] = {\n')
+    for i in range(0, len(data), 4):
+        val = int.from_bytes(data[i:i+4], 'little')
+        f.write(f'0x{val:08x}, ')
+        if (i // 4 + 1) % 8 == 0:
+            f.write('\n')
+    f.write('\n};\n')
+    f.write(f'const size_t encode_hlg_spv_size = {len(data)};\n')
+"
+
 # 2. Build Native C++ Library with CMake and Ninja (arm64-v8a)
 Write-Host "Configuring and compiling native C++ Vulkan ISP library (arm64-v8a)..." -ForegroundColor Yellow
 $nativeBuildDir = "phase1-skeleton\build_native"

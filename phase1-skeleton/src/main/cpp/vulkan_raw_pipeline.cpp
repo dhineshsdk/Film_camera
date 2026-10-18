@@ -3,6 +3,7 @@
 #include "Master120LooksDatabase.h"
 #include "S24HardwareCalibrationMaster.h"
 #include "shaders/demosaic_spv.h"
+#include "shaders/encode_hlg_spv.h"
 
 #include <cstring>
 #include <algorithm>
@@ -205,6 +206,19 @@ bool VulkanRawPipeline::createInstance() {
         VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
     };
+
+    // VK_EXT_swapchain_colorspace lets the encoder swapchain carry the BT.2020 HLG dataspace.
+    uint32_t instExtCount = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &instExtCount, nullptr);
+    std::vector<VkExtensionProperties> instExts(instExtCount);
+    vkEnumerateInstanceExtensionProperties(nullptr, &instExtCount, instExts.data());
+    mHasSwapchainColorspaceExt = false;
+    for (const auto& ext : instExts) {
+        if (strcmp(ext.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0) {
+            mHasSwapchainColorspaceExt = true;
+        }
+    }
+    if (mHasSwapchainColorspaceExt) extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
 
     VkInstanceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -487,11 +501,34 @@ bool VulkanRawPipeline::createEncoderSwapchainLocked(ANativeWindow* encoderWindo
     std::vector<VkSurfaceFormatKHR> formats(formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(mPhysicalDevice, mEncoderSurface, &formatCount, formats.data());
 
+    // HLG: prefer a 10-bit surface tagged BT.2020 HLG, then 10-bit untagged, then 8-bit (the
+    // pass still writes HLG values so the stream matches the HLG flags MediaCodec was given).
+    mEncoderHlg = mEncoderHlgRequested.load();
     mEncoderFormat = VK_FORMAT_R8G8B8A8_UNORM;
-    for (const auto& fmt : formats) {
-        if (fmt.format == VK_FORMAT_R8G8B8A8_UNORM || fmt.format == VK_FORMAT_B8G8R8A8_UNORM) {
-            mEncoderFormat = fmt.format;
-            break;
+    mEncoderColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    bool picked = false;
+    if (mEncoderHlg && formatSupports(VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+        const VkColorSpaceKHR order[3] = {VK_COLOR_SPACE_HDR10_HLG_EXT, VK_COLOR_SPACE_PASS_THROUGH_EXT,
+                                          VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+        for (int k = 0; k < 3 && !picked; ++k) {
+            if (k < 2 && !mHasSwapchainColorspaceExt) continue;
+            for (const auto& fmt : formats) {
+                if (fmt.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 && fmt.colorSpace == order[k]) {
+                    mEncoderFormat = fmt.format;
+                    mEncoderColorSpace = fmt.colorSpace;
+                    picked = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!picked) {
+        for (const auto& fmt : formats) {
+            if ((fmt.format == VK_FORMAT_R8G8B8A8_UNORM || fmt.format == VK_FORMAT_B8G8R8A8_UNORM) &&
+                fmt.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                mEncoderFormat = fmt.format;
+                break;
+            }
         }
     }
 
@@ -511,7 +548,7 @@ bool VulkanRawPipeline::createEncoderSwapchainLocked(ANativeWindow* encoderWindo
     swapchainCreateInfo.surface = mEncoderSurface;
     swapchainCreateInfo.minImageCount = imageCount;
     swapchainCreateInfo.imageFormat = mEncoderFormat;
-    swapchainCreateInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    swapchainCreateInfo.imageColorSpace = mEncoderColorSpace;
     swapchainCreateInfo.imageExtent = mEncoderExtent;
     swapchainCreateInfo.imageArrayLayers = 1;
     swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -521,10 +558,31 @@ bool VulkanRawPipeline::createEncoderSwapchainLocked(ANativeWindow* encoderWindo
     swapchainCreateInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     swapchainCreateInfo.clipped = VK_TRUE;
 
-    if (vkCreateSwapchainKHR(mDevice, &swapchainCreateInfo, nullptr, &mEncoderSwapchain) != VK_SUCCESS) {
+    VkResult encScRes = vkCreateSwapchainKHR(mDevice, &swapchainCreateInfo, nullptr, &mEncoderSwapchain);
+    if (encScRes != VK_SUCCESS && mEncoderFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
+        LOGW("10-bit encoder swapchain failed (%d), retrying 8-bit", static_cast<int>(encScRes));
+        mEncoderFormat = VK_FORMAT_R8G8B8A8_UNORM;
+        mEncoderColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        swapchainCreateInfo.imageFormat = mEncoderFormat;
+        swapchainCreateInfo.imageColorSpace = mEncoderColorSpace;
+        encScRes = vkCreateSwapchainKHR(mDevice, &swapchainCreateInfo, nullptr, &mEncoderSwapchain);
+    }
+    if (encScRes != VK_SUCCESS) {
         LOGE("vkCreateSwapchainKHR for MediaCodec encoder failed!");
         destroyEncoderSwapchainLocked();
         return false;
+    }
+
+    if (mEncoderHlg) {
+        const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (!createEncodePipelineLocked() ||
+            !createImage(mEncoderStaging, VK_FORMAT_R16G16B16A16_SFLOAT,
+                         mEncoderExtent.width, mEncoderExtent.height, 1, usage) ||
+            !transitionToGeneral({mEncoderStaging.image})) {
+            LOGE("HLG encoder pass unavailable");
+            destroyEncoderSwapchainLocked();
+            return false;
+        }
     }
 
     uint32_t actualImageCount = 0;
@@ -537,12 +595,96 @@ bool VulkanRawPipeline::createEncoderSwapchainLocked(ANativeWindow* encoderWindo
     vkCreateSemaphore(mDevice, &semInfo, nullptr, &mEncoderImageAvailableSemaphore);
     vkCreateSemaphore(mDevice, &semInfo, nullptr, &mEncoderRenderFinishedSemaphore);
 
-    LOGI("Phase 5 Zero-Copy MediaCodec Vulkan Swapchain active (%ux%u, %u images)",
-         mEncoderExtent.width, mEncoderExtent.height, actualImageCount);
+    const bool tenBit = (mEncoderFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+    mEncoderInfo = std::string(tenBit ? "10-bit " : "8-bit ") + (mEncoderHlg ? "HLG" : "SDR");
+    if (mEncoderHlg && mEncoderColorSpace != VK_COLOR_SPACE_HDR10_HLG_EXT) mEncoderInfo += " (untagged surface)";
+    LOGI("Phase 5 Zero-Copy MediaCodec Vulkan Swapchain active (%ux%u, %u images, %s, colorspace %d)",
+         mEncoderExtent.width, mEncoderExtent.height, actualImageCount, mEncoderInfo.c_str(),
+         static_cast<int>(mEncoderColorSpace));
     return true;
 }
 
+std::string VulkanRawPipeline::encoderInfo() {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    return (mEncoderSwapchain != VK_NULL_HANDLE) ? mEncoderInfo : std::string("off");
+}
+
+bool VulkanRawPipeline::createEncodePipelineLocked() {
+    if (mEncodePipeline != VK_NULL_HANDLE) return true;
+
+    VkDescriptorSetLayoutBinding b[2] = {};
+    for (uint32_t i = 0; i < 2; ++i) {
+        b[i].binding = i;
+        b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 2;
+    layoutInfo.pBindings = b;
+    if (vkCreateDescriptorSetLayout(mDevice, &layoutInfo, nullptr, &mEncodeSetLayout) != VK_SUCCESS) return false;
+
+    VkDescriptorPoolSize poolSize = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
+    VkDescriptorPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    if (vkCreateDescriptorPool(mDevice, &poolInfo, nullptr, &mEncodePool) != VK_SUCCESS) return false;
+
+    VkDescriptorSetAllocateInfo setAlloc = {};
+    setAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    setAlloc.descriptorPool = mEncodePool;
+    setAlloc.descriptorSetCount = 1;
+    setAlloc.pSetLayouts = &mEncodeSetLayout;
+    if (vkAllocateDescriptorSets(mDevice, &setAlloc, &mEncodeSet) != VK_SUCCESS) return false;
+
+    VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(EncodePush)};
+    VkPipelineLayoutCreateInfo pl = {};
+    pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &mEncodeSetLayout;
+    pl.pushConstantRangeCount = 1;
+    pl.pPushConstantRanges = &pcr;
+    if (vkCreatePipelineLayout(mDevice, &pl, nullptr, &mEncodePipelineLayout) != VK_SUCCESS) return false;
+
+    VkShaderModuleCreateInfo smInfo = {};
+    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smInfo.codeSize = encode_hlg_spv_size;
+    smInfo.pCode = encode_hlg_spv;
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(mDevice, &smInfo, nullptr, &module) != VK_SUCCESS) return false;
+
+    VkComputePipelineCreateInfo info = {};
+    info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    info.stage.module = module;
+    info.stage.pName = "main";
+    info.layout = mEncodePipelineLayout;
+    VkResult res = vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &info, nullptr, &mEncodePipeline);
+    vkDestroyShaderModule(mDevice, module, nullptr);
+    if (res != VK_SUCCESS) {
+        LOGE("HLG encode pipeline failed (%d)", static_cast<int>(res));
+        mEncodePipeline = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
+void VulkanRawPipeline::destroyEncodePipeline() {
+    if (mEncodePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(mDevice, mEncodePipeline, nullptr); mEncodePipeline = VK_NULL_HANDLE; }
+    if (mEncodePipelineLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(mDevice, mEncodePipelineLayout, nullptr); mEncodePipelineLayout = VK_NULL_HANDLE; }
+    if (mEncodePool != VK_NULL_HANDLE) { vkDestroyDescriptorPool(mDevice, mEncodePool, nullptr); mEncodePool = VK_NULL_HANDLE; }
+    if (mEncodeSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(mDevice, mEncodeSetLayout, nullptr); mEncodeSetLayout = VK_NULL_HANDLE; }
+    mEncodeSet = VK_NULL_HANDLE;
+}
+
 void VulkanRawPipeline::destroyEncoderSwapchainLocked() {
+    destroyImage(mEncoderStaging);
+    mEncoderHlg = false;
+    mEncoderInfo = "off";
     mEncoderImages.clear();
     if (mEncoderRenderFinishedSemaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(mDevice, mEncoderRenderFinishedSemaphore, nullptr);
@@ -1419,6 +1561,7 @@ bool VulkanRawPipeline::createComputeResources() {
 
 void VulkanRawPipeline::destroyComputeResources() {
     destroyEncoderSwapchainLocked();
+    destroyEncodePipeline();
     if (mInFlightFence != VK_NULL_HANDLE) { vkDestroyFence(mDevice, mInFlightFence, nullptr); mInFlightFence = VK_NULL_HANDLE; }
     if (mRenderFinishedSemaphore != VK_NULL_HANDLE) { vkDestroySemaphore(mDevice, mRenderFinishedSemaphore, nullptr); mRenderFinishedSemaphore = VK_NULL_HANDLE; }
     if (mImageAvailableSemaphore != VK_NULL_HANDLE) { vkDestroySemaphore(mDevice, mImageAvailableSemaphore, nullptr); mImageAvailableSemaphore = VK_NULL_HANDLE; }
@@ -2001,25 +2144,84 @@ float VulkanRawPipeline::renderRawFrame(
                              VK_PIPELINE_STAGE_TRANSFER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &encToDst);
 
-        float targetH = static_cast<float>(outExtent.width) * (4.0f / 3.0f);
-        int32_t yMargin = std::max(0, static_cast<int32_t>((static_cast<float>(outExtent.height) - targetH) * 0.5f));
+        // Centre crop of the live frame at the encoder's aspect (3:4 for both 1440p and 4K).
+        const float srcW = static_cast<float>(outExtent.width), srcH = static_cast<float>(outExtent.height);
+        const float encAspect = static_cast<float>(mEncoderExtent.width) / std::max(1.0f, static_cast<float>(mEncoderExtent.height));
+        int32_t xMargin = 0, yMargin = 0;
+        if (srcW / srcH < encAspect) {
+            yMargin = std::max(0, static_cast<int32_t>((srcH - srcW / encAspect) * 0.5f));
+        } else {
+            xMargin = std::max(0, static_cast<int32_t>((srcW - srcH * encAspect) * 0.5f));
+        }
 
         VkImageBlit encBlit = {};
         encBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         encBlit.srcSubresource.layerCount = 1;
-        encBlit.srcOffsets[0] = {0, yMargin, 0};
-        encBlit.srcOffsets[1] = {static_cast<int32_t>(outExtent.width),
-                                 static_cast<int32_t>(outExtent.height) - yMargin, 1};
         encBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         encBlit.dstSubresource.layerCount = 1;
         encBlit.dstOffsets[0] = {0, 0, 0};
         encBlit.dstOffsets[1] = {static_cast<int32_t>(mEncoderExtent.width),
                                  static_cast<int32_t>(mEncoderExtent.height), 1};
 
-        vkCmdBlitImage(mCommandBuffer,
-                       mLiveTargets.storageRgba16.image, VK_IMAGE_LAYOUT_GENERAL,
-                       mEncoderImages[encoderImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       1, &encBlit, VK_FILTER_LINEAR);
+        if (mEncoderHlg && mEncodePipeline != VK_NULL_HANDLE && mEncoderStaging.image != VK_NULL_HANDLE) {
+            // The fence wait above guarantees the set is idle, so rebinding every frame is safe
+            // (and follows the live targets if they were rebuilt).
+            VkDescriptorImageInfo imgs[2] = {};
+            imgs[0].imageView = mLiveTargets.storageRgba16.levelViews[0];
+            imgs[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            imgs[1].imageView = mEncoderStaging.levelViews[0];
+            imgs[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            VkWriteDescriptorSet w[2] = {};
+            for (uint32_t i = 0; i < 2; ++i) {
+                w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[i].dstSet = mEncodeSet;
+                w[i].dstBinding = i;
+                w[i].descriptorCount = 1;
+                w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                w[i].pImageInfo = &imgs[i];
+            }
+            vkUpdateDescriptorSets(mDevice, 2, w, 0, nullptr);
+
+            computeBarrier(mCommandBuffer);
+            EncodePush ep = {};
+            ep.srcRect[0] = static_cast<float>(xMargin);
+            ep.srcRect[1] = static_cast<float>(yMargin);
+            ep.srcRect[2] = srcW - 2.0f * xMargin;
+            ep.srcRect[3] = srcH - 2.0f * yMargin;
+            ep.dstSize[0] = static_cast<int32_t>(mEncoderExtent.width);
+            ep.dstSize[1] = static_cast<int32_t>(mEncoderExtent.height);
+            ep.srcSize[0] = static_cast<int32_t>(outExtent.width);
+            ep.srcSize[1] = static_cast<int32_t>(outExtent.height);
+            vkCmdBindPipeline(mCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, mEncodePipeline);
+            vkCmdBindDescriptorSets(mCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, mEncodePipelineLayout,
+                                    0, 1, &mEncodeSet, 0, nullptr);
+            vkCmdPushConstants(mCommandBuffer, mEncodePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                               0, sizeof(EncodePush), &ep);
+            vkCmdDispatch(mCommandBuffer, (mEncoderExtent.width + 15u) / 16u, (mEncoderExtent.height + 15u) / 16u, 1);
+
+            VkMemoryBarrier toBlit = {};
+            toBlit.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            toBlit.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            toBlit.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 1, &toBlit, 0, nullptr, 0, nullptr);
+
+            encBlit.srcOffsets[0] = {0, 0, 0};
+            encBlit.srcOffsets[1] = {static_cast<int32_t>(mEncoderExtent.width),
+                                     static_cast<int32_t>(mEncoderExtent.height), 1};
+            vkCmdBlitImage(mCommandBuffer,
+                           mEncoderStaging.image, VK_IMAGE_LAYOUT_GENERAL,
+                           mEncoderImages[encoderImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &encBlit, VK_FILTER_NEAREST);
+        } else {
+            encBlit.srcOffsets[0] = {xMargin, yMargin, 0};
+            encBlit.srcOffsets[1] = {static_cast<int32_t>(outExtent.width) - xMargin,
+                                     static_cast<int32_t>(outExtent.height) - yMargin, 1};
+            vkCmdBlitImage(mCommandBuffer,
+                           mLiveTargets.storageRgba16.image, VK_IMAGE_LAYOUT_GENERAL,
+                           mEncoderImages[encoderImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &encBlit, VK_FILTER_LINEAR);
+        }
 
         VkImageMemoryBarrier encToPresent = encToDst;
         encToPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -2394,6 +2596,17 @@ Java_com_s24film_camera_VulkanRenderer_nativeSetEncoderSurface(
     ANativeWindow* encWindow = ANativeWindow_fromSurface(env, encoderSurface);
     if (!encWindow) return JNI_FALSE;
     return gPipeline->setEncoderWindow(encWindow) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetEncoderHlg(JNIEnv* /*env*/, jobject /*thiz*/, jboolean hlg) {
+    if (gPipeline) gPipeline->setEncoderHlg(hlg == JNI_TRUE);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeGetEncoderInfo(JNIEnv* env, jobject /*thiz*/) {
+    std::string info = gPipeline ? gPipeline->encoderInfo() : std::string("off");
+    return env->NewStringUTF(info.c_str());
 }
 
 JNIEXPORT jfloat JNICALL
