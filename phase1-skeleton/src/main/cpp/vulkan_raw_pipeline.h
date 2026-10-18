@@ -183,7 +183,32 @@ public:
     bool renderMasterStill(std::vector<uint8_t>& outRgba, int& outW, int& outH);
     bool copyMasterGainmap(std::vector<uint8_t>& outGain, int& outW, int& outH);
 
+    // Multi-frame stacking on the frames already held in the RAW ring (no extra camera streams).
+    // Begin sizes the accumulators for the current RAW size; Add folds the most recent ring frame in
+    // (relExposure = this frame's ISO x shutter over the reference frame's, 1 for equal frames);
+    // Finish writes the merged mosaic back over the newest ring slot so the master render uses it
+    // alone; End clears the flag. Modes: 0 burst average with ghost rejection, 1 HDR bracket,
+    // 2 long exposure average, 3 long exposure lighten.
+    bool stackBegin(int mode);
+    bool stackAdd(float relExposure);
+    bool stackFinish();
+    void stackEnd();
+
 private:
+    struct StackState {
+        int mode = -1;
+        int width = 0, height = 0, stride = 0;
+        float black = 0.0f, white = 1023.0f;
+        int frames = 0;
+        std::vector<float> num;
+        std::vector<float> den;
+        std::vector<uint16_t> ref;
+        std::vector<uint16_t> peak;
+    };
+    StackState mStack;
+    std::atomic<bool> mStackActive{false};
+    std::atomic<bool> mForceSingleFrame{false};
+
     bool createInstance();
     bool selectPhysicalDevice();
     bool createDevice();

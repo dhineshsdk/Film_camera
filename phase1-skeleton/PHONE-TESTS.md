@@ -62,3 +62,17 @@ Install the build, then check:
 8. Render check (item 4 of the TODO): shoot the same scene on a few stocks per category and note any that are very dark, have a colour cast, or show a wrong ISO in the list. Report their names.
 
 Not done in this batch: real-pipeline thumbnails (the list shows a category-colour swatch with the box ISO), Aerochrome IR profile (button still uses the legacy path), per-stock push/pull control.
+
+## Batch E: burst, HDR and long-exposure stacking
+
+Build: branch `claude/project-thread-g6ey3c` (PR "Burst, HDR and long-exposure stacking"). Logcat tags: `S24FilmCamera` (`HDR frame ...`, `Master still ...`), native `Stack begin / Stack finish`. Settings sheet > Camera > CAPTURE row > new chip cycles **Single, Burst 8, HDR 3, Long 2s, Long 4s, Long 8s, Trails 8s**. No new camera streams: every mode reads the existing RAW stream, and the DNG (if on) is the last single frame, the merge is in the JPEG.
+
+Use a tripod or rest the phone on something for 2 to 6.
+1. **Single is unchanged.** Chip on Single, shoot as before. Pass: same speed and look as main, no extra log lines.
+2. **Burst 8.** Dim room, hand on a table, shoot. Status counts `Burst n/8`, then `Merged 8 frames`, then Saved. Pass: less shadow noise than Single; a hand waved through the frame does not leave ghosts.
+3. **HDR 3.** Window scene (bright sky, dark room), phone resting. Log shows three `HDR frame` lines near `+0.00`, `-2.00` and `+2.00 EV` (shutter may clamp, ISO makes up the rest). Pass: sky detail back, shadows cleaner than Single, no flicker or crash, preview exposure returns to normal afterwards and the preview stays live.
+4. **HDR with motion.** Same, with a person walking. Pass: no hard double edges (moving areas fall back to the base frame).
+5. **Long 4s.** Tap or a running tap, tripod. Status `Exposing n / 4.0 s`. Pass: water or moving lights smear, static parts stay sharp and the brightness matches Single (it is a mean, like an ND filter).
+6. **Trails 8s.** Night, car lights or a torch swung around. Pass: bright paths accumulate; the dark background stays dark.
+7. **Stability.** Run each mode 5 times in a row, then switch lens (0.6 / 1 / 3 / front) in the middle of a Long 8s. Pass: no HAL restart or phone reboot, shutter button re-enables (`Stack cancelled` if the lens switch cut a shot).
+8. **Film looks.** Repeat 2, 3 and 5 on Portra 400 and on a B&W stock. Pass: same look as Single, exposure and grain consistent.
