@@ -1529,7 +1529,11 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
         }
     }
     const float evGain = std::pow(2.0f, mUserEvStops.load()) * kExposureScale * filmGain;
-    u.lsc[3] = evGain * std::max((mLastFrame.gainR + mLastFrame.gainG + mLastFrame.gainB) / 3.0f, 0.5f);
+    u.lsc[3] = evGain * std::max((mLastFrame.gainR + mLastFrame.gainG + mLastFrame.gainB) / 3.0f, 0.5f) *
+        // The tele's residual noise measured ~2.5x the wide's after NR (same scene, Portra): its
+        // output is upscaled from a small crop, so the noise is coarser than the lab model says.
+        // Scaling g by 1.4 raises the NR's expected variance 1.4x (shot) to 2x (read).
+        ((camIdx == 3) ? 1.4f : 1.0f);
 
     // Per-lens luma NR: the tele, UW and front sensors have smaller pixels (lab shot-noise
     // scale up to ~5x the wide's at the same ISO). Scale the strength so every lens is left
