@@ -68,6 +68,13 @@ layout(std430, binding = 5) readonly buffer LookBuffer {
     LookGpu u_looks[];
 };
 
+// Spectral film model tables for the active look (SpectralFilm.h): [0] look index (-1 none),
+// [1] type (0 negative, 1 slide, 2 B&W), [2] log E offset, [3] print N, [4..6] density axis max,
+// [7] camera grid N, [8] curve N; camera table, curves and print table follow from float 16.
+layout(std430, binding = 18) readonly buffer SpectralBuffer {
+    float u_spec[];
+};
+
 layout(std140, binding = 6) uniform FrameParams {
     vec4 f_noise;    // x=S, y=O (normalized to [0,1] after black), z=black level DN, w=temporal tolerance
     vec4 f_lsc;      // x=enable, y=grid cols (17), z=grid rows (13), w=normalized RAW -> AP1 gain (noise scale)
@@ -809,6 +816,100 @@ vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, ou
     return lin;
 }
 
+// =============================================================================
+// Spectral film model (Phase 3, spektrafilm method). The scene's upsampled spectrum exposes the
+// stock's three layers through their datasheet sensitivities (camera table over ACEScg
+// chromaticity), the datasheet curves develop them, and the negative is printed through a
+// simulated enlarger onto paper (Beer-Lambert, neutral-filtered for mid grey), a slide is viewed
+// on a light box, a B&W negative goes onto a neutral paper. Output is display-linear, white = 1.
+// =============================================================================
+const int SPEC_HDR = 16;
+
+vec3 specVec3(int f) { return vec3(u_spec[f], u_spec[f + 1], u_spec[f + 2]); }
+
+// Exposure per unit r+g+b at ACEScg chromaticity uv (bilinear on the camera grid).
+vec3 specCamera(vec2 uv) {
+    int n = int(u_spec[7] + 0.5);
+    vec2 g = clamp(uv, 0.0, 1.0) * float(n - 1);
+    ivec2 i0 = clamp(ivec2(floor(g)), ivec2(0), ivec2(n - 2));
+    vec2 t = g - vec2(i0);
+    int f00 = SPEC_HDR + (i0.y * n + i0.x) * 4;
+    int f01 = f00 + 4;
+    int f10 = f00 + n * 4;
+    int f11 = f10 + 4;
+    return mix(mix(specVec3(f00), specVec3(f01), t.x), mix(specVec3(f10), specVec3(f11), t.x), t.y);
+}
+
+int specCurveBase() { int n = int(u_spec[7] + 0.5); return SPEC_HDR + n * n * 4; }
+
+vec3 specCurves(vec3 logE) {
+    int cn = int(u_spec[8] + 0.5);
+    int base = specCurveBase();
+    vec3 x = clamp((logE + 3.0) / 7.0, 0.0, 1.0) * float(cn - 1);
+    vec3 D;
+    for (int k = 0; k < 3; ++k) {
+        int i0 = min(int(floor(x[k])), cn - 2);
+        float t = x[k] - float(i0);
+        D[k] = mix(u_spec[base + i0 * 4 + k], u_spec[base + (i0 + 1) * 4 + k], t);
+    }
+    return D;
+}
+
+// Print / light-box table: layer densities -> sRGB-encoded display value (trilinear).
+vec3 specPrint(vec3 D) {
+    int n = int(u_spec[3] + 0.5);
+    int base = specCurveBase() + int(u_spec[8] + 0.5) * 4;
+    vec3 q = clamp(D / max(specVec3(4), vec3(1e-3)), 0.0, 1.0) * float(n - 1);
+    ivec3 i0 = min(ivec3(floor(q)), ivec3(n - 2));
+    vec3 t = q - vec3(i0);
+    vec3 c[8];
+    for (int k = 0; k < 8; ++k) {
+        ivec3 o = i0 + ivec3(k >> 2, (k >> 1) & 1, k & 1);
+        c[k] = specVec3(base + ((o.x * n + o.y) * n + o.z) * 4);
+    }
+    vec3 y0 = mix(mix(c[0], c[1], t.z), mix(c[2], c[3], t.z), t.y);
+    vec3 y1 = mix(mix(c[4], c[5], t.z), mix(c[6], c[7], t.z), t.y);
+    return mix(y0, y1, t.x);
+}
+
+float specBwPrint(float D) {
+    int cn = int(u_spec[8] + 0.5);
+    int base = specCurveBase() + cn * 4;
+    float x = clamp(D / max(u_spec[4], 1e-3), 0.0, 1.0) * float(cn - 1);
+    int i0 = min(int(floor(x)), cn - 2);
+    return mix(u_spec[base + i0 * 4], u_spec[base + (i0 + 1) * 4], x - float(i0));
+}
+
+vec3 srgbEotf(vec3 v) {
+    return mix(v / 12.92, pow((v + 0.055) / 1.055, vec3(2.4)), greaterThan(v, vec3(0.04045)));
+}
+
+vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
+    LookGpu L = u_looks[idx];
+    int type = int(u_spec[1] + 0.5);
+    bool mono = type == 2;
+
+    vec3 rgb = max(scene, vec3(1e-6));
+    float s = rgb.r + rgb.g + rgb.b;
+    vec3 E = s * specCamera(rgb.rg / s);
+    float offset = u_spec[2];
+    vec3 logE = log2(max(E, vec3(1e-9)) / 0.18) * 0.30102999566 + offset;
+    vec3 D = specCurves(logE);
+    vec3 dMid = specCurves(vec3(offset));
+    vec3 dMax = max(specVec3(4) / 1.05, vec3(0.1));
+
+    // Push / pull development: contrast about mid grey (slides: their density runs the other way,
+    // the same expansion still steepens them) and grain, as in the curve model.
+    float push = f_bokeh2.z;
+    D = dMid + (D - dMid) * (1.0 + 0.12 * push);
+    float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+    D = max(D, vec3(0.0));
+
+    if (mono) return vec3(specBwPrint(D.g));
+    return srgbEotf(specPrint(D));
+}
+
 vec3 legacyEmulsion(vec3 acescg, ivec2 outCoord) {
     vec3 linearOut = acescg;
     if (u_stock_type == 0u) return linearOut;
@@ -1149,7 +1250,10 @@ void stageFilm() {
     bool encoded = false;
     bool printed = false;
     vec3 linearOut;
-    if (lookIdx >= 0) {
+    if (lookIdx >= 0 && int(u_spec[0] + 0.5) == lookIdx && u_spec[0] >= 0.0) {
+        linearOut = spectralEmulsion(lookIdx, scene, p);
+        printed = true;
+    } else if (lookIdx >= 0) {
         linearOut = emulsion120(lookIdx, scene, p, master, encoded, printed);
     } else {
         linearOut = legacyEmulsion(scene, p);

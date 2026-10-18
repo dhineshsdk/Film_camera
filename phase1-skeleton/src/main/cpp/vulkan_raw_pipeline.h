@@ -16,6 +16,8 @@
 #include <mutex>
 #include <atomic>
 #include <string>
+#include <thread>
+#include "SpectralFilm.h"
 
 #define LOG_TAG "S24FilmVulkan"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -322,6 +324,20 @@ private:
     VkBuffer mLookBuffer = VK_NULL_HANDLE;
     VkDeviceMemory mLookMemory = VK_NULL_HANDLE;
     void* mLookMapped = nullptr;
+    // Spectral film tables for the active look (binding 18), rebuilt off-thread on look change and
+    // uploaded by the render paths after their fence wait.
+    s24film::spectral::Model mSpectral;
+    VkBuffer mSpectralBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory mSpectralMemory = VK_NULL_HANDLE;
+    void* mSpectralMapped = nullptr;
+    size_t mSpectralBytes = 0;
+    std::thread mSpectralThread;
+    std::mutex mSpectralMutex;
+    std::vector<float> mSpectralPending;
+    bool mSpectralPendingReady = false;
+    std::atomic<int> mSpectralWanted{-2};
+    void requestSpectralTables(int lookIndex);
+    void uploadPendingSpectral();
 
     GpuImage mLookLutImage;        // 256 x 120 RGBA32F (RGBA16F if 32F linear filtering is unsupported)
     GpuImage mGrainTileImage;      // 512 x 512 RGBA16F tileable Gabor noise

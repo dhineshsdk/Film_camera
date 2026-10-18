@@ -29,6 +29,7 @@ static constexpr float kReciprocityP = 0.85f;      // Schwarzschild exponent bey
 static constexpr float kLutLogEMin = -3.0f;
 static constexpr float kLutLogEMax = 3.0f;
 static constexpr const char* kLookLutAsset = "s24_master_120_looks.bin";
+static constexpr const char* kSpectralAsset = "spectral_film.bin";
 
 // Physical optics constants
 static constexpr float kHalationRingMm = 0.2236f;   // 2 * 125 um base * tan(asin(1/1.5)) (TIR critical angle)
@@ -145,6 +146,33 @@ void VulkanRawPipeline::setMasterLook(int lookIndex) {
     } else {
         mActiveLookIdx.store(lookIndex);
     }
+    requestSpectralTables(mActiveLookIdx.load());
+}
+
+void VulkanRawPipeline::requestSpectralTables(int lookIndex) {
+    if (mSpectral.stockCount() == 0) return;
+    if (mSpectralWanted.exchange(lookIndex) == lookIndex) return;
+    if (mSpectralThread.joinable()) mSpectralThread.join();
+    mSpectralThread = std::thread([this, lookIndex]() {
+        auto t0 = std::chrono::steady_clock::now();
+        std::vector<float> tables;
+        bool ok = mSpectral.build(lookIndex, tables);   // header look -1: no datasheet, curve model
+        std::lock_guard<std::mutex> lock(mSpectralMutex);
+        if (mSpectralWanted.load() != lookIndex) return;
+        mSpectralPending.swap(tables);
+        mSpectralPendingReady = true;
+        LOGI("Spectral tables for look %d: %s in %.1f ms", lookIndex, ok ? "built" : "none (curve model)",
+             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    });
+}
+
+// Caller holds mRenderMutex and has waited for the in-flight fence.
+void VulkanRawPipeline::uploadPendingSpectral() {
+    std::lock_guard<std::mutex> lock(mSpectralMutex);
+    if (!mSpectralPendingReady || !mSpectralMapped) return;
+    std::memcpy(mSpectralMapped, mSpectralPending.data(),
+                std::min(mSpectralBytes, mSpectralPending.size() * sizeof(float)));
+    mSpectralPendingReady = false;
 }
 
 void VulkanRawPipeline::setDarkroomSliders(float evStops, float grainMult, float halationMult) {
@@ -953,6 +981,7 @@ bool VulkanRawPipeline::createDescriptorLayoutAndPipelines() {
         {15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER},  // bokeh sampled
         {16, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},           // master RGBA8
         {17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},           // live RGBA16F
+        {18, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},          // spectral film tables
     };
     constexpr uint32_t kBindingCount = sizeof(descs) / sizeof(descs[0]);
 
@@ -1376,6 +1405,24 @@ bool VulkanRawPipeline::createSharedResources() {
     if (!createBuffer(lookBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
                       mLookBuffer, mLookMemory, &mLookMapped)) return false;
 
+    if (mAssetManager && mSpectral.stockCount() == 0) {
+        AAsset* asset = AAssetManager_open(mAssetManager, kSpectralAsset, AASSET_MODE_BUFFER);
+        if (asset) {
+            const uint8_t* data = static_cast<const uint8_t*>(AAsset_getBuffer(asset));
+            bool ok = mSpectral.load(data, static_cast<size_t>(AAsset_getLength(asset)));
+            LOGI("%s: %s, %d stocks", kSpectralAsset, ok ? "loaded" : "invalid", mSpectral.stockCount());
+            AAsset_close(asset);
+        } else {
+            LOGE("Asset %s not found; spectral film model disabled", kSpectralAsset);
+        }
+    }
+    mSpectralBytes = std::max<size_t>(mSpectral.bufferFloats(), 16) * sizeof(float);
+    if (!createBuffer(mSpectralBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
+                      mSpectralBuffer, mSpectralMemory, &mSpectralMapped)) return false;
+    static_cast<float*>(mSpectralMapped)[0] = -1.0f;   // no look until the first build lands
+    mSpectralWanted.store(-2);
+    requestSpectralTables(mActiveLookIdx.load());
+
     VkSamplerCreateInfo sampler = {};
     sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     sampler.magFilter = VK_FILTER_LINEAR;
@@ -1460,6 +1507,7 @@ void VulkanRawPipeline::writeTargetDescriptors(FrameTargets& t) {
     VkDescriptorBufferInfo cleanInfo = {mCleanBayerBuffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo lscInfo = {mLscBuffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo lookInfo = {mLookBuffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo spectralInfo = {mSpectralBuffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo uboInfo = {t.ubo, 0, sizeof(FrameParamsUbo)};
 
     VkDescriptorImageInfo lutInfo = {mLutSampler, mLookLutImage.sampledView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -1503,6 +1551,7 @@ void VulkanRawPipeline::writeTargetDescriptors(FrameTargets& t) {
     addImg(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &lutInfo);
     addImg(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &grainInfo);
     addBuf(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &lookInfo);
+    addBuf(18, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &spectralInfo);
     addBuf(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &uboInfo);
     addImg(7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &acesBase);
     addImg(8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &acesPyr);
@@ -1590,6 +1639,7 @@ void VulkanRawPipeline::destroyComputeResources() {
     destroyImage(mGrainTileImage);
 
     destroyBuffer(mLookBuffer, mLookMemory, &mLookMapped);
+    destroyBuffer(mSpectralBuffer, mSpectralMemory, &mSpectralMapped);
     destroyBuffer(mLscBuffer, mLscMemory, &mLscMapped);
     destroyBuffer(mCleanBayerBuffer, mCleanBayerMemory, nullptr);
     destroyBuffer(mRawStorageBuffer, mRawStorageBufferMemory, &mMappedRawBuffer);
@@ -1610,6 +1660,7 @@ bool VulkanRawPipeline::init(ANativeWindow* window, AAssetManager* assetManager)
 }
 
 void VulkanRawPipeline::destroy() {
+    if (mSpectralThread.joinable()) mSpectralThread.join();
     std::lock_guard<std::mutex> lock(mRenderMutex);
     if (mDevice != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(mDevice);
@@ -2056,6 +2107,7 @@ float VulkanRawPipeline::renderRawFrame(
 
     vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
     vkResetFences(mDevice, 1, &mInFlightFence);
+    uploadPendingSpectral();
 
     if (mLiveQueriesPending && (mFrameCounter % 120u) == 0u) {
         logTimestamps("Live", 0, 6);
@@ -2333,6 +2385,7 @@ bool VulkanRawPipeline::renderMasterStill(std::vector<uint8_t>& outRgba, int& ou
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
+    uploadPendingSpectral();
 
     const VkExtent2D ext = masterExtentFor(mLastFrame.width, mLastFrame.height, mLastFrame.sensorOrientation);
     if (mMasterTargets.extent.width != ext.width || mMasterTargets.extent.height != ext.height) {
