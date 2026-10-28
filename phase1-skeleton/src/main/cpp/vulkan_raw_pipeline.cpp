@@ -3034,7 +3034,9 @@ bool VulkanRawPipeline::stackBegin(int mode) {
     size_t px = static_cast<size_t>(s.width) * static_cast<size_t>(s.height);
     // Burst: tile-aligned merge on the GPU when it is there; the CPU accumulators are then unused.
     // Mode 4 (GPU HDR) is the same merge with short highlight frames on top.
+    // The GPU pass addresses ring slots by width x height, so it needs the frame's own even size.
     s.gpu = (mode == 0 || mode == 4) && mGpuMerge.ready()
+        && s.width == mLastFrame.width && s.height == mLastFrame.height
         && mGpuMerge.begin(mRawStorageBuffer, s.width, s.height, s.stride, s.black, s.white,
                            mNoiseS.load(), mNoiseO.load(), mode == 4);
     if (mode == 4 && !s.gpu) return false;
