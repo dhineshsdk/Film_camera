@@ -56,3 +56,7 @@ phase0_lab_results.json
 .claude/
 __pycache__/
 reff/
+
+# Stage A0 test kit output
+bursts/
+ab_out/

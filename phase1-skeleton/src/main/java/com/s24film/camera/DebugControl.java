@@ -15,6 +15,7 @@ import android.util.Log;
  *   ... --es cmd dng --ez on true|false       (keep the RAW DNG)
  *   ... --es cmd depth --ez on true|false     (depth bokeh kill switch; logs S24FilmDepth)
  *   ... --es cmd portrait --ez on true|false  (portrait mode: depth bokeh only when on)
+ *   ... --es cmd rawburst --ei n 8 --es tag day_1x   (save next n RAW frames as DNGs in DCIM/S24Film/a0/<tag>)
  * Only acts while the app is running; the shell (adb) is the only sender that can reach it
  * besides the app itself because the action is unique to this package.
  */
@@ -139,6 +140,9 @@ final class DebugControl extends BroadcastReceiver {
             case "depth":   // depth bokeh (f/5.6 and wider masters): --ez on true|false
                 DepthBokeh.enabled = intent.getBooleanExtra("on", true);
                 Log.i(TAG, "depth bokeh " + DepthBokeh.enabled);
+                break;
+            case "rawburst":   // Stage A0: --ei n 8 --es tag <name>
+                engine.rawDump.start(intent.getIntExtra("n", 8), intent.getStringExtra("tag"));
                 break;
             case "status":
                 Log.i(TAG, "look " + VulkanRenderer.nativeGetActiveLookIndex() + " EI " + engine.getEffectiveEi() + " push " + engine.getPushStops()
