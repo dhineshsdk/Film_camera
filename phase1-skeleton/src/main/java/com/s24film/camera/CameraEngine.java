@@ -95,6 +95,8 @@ public class CameraEngine {
     private volatile String pendingStockShortName = "Portra400";
     private volatile DngSaver.Callback pendingDngCallback = null;
     private volatile TotalCaptureResult latestCaptureResult = null;
+    // Stage A0: debug RAW burst dump (adb cmd rawburst). Copies frames, never holds the Image.
+    final RawBurstDump rawDump = new RawBurstDump();
 
     // ---------------------------------------------------------------- DCG-aware Auto-ISO
     // Lab models (S24HardwareCalibrationMaster.h kS24SensorNoiseModels):
@@ -1691,6 +1693,8 @@ public class CameraEngine {
                     hb.close();
                 }
             }
+
+            engine.rawDump.offer(image, engine.characteristics, engine.latestCaptureResult, engine.activeCameraId);
 
             if (!capture && engine.stackActive) {
                 stacked = true;
