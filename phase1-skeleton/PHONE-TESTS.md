@@ -145,3 +145,13 @@ Same branch. Metering now uses the camera's own face detector: the largest face 
 4. **No face.** Landscape and street scenes look the same as before (within a third of a stop).
 5. **Window interior (golden scene).** A room with a bright window and no people. Pass: the room is lighter than before A6 if it is mostly dark and the window does not clip more than before.
 6. **Stability.** The exposure does not pump when a face enters or leaves the frame (changes settle within about a second).
+
+## Stage A5: noise and shading calibration (shots only; the app change comes after the numbers)
+
+Same branch. New debug command `--es cmd iso --ei iso 800` (0 = auto) fixes the sensor ISO. Two scripts:
+`tools/a5_shoot.ps1` shoots and pulls the calibration bursts, `tools/a5_calibrate.py calib` fits them
+(`--selftest` passes here on synthetic DNGs).
+
+1. **Grey card, per lens.** Grey card (or matte grey cardboard) filling the frame, slightly out of focus, even daylight, phone resting. For each lens: `.\tools\a5_shoot.ps1 -Kind grey -Lens 0` (then 2, 6, 1). About 30 s per lens.
+2. **White wall, per lens.** A plain white wall or paper, even light, filling the frame: `.\tools\a5_shoot.ps1 -Kind white -Lens 0` (then 2, 6, 1).
+3. **Fit.** `python tools\a5_calibrate.py calib`. Pass: it prints S and O per ISO and lens and the corner colour error per lens; send me `calib\a5_calibration.json` (or leave the `calib` folder in the Camera-App folder). The front camera should show the largest corner colour error (the magenta corners).

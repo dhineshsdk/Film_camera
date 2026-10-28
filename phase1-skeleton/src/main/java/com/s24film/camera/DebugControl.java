@@ -108,6 +108,9 @@ final class DebugControl extends BroadcastReceiver {
             case "lensfx":
                 VulkanRenderer.nativeSetLensFxEnabled(intent.getBooleanExtra("on", false));
                 break;
+            case "iso":   // manual sensor ISO, 0 = auto (Stage A5 calibration shots)
+                engine.setManualIso(intent.getIntExtra("iso", 0));
+                break;
             case "shutter":
                 engine.setManualShutterNs(intent.getLongExtra("ns", 0L));
                 break;
