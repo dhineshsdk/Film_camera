@@ -89,3 +89,16 @@ Use a tripod or rest the phone on something for 2 to 6.
 6. **Trails 8s.** Night, car lights or a torch swung around. Pass: bright paths accumulate; the dark background stays dark.
 7. **Stability.** Run each mode 5 times in a row, then switch lens (0.6 / 1 / 3 / front) in the middle of a Long 8s. Pass: no HAL restart or phone reboot, shutter button re-enables (`Stack cancelled` if the lens switch cut a shot).
 8. **Film looks.** Repeat 2, 3 and 5 on Portra 400 and on a B&W stock. Pass: same look as Single, exposure and grain consistent.
+
+## Stage A1: zero-lag RAW ring
+
+Build: branch `claude/project-thread-4h4og3` (PR "Stage A1: zero-lag RAW ring"). Logcat tags: native `RAW ring: N slots`, `Zero-lag: ...`, Java `Burst: n of m frames from before the press (ring N)`. The GPU RAW ring grows from 4 to 10 slots (6 or 4 if the memory is not there); the camera's own RAW buffer stays at 4 and every frame is still released at once. Burst and night merges now start from the frames already on screen at the press instead of the frames after it.
+
+1. **Ring size.** Open the app. Pass: `RAW ring: 10 slots (260 MB)` in logcat (6 or 4 is a soft fail: note it, the merge still works with fewer pre-press frames).
+2. **Daylight single shot is unchanged.** Chip on Single, daylight, 10 shots in a row. Pass: shutter feels as before, no `Zero-lag` lines, no extra wait.
+3. **Burst 8 is zero lag.** Chip on Burst 8, dim room. Aim at something with text, press, and straight away swing the phone to the floor. Pass: the photo shows the scene you were aiming at when you pressed, sharp; log shows `Burst: 8 of 8 frames from before the press`.
+4. **Night auto (12 frames).** Dark room with night auto on so it pushes 3 stops. Pass: `Burst: 8 of 12` (the other 4 come after the press), `Merged 12 frames`, no ghosts on a still scene.
+5. **Exposure change right before the press.** Point at a lamp, then quickly at a dark corner and press at once. Pass: fewer than 8 ring frames are used (frames from the other exposure are skipped), no dark or bright blotches.
+6. **Lens switch.** Switch .6 / 1 / 3 / front and shoot a Burst 8 right after each switch. Pass: no frames from the previous lens (no double image), log ring count may be low on the first shot.
+7. **Soak.** 10 minutes of live view with a lens switch every minute and a Burst 8 shot every minute. Pass: no HAL restart or phone reboot, preview stays live, no `ring slot ... skipped` lines.
+8. **A0 bursts.** `rawburst` still saves N consecutive frames as before.

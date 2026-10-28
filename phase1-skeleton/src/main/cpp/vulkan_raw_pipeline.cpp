@@ -1390,10 +1390,30 @@ bool VulkanRawPipeline::createGrainTile() {
 bool VulkanRawPipeline::createSharedResources() {
     const VkMemoryPropertyFlags hostFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-    // 4-slot RAW ring (4 x 4080 x 3060 x 2 bytes fits in 104 MB).
-    mRawStorageBufferSize = 104ull * 1024ull * 1024ull;
-    if (!createBuffer(mRawStorageBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
-                      mRawStorageBuffer, mRawStorageBufferMemory, &mMappedRawBuffer)) return false;
+    // RAW ring, 26 MB per slot (one 4080 x 3060 x 2 byte frame). Zero-lag merges want 10 slots
+    // (260 MB); fall back to fewer if the driver will not give that much host-visible memory.
+    mRingSlotBytes = 26ull * 1024ull * 1024ull;
+    // The shader binds the whole ring as one storage buffer, so it must also fit the range limit.
+    VkPhysicalDeviceProperties devProps = {};
+    vkGetPhysicalDeviceProperties(mPhysicalDevice, &devProps);
+    const VkDeviceSize maxRange = devProps.limits.maxStorageBufferRange;
+    mRawStorageBuffer = VK_NULL_HANDLE;
+    for (uint32_t slots : {kMaxRingSlots, 6u, 4u}) {
+        mRawStorageBufferSize = mRingSlotBytes * slots;
+        if (mRawStorageBufferSize > maxRange && slots > 4u) {
+            LOGW("RAW ring of %u slots exceeds maxStorageBufferRange %llu", slots, (unsigned long long) maxRange);
+            continue;
+        }
+        if (createBuffer(mRawStorageBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
+                         mRawStorageBuffer, mRawStorageBufferMemory, &mMappedRawBuffer)) {
+            mRingSlots = slots;
+            break;
+        }
+        destroyBuffer(mRawStorageBuffer, mRawStorageBufferMemory, &mMappedRawBuffer);
+        LOGW("RAW ring of %u slots not available, trying fewer", slots);
+    }
+    if (mRawStorageBuffer == VK_NULL_HANDLE) return false;
+    LOGI("RAW ring: %u slots (%.0f MB)", mRingSlots, mRawStorageBufferSize / 1048576.0);
 
     // Clean Bayer plane (float) written by PREP, read by ISP.
     mCleanBayerSize = 4096ull * 4096ull * sizeof(float);
@@ -1973,7 +1993,8 @@ void VulkanRawPipeline::fillPushConstants(PushConstants& pc, const LastFrameStat
     uint32_t gateBits = static_cast<uint32_t>(mCinemaGate.load() & 3);
     const int format = mFilmFormat.load();
     uint32_t weaveBit = (mGateWeave.load() || format == 1 || format == 2) ? 1u : 0u;   // small-gauge gate weave
-    pc.packedRingInfo = (slot & 3u)
+    pc.packedRingInfo = (slot & 0xFu)
+                      | ((st.ringSlots & 0xFu) << 4u)
                       | ((burstCnt & 0xFFu) << 8u)
                       | (mirrorBit << 16u)
                       | (anamorphicBits << 17u)
@@ -2087,6 +2108,7 @@ float VulkanRawPipeline::renderRawFrame(
         mLastHeight = height;
         mValidRingFrames = 0;
         mRingSlot = 0;
+        mRingEpoch++;
     }
 
     if (static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * sizeof(float) > mCleanBayerSize) {
@@ -2096,18 +2118,38 @@ float VulkanRawPipeline::renderRawFrame(
 
     mFrameCounter++;
     bool stepPrintHold = !mStackActive.load() && mStepPrint8fps.load() && (mValidRingFrames > 0) && ((mFrameCounter % 3u) != 0u);
-    uint32_t currentSlot = mRingSlot & 3u;
+    uint32_t currentSlot = mLastFrame.slot;
 
     if (!stepPrintHold) {
         void* rawAddress = nullptr;
         int lockResult = AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &rawAddress);
         if (lockResult == 0 && rawAddress != nullptr && mMappedRawBuffer != nullptr) {
             size_t frameBytes = static_cast<size_t>(height) * static_cast<size_t>(stride) * 2;
-            if (frameBytes * 4 <= mRawStorageBufferSize) {
+            // Next free slot; slots held by a zero-lag merge are stepped over. A skip breaks the
+            // run of consecutive frames the live temporal merge reads.
+            uint32_t slot = mRingSlot % mRingSlots;
+            for (uint32_t tries = 0; tries < mRingSlots && (mRingLockMask & (1u << slot)); ++tries) {
+                slot = (slot + 1u) % mRingSlots;
+                mValidRingFrames = 0;
+            }
+            if (frameBytes <= mRingSlotBytes && !(mRingLockMask & (1u << slot))) {
+                // Slots are packed at the frame size (the shader's pitch is stride x height).
                 uint8_t* basePtr = static_cast<uint8_t*>(mMappedRawBuffer);
-                std::memcpy(basePtr + currentSlot * frameBytes, rawAddress, frameBytes);
-                mRingSlot++;
-                if (mValidRingFrames < 4u) mValidRingFrames++;
+                std::memcpy(basePtr + static_cast<size_t>(slot) * frameBytes, rawAddress, frameBytes);
+                currentSlot = slot;
+                mRingSlot = slot + 1u;
+                if (mValidRingFrames < kLiveMergeFrames) mValidRingFrames++;
+                RingMeta& m = mRingMeta[slot];
+                m.seq = ++mRingSeq;
+                m.epoch = mRingEpoch;
+                m.timestampNs = mPendingTimestampNs.load();
+                m.iso = mPendingIso.load();
+                m.exposureNs = mPendingExposureNs.load();
+                m.camMatrixIdx = camMatrixIdx;
+                m.width = width;
+                m.height = height;
+                m.stride = stride;
+                mRingNewestSeq.store(m.seq);
 
                 // Central 50% RAW mean (every 16th pixel) for the Java DCG auto-ISO loop.
                 const uint16_t* px = static_cast<const uint16_t*>(rawAddress);
@@ -2153,9 +2195,6 @@ float VulkanRawPipeline::renderRawFrame(
         } else {
             return 0.0f;
         }
-        currentSlot = (mRingSlot - 1u) & 3u;
-    } else {
-        currentSlot = (mRingSlot - 1u) & 3u;
     }
 
     mLastFrame.valid = true;
@@ -2171,6 +2210,7 @@ float VulkanRawPipeline::renderRawFrame(
     mLastFrame.camMatrixIdx = camMatrixIdx;
     mLastFrame.slot = currentSlot;
     mLastFrame.burstCount = (mBurstModeEnabled.load() && !mForceSingleFrame.load()) ? std::max(mValidRingFrames, 1u) : 1u;
+    mLastFrame.ringSlots = mRingSlots;
 
     vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
     vkResetFences(mDevice, 1, &mInFlightFence);
@@ -2976,15 +3016,21 @@ bool VulkanRawPipeline::stackBegin(int mode) {
 
 bool VulkanRawPipeline::stackAdd(float relExposure) {
     std::lock_guard<std::mutex> lock(mRenderMutex);
-    StackState& s = mStack;
-    if (!mStackActive.load() || s.mode < 0 || !mMappedRawBuffer || !mLastFrame.valid) return false;
-    if (mLastFrame.width < s.width || mLastFrame.height < s.height || mLastFrame.stride != s.stride) return false;
-    const size_t frameBytes = static_cast<size_t>(mLastFrame.height) * static_cast<size_t>(s.stride) * 2;
-    if (frameBytes * 4 > mRawStorageBufferSize) return false;
-    const uint16_t* src = reinterpret_cast<const uint16_t*>(
-        static_cast<const uint8_t*>(mMappedRawBuffer) + static_cast<size_t>(mLastFrame.slot) * frameBytes);
+    if (!mLastFrame.valid) return false;
+    return stackAddSlot(mLastFrame.slot, mLastFrame.width, mLastFrame.height, mLastFrame.stride, relExposure);
+}
 
-    const int W = s.width, H = s.height, stride = s.stride;
+// Caller holds mRenderMutex.
+bool VulkanRawPipeline::stackAddSlot(uint32_t slot, int width, int height, int stride, float relExposure) {
+    StackState& s = mStack;
+    if (!mStackActive.load() || s.mode < 0 || !mMappedRawBuffer || slot >= mRingSlots) return false;
+    if (width < s.width || height < s.height || stride != s.stride) return false;
+    const size_t frameBytes = static_cast<size_t>(height) * static_cast<size_t>(s.stride) * 2;
+    if (frameBytes * mRingSlots > mRawStorageBufferSize) return false;
+    const uint16_t* src = reinterpret_cast<const uint16_t*>(
+        static_cast<const uint8_t*>(mMappedRawBuffer) + static_cast<size_t>(slot) * frameBytes);
+
+    const int W = s.width, H = s.height;
     const float black = s.black;
     const float range = std::max(s.white - s.black, 1.0f);
     const float e = std::max(relExposure, 1e-3f);
@@ -3146,6 +3192,78 @@ void VulkanRawPipeline::stackEnd() {
     mStackActive.store(false);
     mForceSingleFrame.store(false);
     mStack = StackState();
+    mRingLockMask = 0;
+}
+
+void VulkanRawPipeline::setFrameMeta(int64_t timestampNs, int iso, int64_t exposureNs) {
+    mPendingTimestampNs.store(timestampNs);
+    mPendingIso.store(iso);
+    mPendingExposureNs.store(exposureNs);
+}
+
+void VulkanRawPipeline::ringReset() {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    mRingEpoch++;
+    mValidRingFrames = 0;
+}
+
+int VulkanRawPipeline::stackPrimeFromRing(uint64_t markSeq, int maxFrames) {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    StackState& s = mStack;
+    if (!mStackActive.load() || s.mode != 0 || s.frames != 0 || !mLastFrame.valid || markSeq == 0) return 0;
+    // Keep two slots free so live frames still have somewhere to land while the merge runs.
+    const int cap = std::min(maxFrames, static_cast<int>(mRingSlots) - 2);
+    if (cap < 2) return 0;
+
+    // Newest frame at or before the mark is the reference: the one on screen at the press.
+    uint32_t order[kMaxRingSlots];
+    int n = 0;
+    for (uint32_t i = 0; i < mRingSlots; ++i) {
+        const RingMeta& m = mRingMeta[i];
+        if (m.seq == 0 || m.seq > markSeq || m.epoch != mRingEpoch) continue;
+        if (m.camMatrixIdx != mLastFrame.camMatrixIdx || m.stride != s.stride
+            || m.width < s.width || m.height < s.height) continue;
+        order[n++] = i;
+    }
+    std::sort(order, order + n, [&](uint32_t a, uint32_t b) { return mRingMeta[a].seq > mRingMeta[b].seq; });
+    if (n == 0) return 0;
+
+    const RingMeta& ref = mRingMeta[order[0]];
+    const double refProd = static_cast<double>(ref.iso) * static_cast<double>(ref.exposureNs);
+    s.ringQueue.clear();
+    s.ringQueue.push_back(order[0]);
+    for (int k = 1; k < n && static_cast<int>(s.ringQueue.size()) < cap; ++k) {
+        const RingMeta& m = mRingMeta[order[k]];
+        if (ref.timestampNs > 0 && m.timestampNs > 0 && ref.timestampNs - m.timestampNs > 1'000'000'000LL) break;
+        const double prod = static_cast<double>(m.iso) * static_cast<double>(m.exposureNs);
+        // Burst merge has no exposure scaling: a frame more than 0.2 stop off would read as a ghost.
+        if (refProd > 0.0 && prod > 0.0 && std::fabs(std::log2(prod / refProd)) > 0.2) continue;
+        s.ringQueue.push_back(order[k]);
+    }
+    s.refProd = refProd;
+    for (uint32_t slot : s.ringQueue) mRingLockMask |= (1u << slot);
+    LOGI("Zero-lag: %zu ring frames from seq %llu (newest %llu), ISO %d, %lld us",
+         s.ringQueue.size(), (unsigned long long) ref.seq, (unsigned long long) mRingSeq,
+         ref.iso, (long long) (ref.exposureNs / 1000));
+    return static_cast<int>(s.ringQueue.size());
+}
+
+int VulkanRawPipeline::stackAddFromRing() {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    StackState& s = mStack;
+    if (!mStackActive.load() || s.ringQueue.empty()) return -1;
+    const uint32_t slot = s.ringQueue.front();
+    s.ringQueue.erase(s.ringQueue.begin());
+    const RingMeta& m = mRingMeta[slot];
+    bool ok = (m.epoch == mRingEpoch)
+        && stackAddSlot(slot, m.width, m.height, m.stride, 1.0f);
+    mRingLockMask &= ~(1u << slot);   // folded (or unusable): live frames may have it back
+    if (!ok) {
+        // The reference failing leaves nothing to merge against; a later frame failing just drops it.
+        if (s.frames == 0) return -1;
+        LOGW("Zero-lag: ring slot %u skipped", slot);
+    }
+    return static_cast<int>(s.ringQueue.size());
 }
 
 // =============================================================================
@@ -3464,6 +3582,38 @@ Java_com_s24film_camera_VulkanRenderer_nativeStackFinish(JNIEnv* /*env*/, jobjec
 JNIEXPORT void JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeStackEnd(JNIEnv* /*env*/, jobject /*thiz*/) {
     if (gPipeline) gPipeline->stackEnd();
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetFrameMeta(JNIEnv* /*env*/, jobject /*thiz*/,
+    jlong timestampNs, jint iso, jlong exposureNs) {
+    if (gPipeline) gPipeline->setFrameMeta(timestampNs, iso, exposureNs);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeRingMark(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return gPipeline ? static_cast<jlong>(gPipeline->ringMark()) : 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeRingReset(JNIEnv* /*env*/, jobject /*thiz*/) {
+    if (gPipeline) gPipeline->ringReset();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeRingSlots(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return gPipeline ? static_cast<jint>(gPipeline->ringSlots()) : 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeStackPrimeFromRing(JNIEnv* /*env*/, jobject /*thiz*/,
+    jlong markSeq, jint maxFrames) {
+    return gPipeline ? gPipeline->stackPrimeFromRing(static_cast<uint64_t>(markSeq), maxFrames) : 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeStackAddFromRing(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return gPipeline ? gPipeline->stackAddFromRing() : -1;
 }
 
 } // extern "C"

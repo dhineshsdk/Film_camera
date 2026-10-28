@@ -77,4 +77,16 @@ public class VulkanRenderer {
     public static native boolean nativeStackAdd(float relExposure);
     public static native boolean nativeStackFinish();
     public static native void nativeStackEnd();
+    // Zero-lag ring (Stage A1). SetFrameMeta tags the next frame nativeRenderRaw copies into the ring
+    // (sensor time, ISO, shutter). RingMark is the newest frame's sequence number, read at the shutter
+    // press. After StackBegin(0), StackPrimeFromRing queues and locks the frames at or before the mark
+    // (same lens, exposure within 0.2 stop, at most 1 s older; newest first) and returns how many;
+    // each StackAddFromRing folds one and returns how many are left, or -1 on failure. RingReset
+    // keeps frames from the previous lens out of the next merge.
+    public static native void nativeSetFrameMeta(long timestampNs, int iso, long exposureNs);
+    public static native long nativeRingMark();
+    public static native void nativeRingReset();
+    public static native int nativeRingSlots();
+    public static native int nativeStackPrimeFromRing(long markSeq, int maxFrames);
+    public static native int nativeStackAddFromRing();
 }

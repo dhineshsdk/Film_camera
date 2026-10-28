@@ -159,7 +159,7 @@ layout(push_constant) uniform PushConstants {
     float u_halation_strength; // 96
     float u_exposure_scale;    // 100
     uint u_cam_matrix_idx;     // 104 (0=Wide, 1=Front, 2=UW, 3=Tele)
-    uint u_packed_ring_info;   // 108 (bits 0..1 slot, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave)
+    uint u_packed_ring_info;   // 108 (bits 0..3 slot, 4..7 ring slots, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave)
     uint u_level;              // 112 PYRAMID destination level (1..5)
     uint u_flags;              // 116 FLAG_*
     uint u_reserved0;          // 120 BOKEH (depth): first row of the band
@@ -208,7 +208,7 @@ ivec2 clampBayer(int x, int y) {
 float rawDN(int x, int y, uint slot) {
     ivec2 c = clampBayer(x, y);
     uint framePitch16 = u_stride * u_height;
-    uint idx16 = (slot & 3u) * framePitch16 + uint(c.y) * u_stride + uint(c.x);
+    uint idx16 = (slot & 0xFu) * framePitch16 + uint(c.y) * u_stride + uint(c.x);
     uint word = u_raw_data[idx16 >> 1u];
     uint val16 = ((idx16 & 1u) != 0u) ? (word >> 16u) : (word & 0xFFFFu);
     return float(val16);
@@ -257,8 +257,9 @@ void stagePrep() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(u_width) || p.y >= int(u_height)) return;
 
-    uint activeSlot = u_packed_ring_info & 3u;
-    uint burstCount = max((u_packed_ring_info >> 8u) & 0xFFu, 1u);
+    uint activeSlot = u_packed_ring_info & 0xFu;
+    uint ringSlots = max((u_packed_ring_info >> 4u) & 0xFu, 1u);
+    uint burstCount = min(max((u_packed_ring_info >> 8u) & 0xFFu, 1u), ringSlots);
     float xRef = rawNorm(p.x, p.y, activeSlot);
     float outVal = xRef;
 
@@ -273,7 +274,7 @@ void stagePrep() {
         float wSum = 1.0;
         float w2Sum = 1.0;
         for (uint s = 1u; s < burstCount; ++s) {
-            float z = gatForward(rawNorm(p.x, p.y, (activeSlot + s) & 3u), alpha, s2);
+            float z = gatForward(rawNorm(p.x, p.y, (activeSlot + ringSlots - s) % ringSlots), alpha, s2);
             float d = z - zRef;
             float w = exp(-(d * d) / (4.0 * tol * tol));   // diff of two unit-variance samples: var 2
             zSum += w * z;

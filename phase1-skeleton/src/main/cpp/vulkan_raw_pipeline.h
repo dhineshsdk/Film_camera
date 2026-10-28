@@ -164,6 +164,7 @@ struct LastFrameState {
     int camMatrixIdx = 0;
     uint32_t slot = 0;
     uint32_t burstCount = 1;
+    uint32_t ringSlots = 4;
 };
 
 class VulkanRawPipeline {
@@ -231,6 +232,22 @@ public:
     bool stackFinish();
     void stackEnd();
 
+    // Zero-lag ring (Stage A1). The RAW ring keeps the last kMaxRingSlots frames, each tagged
+    // with its lens, exposure and sensor time. setFrameMeta tags the next frame renderRawFrame
+    // copies in. ringMark returns the sequence number of the newest frame (read at shutter
+    // press). stackPrimeFromRing, after stackBegin, queues the frames at or before that mark
+    // (same lens and size, exposure within 0.2 stop of the newest, at most 1 s older) and locks
+    // their slots so live frames go around them; stackAddFromRing folds one queued frame per call
+    // and frees its slot, returning how many are left (-1 on failure). stackEnd frees the rest.
+    static constexpr uint32_t kMaxRingSlots = 10;
+    static constexpr uint32_t kLiveMergeFrames = 4;   // frames the live PREP temporal merge reads
+    void setFrameMeta(int64_t timestampNs, int iso, int64_t exposureNs);
+    uint64_t ringMark() const { return mRingNewestSeq.load(); }
+    void ringReset();
+    int stackPrimeFromRing(uint64_t markSeq, int maxFrames);
+    int stackAddFromRing();
+    uint32_t ringSlots() const { return mRingSlots; }
+
 private:
     struct StackState {
         int mode = -1;
@@ -243,7 +260,19 @@ private:
         std::vector<uint16_t> peak;
         std::vector<float> refSmall;   // reference frame boxed down 8x (burst alignment)
         int smallW = 0, smallH = 0;
+        std::vector<uint32_t> ringQueue;   // ring slots still to fold, newest first
+        double refProd = 0.0;              // ISO x shutter of the first ring frame
     };
+    struct RingMeta {
+        uint64_t seq = 0;              // 0 = empty
+        uint32_t epoch = 0;
+        int64_t timestampNs = 0;
+        int iso = 0;
+        int64_t exposureNs = 0;
+        int camMatrixIdx = -1;
+        int width = 0, height = 0, stride = 0;
+    };
+    bool stackAddSlot(uint32_t slot, int width, int height, int stride, float relExposure);
     StackState mStack;
     std::atomic<bool> mStackActive{false};
     std::atomic<bool> mForceSingleFrame{false};
@@ -463,9 +492,19 @@ private:
 
     LastFrameState mLastFrame;
     uint32_t mFrameCounter = 0;
-    uint32_t mRingSlot = 0;
+    uint32_t mRingSlot = 0;            // next slot to write (skips locked slots)
+    uint32_t mRingSlots = 4;           // slots allocated in mRawStorageBuffer
+    size_t mRingSlotBytes = 0;         // bytes per slot
+    uint32_t mRingLockMask = 0;        // slots held by a zero-lag merge
+    uint32_t mRingEpoch = 1;           // bumped on lens change; older frames never merge
+    uint64_t mRingSeq = 0;
+    std::atomic<uint64_t> mRingNewestSeq{0};
+    RingMeta mRingMeta[kMaxRingSlots];
+    std::atomic<int64_t> mPendingTimestampNs{0};
+    std::atomic<int> mPendingIso{0};
+    std::atomic<int64_t> mPendingExposureNs{0};
     int mLastWidth = 0;
     int mLastHeight = 0;
-    uint32_t mValidRingFrames = 0;
+    uint32_t mValidRingFrames = 0;     // contiguous newest frames, for the live temporal merge
     bool mLiveQueriesPending = false;
 };

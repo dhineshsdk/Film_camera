@@ -144,6 +144,14 @@ public class CameraEngine {
     private long currentExposureNs = 10_000_000L;
     private volatile int resultIso = 100;
     private volatile long resultExposureNs = 10_000_000L;
+    // Exposure of recent frames by sensor timestamp, so each RAW frame in the zero-lag ring is
+    // tagged with its own ISO and shutter (results can land after their image).
+    private static final int META_SLOTS = 16;
+    private final long[] metaTs = new long[META_SLOTS];
+    private final int[] metaIso = new int[META_SLOTS];
+    private final long[] metaExp = new long[META_SLOTS];
+    private int metaNext = 0;
+    private final Object metaLock = new Object();   // not the engine lock: the camera thread takes it every frame
     private volatile boolean aeConverged = false;
     private int[] isoLadder = new int[0];
     private int[] subSweetLadder = new int[0];
@@ -369,6 +377,7 @@ public class CameraEngine {
 
             String openDeviceId = requestedId;
             physicalSubId = null;
+            VulkanRenderer.nativeRingReset();
 
             if ("6".equals(requestedId) || "21".equals(requestedId)) {
                 openDeviceId = "0";
@@ -1109,6 +1118,27 @@ public class CameraEngine {
         }
     }
 
+    private void recordFrameMeta(long ts, int iso, long exp) {
+        synchronized (metaLock) {
+            metaTs[metaNext] = ts;
+            metaIso[metaNext] = iso;
+            metaExp[metaNext] = exp;
+            metaNext = (metaNext + 1) % META_SLOTS;
+        }
+    }
+
+    /** Tags the next ring frame with its exposure; falls back to the latest result. */
+    private void tagRingFrame(long ts) {
+        int iso = resultIso;
+        long exp = resultExposureNs;
+        synchronized (metaLock) {
+            for (int i = 0; i < META_SLOTS; i++) {
+                if (metaTs[i] == ts) { iso = metaIso[i]; exp = metaExp[i]; break; }
+            }
+        }
+        VulkanRenderer.nativeSetFrameMeta(ts, iso, exp);
+    }
+
     public synchronized void triggerCapture(String stockShortName, DngSaver.Callback callback) {
         boolean front = (camMatrixIdx == 1);
         boolean wantFlash = !videoMode && !stackActive && manualAeActive && (hasFlash() || (front && screenFlash != null))
@@ -1144,6 +1174,8 @@ public class CameraEngine {
         }
         if (stackMode != STACK_OFF && !stackActive && (stackMode != STACK_HDR || manualAeActive)) {
             // Multi-frame shot: the frame listener collects the frames, then takes the normal capture path.
+            // A burst starts from the frames already in the ring, up to the one on screen now.
+            this.ringMarkSeq = (stackMode == STACK_BURST) ? VulkanRenderer.nativeRingMark() : 0L;
             this.stackBegun = false;
             this.stackActive = true;
             return;
@@ -1191,6 +1223,8 @@ public class CameraEngine {
     private double stackBaseProd = 1.0;
     private int stackTargetIso = 100;
     private long stackTargetExpNs = 10_000_000L;
+    private long ringMarkSeq = 0L;   // newest ring frame at the shutter press (0 = none)
+    private int ringLeft = 0;        // ring frames still to fold into the burst
 
     public void setStackMode(int mode) { stackMode = Math.max(STACK_OFF, Math.min(STACK_TRAILS, mode)); }
     public int getStackMode() { return stackMode; }
@@ -1291,13 +1325,23 @@ public class CameraEngine {
             stackBaseExpNs = currentExposureNs;
             stackBaseProd = (double) resultIso * (double) resultExposureNs;
             if (stackBaseProd <= 0.0) stackBaseProd = (double) currentIso * currentExposureNs;
+            ringLeft = (stackMode == STACK_BURST && ringMarkSeq > 0L)
+                ? VulkanRenderer.nativeStackPrimeFromRing(ringMarkSeq, burstTarget) : 0;
+            if (stackMode == STACK_BURST) Log.i(TAG, "Burst: " + ringLeft + " of " + burstTarget + " frames from before the press (ring " + VulkanRenderer.nativeRingSlots() + ")");
         }
         stackWait++;
         if (stackWait > MAX_STACK_FRAMES + STACK_TIMEOUT_FRAMES) return stackAbort("timeout");
 
         switch (stackMode) {
             case STACK_BURST:
-                if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
+                if (ringLeft > 0) {
+                    // Zero lag: one pre-press frame per camera frame, the same pace as a live add.
+                    int left = VulkanRenderer.nativeStackAddFromRing();
+                    if (left < 0) return stackAbort("ring add failed");
+                    ringLeft = left;
+                } else if (!VulkanRenderer.nativeStackAdd(1.0f)) {
+                    return stackAbort("add failed");
+                }
                 stackFrames++;
                 postStack("Burst " + stackFrames + "/" + burstTarget);
                 if (stackFrames >= burstTarget) return stackFinish();
@@ -1546,6 +1590,8 @@ public class CameraEngine {
             Long exp = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
             if (iso != null) engine.resultIso = iso;
             if (exp != null) engine.resultExposureNs = exp;
+            Long ts = result.get(CaptureResult.SENSOR_TIMESTAMP);
+            if (ts != null && iso != null && exp != null) engine.recordFrameMeta(ts, iso, exp);
             Float focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE);
 
             float noiseS = 0.0f;
@@ -1680,6 +1726,7 @@ public class CameraEngine {
             if (engine.camMatrixIdx == 1) renderOrient = (renderOrient + 180) % 360;
 
             float vulkanMs = 0.0f;
+            engine.tagRingFrame(image.getTimestamp());
             HardwareBuffer hb = image.getHardwareBuffer();
             if (hb != null) {
                 try {
