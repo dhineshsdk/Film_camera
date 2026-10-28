@@ -46,7 +46,14 @@ final class DepthBokeh {
     static void setPortrait(boolean on) {
         portrait = on;
         try { VulkanRenderer.nativeSetPortraitMode(on); } catch (Throwable ignored) { }
+        DepthBokeh d = instance;
+        if (on && d != null) d.warmUp();
     }
+
+    // The depth and matting models (tens of MB once loaded) load only when portrait mode is on, so a
+    // normal start does not spend CPU and memory on them while the camera and Vulkan come up.
+    private static volatile DepthBokeh instance;
+    private final AtomicBoolean warmQueued = new AtomicBoolean(false);
 
     private final Context context;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(new WorkerFactory());
@@ -99,7 +106,17 @@ final class DepthBokeh {
 
     DepthBokeh(Context context) {
         this.context = context.getApplicationContext();
-        worker.execute(new WarmUpTask(this));
+        instance = this;
+        if (portrait) warmUp();
+    }
+
+    private void warmUp() {
+        if (!warmQueued.compareAndSet(false, true)) return;
+        try {
+            worker.execute(new WarmUpTask(this));
+        } catch (Throwable t) {
+            warmQueued.set(false);
+        }
     }
 
     static class WarmUpTask implements Runnable {

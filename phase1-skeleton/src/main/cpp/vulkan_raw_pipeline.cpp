@@ -5,6 +5,7 @@
 #include "shaders/demosaic_spv.h"
 #include "shaders/encode_hlg_spv.h"
 
+#include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <cmath>
@@ -698,7 +699,7 @@ bool VulkanRawPipeline::createEncodePipelineLocked() {
     info.stage.module = module;
     info.stage.pName = "main";
     info.layout = mEncodePipelineLayout;
-    VkResult res = vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &info, nullptr, &mEncodePipeline);
+    VkResult res = vkCreateComputePipelines(mDevice, mPipelineCache, 1, &info, nullptr, &mEncodePipeline);
     vkDestroyShaderModule(mDevice, module, nullptr);
     if (res != VK_SUCCESS) {
         LOGE("HLG encode pipeline failed (%d)", static_cast<int>(res));
@@ -1062,7 +1063,12 @@ bool VulkanRawPipeline::createDescriptorLayoutAndPipelines() {
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     if (vkCreateShaderModule(mDevice, &smInfo, nullptr, &shaderModule) != VK_SUCCESS) return false;
 
-    for (uint32_t stage = 0; stage < kStageCount; ++stage) {
+    // The six stages are specializations of one large shader. They compile in parallel (the
+    // pipeline cache is internally synchronized), and from the disk cache after the first run.
+    loadPipelineCache();
+    const auto compileStart = std::chrono::high_resolution_clock::now();
+    VkResult stageResult[kStageCount] = {};
+    auto compileStage = [&](uint32_t stage) {
         uint32_t stageValue = stage;
         VkSpecializationMapEntry entry = {0, 0, sizeof(uint32_t)};
         VkSpecializationInfo spec = {};
@@ -1086,20 +1092,100 @@ bool VulkanRawPipeline::createDescriptorLayoutAndPipelines() {
         info.stage.pSpecializationInfo = &spec;
         info.layout = mPipelineLayout;
 
-        VkResult res = vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &info, nullptr, &mPipelines[stage]);
+        VkResult res = vkCreateComputePipelines(mDevice, mPipelineCache, 1, &info, nullptr, &mPipelines[stage]);
         if (res != VK_SUCCESS) {
             info.stage.pNext = nullptr;
             info.stage.flags = 0;
-            res = vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &info, nullptr, &mPipelines[stage]);
-            if (res != VK_SUCCESS) {
-                LOGE("Failed to create compute pipeline for stage %u (%d)", stage, static_cast<int>(res));
-                vkDestroyShaderModule(mDevice, shaderModule, nullptr);
-                return false;
-            }
+            res = vkCreateComputePipelines(mDevice, mPipelineCache, 1, &info, nullptr, &mPipelines[stage]);
         }
+        stageResult[stage] = res;
+    };
+    {
+        std::vector<std::thread> workers;
+        for (uint32_t stage = 1; stage < kStageCount; ++stage) workers.emplace_back(compileStage, stage);
+        compileStage(0);
+        for (auto& w : workers) w.join();
     }
     vkDestroyShaderModule(mDevice, shaderModule, nullptr);
+    for (uint32_t stage = 0; stage < kStageCount; ++stage) {
+        if (stageResult[stage] != VK_SUCCESS) {
+            LOGE("Failed to create compute pipeline for stage %u (%d)", stage, static_cast<int>(stageResult[stage]));
+            return false;
+        }
+    }
+    LOGI("Startup: %u compute pipelines in %.1f ms (pipeline cache %s)", kStageCount,
+         std::chrono::duration<float, std::milli>(std::chrono::high_resolution_clock::now() - compileStart).count(),
+         mPipelineCacheSavedBytes > 0 ? "warm" : "cold");
+    savePipelineCache();
     return true;
+}
+
+// Persistent pipeline cache: <cache dir>/vk_pipeline_cache.bin. The header is checked against this
+// GPU and driver (a driver update changes the UUID), so stale data is dropped, not handed over.
+void VulkanRawPipeline::loadPipelineCache() {
+    if (mPipelineCache != VK_NULL_HANDLE) return;
+    std::vector<uint8_t> data;
+    if (!mPipelineCacheDir.empty()) {
+        const std::string path = mPipelineCacheDir + "/vk_pipeline_cache.bin";
+        if (FILE* f = std::fopen(path.c_str(), "rb")) {
+            std::fseek(f, 0, SEEK_END);
+            long len = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (len > 32 && len < (64L << 20)) {
+                data.resize(static_cast<size_t>(len));
+                if (std::fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
+            }
+            std::fclose(f);
+        }
+    }
+    if (!data.empty()) {
+        VkPhysicalDeviceProperties props = {};
+        vkGetPhysicalDeviceProperties(mPhysicalDevice, &props);
+        uint32_t hdr[4] = {};
+        std::memcpy(hdr, data.data(), sizeof(hdr));
+        const bool match = hdr[0] >= 32 && hdr[1] == VK_PIPELINE_CACHE_HEADER_VERSION_ONE
+            && hdr[2] == props.vendorID && hdr[3] == props.deviceID
+            && std::memcmp(data.data() + 16, props.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+        if (!match) {
+            LOGW("Pipeline cache on disk is for another GPU or driver; rebuilding");
+            data.clear();
+        }
+    }
+    VkPipelineCacheCreateInfo ci = {};
+    ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    ci.initialDataSize = data.size();
+    ci.pInitialData = data.empty() ? nullptr : data.data();
+    if (vkCreatePipelineCache(mDevice, &ci, nullptr, &mPipelineCache) != VK_SUCCESS) {
+        // Bad initial data must never cost the pipelines: retry empty, else run without a cache.
+        ci.initialDataSize = 0;
+        ci.pInitialData = nullptr;
+        data.clear();
+        if (vkCreatePipelineCache(mDevice, &ci, nullptr, &mPipelineCache) != VK_SUCCESS) mPipelineCache = VK_NULL_HANDLE;
+    }
+    mPipelineCacheSavedBytes = data.size();
+}
+
+// Writes the cache when it has grown since it was loaded (new pipelines compiled). Atomic rename,
+// so a kill mid-write leaves the previous file.
+void VulkanRawPipeline::savePipelineCache() {
+    if (mPipelineCache == VK_NULL_HANDLE || mPipelineCacheDir.empty()) return;
+    size_t size = 0;
+    if (vkGetPipelineCacheData(mDevice, mPipelineCache, &size, nullptr) != VK_SUCCESS || size == 0) return;
+    if (size == mPipelineCacheSavedBytes) return;
+    std::vector<uint8_t> data(size);
+    if (vkGetPipelineCacheData(mDevice, mPipelineCache, &size, data.data()) != VK_SUCCESS) return;
+    const std::string path = mPipelineCacheDir + "/vk_pipeline_cache.bin";
+    const std::string tmp = path + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return;
+    const bool ok = std::fwrite(data.data(), 1, size, f) == size;
+    std::fclose(f);
+    if (ok && std::rename(tmp.c_str(), path.c_str()) == 0) {
+        mPipelineCacheSavedBytes = size;
+        LOGI("Pipeline cache saved (%zu KB)", size / 1024);
+    } else {
+        std::remove(tmp.c_str());
+    }
 }
 
 // =============================================================================
@@ -1662,6 +1748,11 @@ void VulkanRawPipeline::destroyComputeResources() {
     for (auto& p : mPipelines) {
         if (p != VK_NULL_HANDLE) { vkDestroyPipeline(mDevice, p, nullptr); p = VK_NULL_HANDLE; }
     }
+    if (mPipelineCache != VK_NULL_HANDLE) {
+        savePipelineCache();   // picks up the video encode pipeline if it was built this session
+        vkDestroyPipelineCache(mDevice, mPipelineCache, nullptr);
+        mPipelineCache = VK_NULL_HANDLE;
+    }
     if (mPipelineLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(mDevice, mPipelineLayout, nullptr); mPipelineLayout = VK_NULL_HANDLE; }
     if (mDescriptorPool != VK_NULL_HANDLE) { vkDestroyDescriptorPool(mDevice, mDescriptorPool, nullptr); mDescriptorPool = VK_NULL_HANDLE; }
     if (mDescriptorSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(mDevice, mDescriptorSetLayout, nullptr); mDescriptorSetLayout = VK_NULL_HANDLE; }
@@ -1692,11 +1783,17 @@ bool VulkanRawPipeline::init(ANativeWindow* window, AAssetManager* assetManager)
     mAssetManager = assetManager;
     mWindowWidth = ANativeWindow_getWidth(window);
     mWindowHeight = ANativeWindow_getHeight(window);
+    const auto t0 = std::chrono::high_resolution_clock::now();
+    auto since = [&t0]() {
+        return std::chrono::duration<float, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    };
     if (!createInstance()) return false;
     if (!selectPhysicalDevice()) return false;
     if (!createDevice()) return false;
+    const float deviceMs = since();
     if (!createSwapchain()) return false;
     if (!createComputeResources()) return false;
+    LOGI("Startup: Vulkan init %.1f ms (device %.1f ms)", since(), deviceMs);
     return true;
 }
 
@@ -2476,7 +2573,7 @@ bool VulkanRawPipeline::ensureMasterTargets(VkExtent2D ext) {
     return true;
 }
 
-bool VulkanRawPipeline::renderMasterStill(std::vector<uint8_t>& outRgba, int& outW, int& outH) {
+bool VulkanRawPipeline::renderMasterStill(const MasterSink& sink, int& outW, int& outH) {
     std::lock_guard<std::mutex> lock(mRenderMutex);
     if (!mDevice || !mLastFrame.valid) return false;
     auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -2535,20 +2632,7 @@ bool VulkanRawPipeline::renderMasterStill(std::vector<uint8_t>& outRgba, int& ou
 
     outW = static_cast<int>(ext.width);
     outH = static_cast<int>(ext.height);
-    const size_t pixels = static_cast<size_t>(outW) * static_cast<size_t>(outH);
-    outRgba.resize(pixels * 4);
-    mMasterGain.resize(pixels);
-    mMasterGainW = outW;
-    mMasterGainH = outH;
-
-    const uint8_t* src = static_cast<const uint8_t*>(mMasterReadbackMapped);
-    for (size_t i = 0; i < pixels; ++i) {
-        outRgba[i * 4 + 0] = src[i * 4 + 0];
-        outRgba[i * 4 + 1] = src[i * 4 + 1];
-        outRgba[i * 4 + 2] = src[i * 4 + 2];
-        outRgba[i * 4 + 3] = 255;
-        mMasterGain[i] = src[i * 4 + 3];
-    }
+    if (!splitMasterReadback(sink, outW, outH)) return false;
 
     auto cpuEnd = std::chrono::high_resolution_clock::now();
     std::chrono::duration<float, std::milli> elapsed = cpuEnd - cpuStart;
@@ -2707,7 +2791,7 @@ bool VulkanRawPipeline::masterBegin(int dstW, int dstH, std::vector<uint8_t>& ou
 }
 
 bool VulkanRawPipeline::masterFinish(const float* disparity, const float* matte, int dw, int dh, float focusDisp,
-                                     std::vector<uint8_t>& outRgba, int& outW, int& outH) {
+                                     const MasterSink& sink, int& outW, int& outH) {
     std::unique_lock<std::mutex> lock(mRenderMutex);
     if (!mMasterPending) return false;
     struct Clear { bool& f; ~Clear() { f = false; } } clear{mMasterPending};
@@ -2839,31 +2923,47 @@ bool VulkanRawPipeline::masterFinish(const float* disparity, const float* matte,
 
     outW = static_cast<int>(ext.width);
     outH = static_cast<int>(ext.height);
-    const size_t pixels = static_cast<size_t>(outW) * static_cast<size_t>(outH);
-    outRgba.resize(pixels * 4);
-    mMasterGain.resize(pixels);
-    mMasterGainW = outW;
-    mMasterGainH = outH;
-    const uint8_t* src = static_cast<const uint8_t*>(mMasterReadbackMapped);
-    for (size_t i = 0; i < pixels; ++i) {
-        outRgba[i * 4 + 0] = src[i * 4 + 0];
-        outRgba[i * 4 + 1] = src[i * 4 + 1];
-        outRgba[i * 4 + 2] = src[i * 4 + 2];
-        outRgba[i * 4 + 3] = 255;
-        mMasterGain[i] = src[i * 4 + 3];
-    }
+    if (!splitMasterReadback(sink, outW, outH)) return false;
     LOGI("Master finish %dx%d: %s | depth upsample %.1f ms, bokeh %.1f ms (%d bands), film+readback %.1f ms, total %.1f ms (f/%.1f, focus %.2f D, d_f %.3f)",
          outW, outH, useDepth ? "depth bokeh" : "no depth", depthUpMs, bokehMs, kDepthBands, filmMs, ms(cpuStart),
          mPendingFNumber, mPendingDiopters, focusDisp);
     return true;
 }
 
-bool VulkanRawPipeline::copyMasterGainmap(std::vector<uint8_t>& outGain, int& outW, int& outH) {
+bool VulkanRawPipeline::copyMasterGainmap(const MasterSink& sink, int& outW, int& outH) {
     std::lock_guard<std::mutex> lock(mRenderMutex);
     if (mMasterGain.empty()) return false;
-    outGain = mMasterGain;
+    uint8_t* dst = sink(mMasterGain.size());
+    if (!dst) return false;
+    std::memcpy(dst, mMasterGain.data(), mMasterGain.size());
     outW = mMasterGainW;
     outH = mMasterGainH;
+    return true;
+}
+
+// Master readback (RGBA8, gain map in A) -> sink as RGBA with opaque alpha, gain into mMasterGain.
+// Caller holds mRenderMutex and has waited for the readback copy.
+bool VulkanRawPipeline::splitMasterReadback(const MasterSink& sink, int w, int h) {
+    const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
+    uint8_t* dst = sink(pixels * 4);
+    if (!dst) return false;
+    mMasterGain.resize(pixels);
+    mMasterGainW = w;
+    mMasterGainH = h;
+    // One 32-bit word per pixel (little endian: A is the top byte); the loop vectorizes.
+    const uint8_t* src = static_cast<const uint8_t*>(mMasterReadbackMapped);
+    uint8_t* gain = mMasterGain.data();
+    constexpr size_t kBlock = 4096;
+    uint32_t tmp[kBlock];
+    for (size_t i0 = 0; i0 < pixels; i0 += kBlock) {
+        const size_t n = std::min(kBlock, pixels - i0);
+        std::memcpy(tmp, src + i0 * 4, n * 4);
+        for (size_t k = 0; k < n; ++k) {
+            gain[i0 + k] = static_cast<uint8_t>(tmp[k] >> 24);
+            tmp[k] |= 0xFF000000u;
+        }
+        std::memcpy(dst + i0 * 4, tmp, n * 4);
+    }
     return true;
 }
 
@@ -3151,7 +3251,46 @@ void VulkanRawPipeline::stackEnd() {
 // =============================================================================
 // JNI
 // =============================================================================
+static std::string gPipelineCacheDir;   // app cache dir, set from Java before nativeInit
+
+namespace {
+// MasterSink that hands the native renderer a new Java byte[] to write into directly.
+// Large arrays live in ART's non-moving space, so Get/ReleaseByteArrayElements do not copy.
+struct JavaByteSink {
+    JNIEnv* env;
+    jbyteArray arr = nullptr;
+    jbyte* ptr = nullptr;
+    explicit JavaByteSink(JNIEnv* e) : env(e) {}
+    VulkanRawPipeline::MasterSink fn() {
+        return [this](size_t bytes) -> uint8_t* {
+            if (arr || bytes > static_cast<size_t>(INT32_MAX)) return nullptr;
+            arr = env->NewByteArray(static_cast<jsize>(bytes));
+            if (!arr) { env->ExceptionClear(); return nullptr; }
+            ptr = env->GetByteArrayElements(arr, nullptr);
+            return reinterpret_cast<uint8_t*>(ptr);
+        };
+    }
+    // Commits the writes; returns the array on success, null (and drops it) otherwise.
+    jbyteArray finish(bool ok) {
+        if (ptr) env->ReleaseByteArrayElements(arr, ptr, ok ? 0 : JNI_ABORT);
+        ptr = nullptr;
+        if (!ok && arr) { env->DeleteLocalRef(arr); arr = nullptr; }
+        return ok ? arr : nullptr;
+    }
+};
+} // namespace
+
 extern "C" {
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetCacheDir(JNIEnv* env, jobject /*thiz*/, jstring dir) {
+    if (!dir) return;
+    const char* c = env->GetStringUTFChars(dir, nullptr);
+    if (c) {
+        gPipelineCacheDir = c;
+        env->ReleaseStringUTFChars(dir, c);
+    }
+}
 
 JNIEXPORT jboolean JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeInit(JNIEnv* env, jobject /*thiz*/, jobject surface, jobject assetManager) {
@@ -3166,6 +3305,7 @@ Java_com_s24film_camera_VulkanRenderer_nativeInit(JNIEnv* env, jobject /*thiz*/,
     }
     gPipeline = new VulkanRawPipeline();
     gPipeline->setPortraitMode(gPortraitMode);
+    gPipeline->setPipelineCacheDir(gPipelineCacheDir);
     if (!gPipeline->init(window, mgr)) {
         delete gPipeline;
         gPipeline = nullptr;
@@ -3376,14 +3516,13 @@ Java_com_s24film_camera_VulkanRenderer_nativeRenderMasterStill(
     JNIEnv* env, jobject /*thiz*/, jintArray outDims)
 {
     if (!gPipeline || !outDims) return nullptr;
-    std::vector<uint8_t> rgba;
+    JavaByteSink sink(env);
     int w = 0, h = 0;
-    if (!gPipeline->renderMasterStill(rgba, w, h)) return nullptr;
+    bool ok = gPipeline->renderMasterStill(sink.fn(), w, h);
+    jbyteArray arr = sink.finish(ok);
+    if (!arr) return nullptr;
     jint dims[2] = {w, h};
     env->SetIntArrayRegion(outDims, 0, 2, dims);
-    jbyteArray arr = env->NewByteArray(static_cast<jsize>(rgba.size()));
-    if (!arr) return nullptr;
-    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(rgba.size()), reinterpret_cast<const jbyte*>(rgba.data()));
     return arr;
 }
 
@@ -3397,7 +3536,8 @@ Java_com_s24film_camera_VulkanRenderer_nativeMasterBegin(JNIEnv* env, jobject /*
         // No Java copy to run depth on: finish the render without it so the pending state clears.
         std::vector<uint8_t> dummy;
         int w = 0, h = 0;
-        gPipeline->masterFinish(nullptr, nullptr, 0, 0, 0.0f, dummy, w, h);
+        gPipeline->masterFinish(nullptr, nullptr, 0, 0, 0.0f,
+            [&dummy](size_t bytes) { dummy.resize(bytes); return dummy.data(); }, w, h);
         return nullptr;
     }
     env->SetByteArrayRegion(arr, 0, static_cast<jsize>(rgb.size()), reinterpret_cast<const jbyte*>(rgb.data()));
@@ -3419,14 +3559,14 @@ Java_com_s24film_camera_VulkanRenderer_nativeMasterFinish(
         mat.resize(disp.size());
         env->GetFloatArrayRegion(matteArr, 0, dw * dh, mat.data());
     }
-    std::vector<uint8_t> rgba;
+    JavaByteSink sink(env);
     int w = 0, h = 0;
-    if (!gPipeline->masterFinish(disp.empty() ? nullptr : disp.data(), mat.empty() ? nullptr : mat.data(), dw, dh, focusDisp, rgba, w, h)) return nullptr;
+    bool ok = gPipeline->masterFinish(disp.empty() ? nullptr : disp.data(), mat.empty() ? nullptr : mat.data(),
+                                      dw, dh, focusDisp, sink.fn(), w, h);
+    jbyteArray arr = sink.finish(ok);
+    if (!arr) return nullptr;
     jint dims[2] = {w, h};
     env->SetIntArrayRegion(outDims, 0, 2, dims);
-    jbyteArray arr = env->NewByteArray(static_cast<jsize>(rgba.size()));
-    if (!arr) return nullptr;
-    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(rgba.size()), reinterpret_cast<const jbyte*>(rgba.data()));
     return arr;
 }
 
@@ -3435,14 +3575,13 @@ Java_com_s24film_camera_VulkanRenderer_nativeGetMasterGainmap(
     JNIEnv* env, jobject /*thiz*/, jintArray outDims)
 {
     if (!gPipeline || !outDims) return nullptr;
-    std::vector<uint8_t> gain;
+    JavaByteSink sink(env);
     int w = 0, h = 0;
-    if (!gPipeline->copyMasterGainmap(gain, w, h)) return nullptr;
+    bool ok = gPipeline->copyMasterGainmap(sink.fn(), w, h);
+    jbyteArray arr = sink.finish(ok);
+    if (!arr) return nullptr;
     jint dims[2] = {w, h};
     env->SetIntArrayRegion(outDims, 0, 2, dims);
-    jbyteArray arr = env->NewByteArray(static_cast<jsize>(gain.size()));
-    if (!arr) return nullptr;
-    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(gain.size()), reinterpret_cast<const jbyte*>(gain.data()));
     return arr;
 }
 

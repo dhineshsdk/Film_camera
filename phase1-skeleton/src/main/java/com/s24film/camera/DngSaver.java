@@ -212,6 +212,7 @@ public class DngSaver {
 
         @Override
         public void run() {
+            final long tSave = System.nanoTime();
             String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date());
             // "Folder/name" puts the frame in a sub-folder of DCIM/S24Film (compare sets).
             File dir = STORAGE_DIR;
@@ -277,19 +278,30 @@ public class DngSaver {
                         attachGainmap(bmp, isMaster ? rotationDeg : 0);
                     }
                     gain = null;
-                    try (FileOutputStream jfos = new FileOutputStream(outJpg)) {
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 98, jfos);
-                        jfos.flush();
+                    // Encode to memory, then write the file once with the EXIF block spliced in
+                    // (the old path wrote the JPEG, read it all back and wrote it a second time).
+                    long tEnc = System.nanoTime();
+                    JpegBuffer jpeg = new JpegBuffer(12 << 20);
+                    try {
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 98, jpeg);
                     } finally {
                         bmp.recycle();
                     }
+                    long tWrite = System.nanoTime();
+                    byte[] exifSeg = null;
                     try {
-                        writeExif(outJpg, captureResult, timeStamp);
+                        exifSeg = exifSegment(captureResult, timeStamp);
                     } catch (Throwable t) {
-                        Log.w(TAG, "EXIF write failed: " + t.getMessage());
+                        Log.w(TAG, "EXIF build failed: " + t.getMessage());
                     }
+                    try (FileOutputStream jfos = new FileOutputStream(outJpg)) {
+                        writeJpegWithExif(jfos, jpeg.data(), jpeg.size(), exifSeg);
+                    }
+                    jpeg = null;
                     jpgBytes = outJpg.length();
-                    Log.i(TAG, "Saved Master Film JPEG: " + outJpg.getAbsolutePath() + " (" + (jpgBytes / 1024) + " KB)");
+                    Log.i(TAG, "Saved Master Film JPEG: " + outJpg.getAbsolutePath() + " (" + (jpgBytes / 1024) + " KB)"
+                        + " encode " + ((tWrite - tEnc) / 1_000_000) + " ms, write " + ((System.nanoTime() - tWrite) / 1_000_000)
+                        + " ms, save total " + ((System.nanoTime() - tSave) / 1_000_000) + " ms");
                 }
 
                 // 3. Index immediately into Samsung Gallery / Android MediaStore
@@ -329,16 +341,10 @@ public class DngSaver {
         }
     }
 
-    // Inserts a minimal EXIF block (camera, shutter, aperture, ISO / film EI, focal length, time)
-    // after SOI/APP0. Bitmap.compress writes none. Inserting ahead of the Ultra HDR MPF segment
+    // A minimal EXIF block (camera, shutter, aperture, ISO / film EI, focal length, time), inserted
+    // after SOI/APP0 by writeJpegWithExif. Bitmap.compress writes none. Inserting ahead of the Ultra HDR MPF segment
     // keeps the gain map valid: MPF offsets are relative to the MPF header, which moves with it.
-    static void writeExif(File jpg, CaptureResult r, String timeStamp) throws java.io.IOException {
-        byte[] src = java.nio.file.Files.readAllBytes(jpg.toPath());
-        if (src.length < 4 || (src[0] & 0xFF) != 0xFF || (src[1] & 0xFF) != 0xD8) return;
-        int insertAt = 2;
-        if ((src[2] & 0xFF) == 0xFF && (src[3] & 0xFF) == 0xE0) {
-            insertAt = 4 + (((src[4] & 0xFF) << 8) | (src[5] & 0xFF));
-        }
+    static byte[] exifSegment(CaptureResult r, String timeStamp) {
         Long expNs = (r != null) ? r.get(CaptureResult.SENSOR_EXPOSURE_TIME) : null;
         Integer sens = (r != null) ? r.get(CaptureResult.SENSOR_SENSITIVITY) : null;
         Float fNum = (r != null) ? r.get(CaptureResult.LENS_APERTURE) : null;
@@ -364,17 +370,35 @@ public class DngSaver {
         if (focal != null && focal > 0) exif.rational(0x920A, Math.round(focal * 100), 100);
         byte[] tiff = ExifBuilder.tiff(ifd0, exif);
         int segLen = 2 + 6 + tiff.length;
-        if (segLen > 0xFFFF) return;
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(src.length + segLen + 2);
-        out.write(src, 0, insertAt);
+        if (segLen > 0xFFFF) return null;
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(segLen + 2);
         out.write(0xFF); out.write(0xE1);
         out.write((segLen >> 8) & 0xFF); out.write(segLen & 0xFF);
-        out.write(new byte[] {'E', 'x', 'i', 'f', 0, 0});
-        out.write(tiff);
-        out.write(src, insertAt, src.length - insertAt);
-        try (FileOutputStream fos = new FileOutputStream(jpg)) {
-            out.writeTo(fos);
+        out.write(new byte[] {'E', 'x', 'i', 'f', 0, 0}, 0, 6);
+        out.write(tiff, 0, tiff.length);
+        return out.toByteArray();
+    }
+
+    // ByteArrayOutputStream that hands out its buffer without the toByteArray() copy.
+    static final class JpegBuffer extends java.io.ByteArrayOutputStream {
+        JpegBuffer(int initial) { super(initial); }
+        byte[] data() { return buf; }
+    }
+
+    // Writes the JPEG in src[0, len) with the APP1 segment exifSeg (null: none) after SOI/APP0.
+    static void writeJpegWithExif(java.io.OutputStream out, byte[] src, int len, byte[] exifSeg) throws java.io.IOException {
+        boolean isJpeg = len >= 6 && (src[0] & 0xFF) == 0xFF && (src[1] & 0xFF) == 0xD8;
+        if (exifSeg == null || !isJpeg) {
+            out.write(src, 0, len);
+            return;
         }
+        int insertAt = 2;
+        if ((src[2] & 0xFF) == 0xFF && (src[3] & 0xFF) == 0xE0) {
+            insertAt = Math.min(len, 4 + (((src[4] & 0xFF) << 8) | (src[5] & 0xFF)));
+        }
+        out.write(src, 0, insertAt);
+        out.write(exifSeg);
+        out.write(src, insertAt, len - insertAt);
     }
 
     // Big-endian TIFF IFD writer for the few EXIF tags above.

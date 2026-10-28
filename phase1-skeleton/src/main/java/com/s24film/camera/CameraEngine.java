@@ -21,6 +21,7 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Process;
 import android.util.Log;
 import android.util.Pair;
 import android.util.Range;
@@ -167,6 +168,8 @@ public class CameraEngine {
         this.cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
         this.dngSaver = dngSaver;
         this.depthBokeh = new DepthBokeh(context);
+        // Before MainActivity's first nativeInit: restarts load compiled shaders from this folder.
+        VulkanRenderer.nativeSetCacheDir(context.getCacheDir().getAbsolutePath());
         this.imuTelemetry = imuTelemetry;
         this.frameCallback = frameCallback;
     }
@@ -262,7 +265,10 @@ public class CameraEngine {
             debugControl.register(context);
         }
         if (cameraThread == null) {
-            cameraThread = new HandlerThread("CameraBackgroundThread", Thread.MAX_PRIORITY);
+            // HandlerThread takes a Linux nice value, not a java.lang.Thread priority: the old
+            // Thread.MAX_PRIORITY (10) was nice +10, i.e. background. This thread copies and renders
+            // every RAW frame, so it runs at display priority.
+            cameraThread = new HandlerThread("CameraBackgroundThread", Process.THREAD_PRIORITY_URGENT_DISPLAY);
             cameraThread.start();
             cameraHandler = new Handler(cameraThread.getLooper());
         }
