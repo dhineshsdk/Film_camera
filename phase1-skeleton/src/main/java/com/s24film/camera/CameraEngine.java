@@ -1471,7 +1471,7 @@ public class CameraEngine {
             }
 
             case STACK_HDR:
-                return (ringMarkSeq > 0L) ? hdrGpuStep() : hdrStep();
+                return gpuMerge() ? hdrGpuStep() : hdrStep();   // matches nativeStackMode
 
             case STACK_SLOW:
                 return slowStep();
