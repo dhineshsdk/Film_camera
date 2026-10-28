@@ -17,6 +17,7 @@
 #include <atomic>
 #include <string>
 #include <thread>
+#include <functional>
 #include "SpectralFilm.h"
 
 #define LOG_TAG "S24FilmVulkan"
@@ -209,7 +210,10 @@ public:
                          int cfa, float whiteLevel, float gainR, float gainG, float gainB,
                          int sensorOrientation, int camMatrixIdx);
     bool copyLastRenderedRgba(std::vector<uint8_t>& outRgba, int& outW, int& outH);
-    bool renderMasterStill(std::vector<uint8_t>& outRgba, int& outW, int& outH);
+    // Destination for a master readback: returns a buffer of 'bytes' bytes, or null to give up.
+    // JNI hands out the Java byte[] itself, so the ~50 MB frame is copied once, not three times.
+    using MasterSink = std::function<uint8_t*(size_t bytes)>;
+    bool renderMasterStill(const MasterSink& sink, int& outW, int& outH);
     // Two-step master render so monocular depth can run off the camera thread. Begin renders
     // PREP + ISP + PYRAMID into the master targets and returns a small sRGB 8-bit RGB copy of the
     // scene (dstW x dstH x 3, for the depth network). Finish adds the depth bokeh (disparity
@@ -217,8 +221,10 @@ public:
     // readback exactly like renderMasterStill. Exactly one Finish must follow every successful Begin.
     bool masterBegin(int dstW, int dstH, std::vector<uint8_t>& outRgb);
     bool masterFinish(const float* disparity, const float* matte, int dw, int dh, float focusDisp,
-                      std::vector<uint8_t>& outRgba, int& outW, int& outH);
-    bool copyMasterGainmap(std::vector<uint8_t>& outGain, int& outW, int& outH);
+                      const MasterSink& sink, int& outW, int& outH);
+    bool copyMasterGainmap(const MasterSink& sink, int& outW, int& outH);
+    // Directory for the persistent VkPipelineCache (app cache dir); empty = no disk cache.
+    void setPipelineCacheDir(const std::string& dir) { mPipelineCacheDir = dir; }
 
     // Multi-frame stacking on the frames already held in the RAW ring (no extra camera streams).
     // Begin sizes the accumulators for the current RAW size; Add folds the most recent ring frame in
@@ -273,6 +279,9 @@ private:
     bool formatSupports(VkFormat format, VkFormatFeatureFlags features);
 
     bool createDescriptorLayoutAndPipelines();
+    void loadPipelineCache();
+    void savePipelineCache();
+    bool splitMasterReadback(const MasterSink& sink, int w, int h);
     bool createSharedResources();
     bool loadLookLut();
     bool createGrainTile();
@@ -412,6 +421,9 @@ private:
     VkDescriptorSetLayout mDescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool mDescriptorPool = VK_NULL_HANDLE;
     VkPipelineLayout mPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineCache mPipelineCache = VK_NULL_HANDLE;   // persisted so restarts skip shader compiles
+    std::string mPipelineCacheDir;
+    size_t mPipelineCacheSavedBytes = 0;
     VkPipeline mPipelines[kStageCount] = {};
 
     VkQueryPool mQueryPool = VK_NULL_HANDLE;
