@@ -1164,7 +1164,17 @@ public class CameraEngine {
         this.pendingDngCallback = callback;
         // Lock the grip now: the shutter tap itself can jolt the phone before the next frame lands.
         this.lockedCaptureOrient = currentActiveOrient();
-        if (stackMode == STACK_OFF && nightAuto && !videoMode && !stackActive && manualAeActive
+        if (stackMode == STACK_OFF && slowStill && nightAuto && !videoMode && !stackActive && manualAeActive
+                && manualShutterNs == 0 && underexposureEv > 0.3f && captureSession != null && previewBuilder != null) {
+            // Stage A4: still too dark at the slowest live shutter (ISO 100 stocks at night). Take
+            // a few separate long frames instead; the live stream itself never runs slower.
+            long cap = Math.min(deviceMaxShutterNs, hasOis ? SLOW_MAX_OIS_NS : SLOW_MAX_NS);
+            slowExposureNs = Math.max(currentExposureNs,
+                Math.min(cap, (long) (currentExposureNs * Math.pow(2.0, underexposureEv))));
+            slowFrames = (int) Math.max(3, Math.min(6, Math.round(SLOW_TOTAL_NS / (double) slowExposureNs)));
+            stackMode = STACK_SLOW;
+            nightRestore = true;
+        } else if (stackMode == STACK_OFF && nightAuto && !videoMode && !stackActive && manualAeActive
                 && (autoPushStops > 0.5f || underexposureEv > 0.3f || (filmKey.isEmpty() && currentIso >= 1000))) {
             stackMode = STACK_BURST;
             nightRestore = true;
@@ -1202,7 +1212,23 @@ public class CameraEngine {
     public static final int STACK_LONG = 3;     // long exposure, mean of frames (water, crowds)
     public static final int STACK_TRAILS = 4;   // long exposure, brightest value per pixel (stars, lights)
 
+    public static final int STACK_SLOW = 5;     // separate long-exposure still requests, merged (A4; set by shootNow)
+
     private static final int BURST_FRAMES = 8;
+    // Stage A4 slow still: longest single frame by hand (OIS lenses hold a stop more), and the
+    // total time the frames should span.
+    private static final long SLOW_MAX_NS = 125_000_000L;       // 1/8 s
+    private static final long SLOW_MAX_OIS_NS = 250_000_000L;   // 1/4 s
+    private static final long SLOW_TOTAL_NS = 800_000_000L;
+    private static final String SLOW_TAG = "a4-slow";
+    private volatile boolean slowStill = true;
+    public void setSlowStill(boolean on) { slowStill = on; }
+    private long slowExposureNs = 0L;
+    private int slowFrames = 0;
+    private int slowGot = 0;
+    private final long[] slowTs = new long[8];   // sensor timestamps of the long frames, from onCaptureStarted
+    private int slowTsNext = 0;
+    private volatile long lastImageTs = 0L;
     private volatile int burstTarget = BURST_FRAMES;   // 12 when the night push is 3 or more stops
     private static final int MAX_STACK_FRAMES = 600;
     private static final int STACK_SETTLE_FRAMES = 5;
@@ -1348,6 +1374,7 @@ public class CameraEngine {
             stackBaseExpNs = currentExposureNs;
             stackBaseProd = (double) resultIso * (double) resultExposureNs;
             if (stackBaseProd <= 0.0) stackBaseProd = (double) currentIso * currentExposureNs;
+            if (stackMode == STACK_SLOW && !requestSlowFrames()) return stackAbort("slow request failed");
             ringLeft = ((stackMode == STACK_BURST || stackMode == STACK_HDR) && ringMarkSeq > 0L)
                 ? VulkanRenderer.nativeStackPrimeFromRing(ringMarkSeq, burstTarget) : 0;
             if (stackMode == STACK_BURST) Log.i(TAG, "Burst: " + ringLeft + " of " + burstTarget + " frames from before the press (ring " + VulkanRenderer.nativeRingSlots() + ")");
@@ -1389,6 +1416,9 @@ public class CameraEngine {
 
             case STACK_HDR:
                 return (ringMarkSeq > 0L) ? hdrGpuStep() : hdrStep();
+
+            case STACK_SLOW:
+                return slowStep();
 
             default:
                 return stackAbort("bad mode");
@@ -1432,6 +1462,69 @@ public class CameraEngine {
         stackFrames++;
         Log.i(TAG, "HDR short frame at " + String.format(java.util.Locale.US, "%+.2f EV", Math.log(rel) / Math.log(2.0)));
         if (++stackPhase > HDR_SHORT_FRAMES) return stackFinish();
+        return false;
+    }
+
+    /** Queues slowFrames long still requests (same targets and settings as the live request). */
+    private boolean requestSlowFrames() {
+        CameraCaptureSession session = captureSession;
+        CaptureRequest.Builder b = previewBuilder;
+        if (session == null || b == null) return false;
+        synchronized (slowTs) {
+            java.util.Arrays.fill(slowTs, 0L);
+            slowTsNext = 0;
+        }
+        slowGot = 0;
+        try {
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, slowExposureNs);
+            b.set(CaptureRequest.SENSOR_FRAME_DURATION, slowExposureNs);
+            b.setTag(SLOW_TAG);
+            java.util.List<CaptureRequest> list = new java.util.ArrayList<>();
+            for (int i = 0; i < slowFrames; i++) list.add(b.build());
+            session.captureBurst(list, new CaptureCallback(this), cameraHandler);
+            Log.i(TAG, "Slow still: " + slowFrames + " x " + (slowExposureNs / 1000) + " us at ISO " + currentIso
+                + " (live " + (currentExposureNs / 1000) + " us, " + String.format(java.util.Locale.US, "%.1f", underexposureEv) + " EV under)");
+            postStack("Hold still");
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Slow still request failed: " + e.getMessage(), e);
+            return false;
+        } finally {
+            // The builder is the live request: put its exposure back and drop the tag.
+            b.setTag(null);
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentExposureNs);
+            b.set(CaptureRequest.SENSOR_FRAME_DURATION, Math.max(currentExposureNs, MAX_SHUTTER_NS));
+        }
+    }
+
+    private void noteSlowFrameStarted(long ts) {
+        synchronized (slowTs) {
+            slowTs[slowTsNext] = ts;
+            slowTsNext = (slowTsNext + 1) % slowTs.length;
+        }
+    }
+
+    private boolean isSlowFrame(long ts) {
+        synchronized (slowTs) {
+            for (long t : slowTs) if (t == ts && t != 0L) return true;
+        }
+        return false;
+    }
+
+    // Live frames go by untouched; each long frame is folded in as it lands. The first is the reference.
+    private boolean slowStep() {
+        if (isSlowFrame(lastImageTs)) {
+            if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
+            stackFrames++;
+            slowGot++;
+            postStack("Exposing " + slowGot + "/" + slowFrames);
+            if (slowGot >= slowFrames) return stackFinish();
+        }
+        // Slow frames plus the live ones queued between them; give up waiting after that.
+        long waitedNs = (long) stackWait * Math.max(currentExposureNs, MAX_SHUTTER_NS);
+        if (waitedNs > (long) slowFrames * slowExposureNs * 2 + 2_000_000_000L) {
+            return (slowGot > 0) ? stackFinish() : stackAbort("slow frames never arrived");
+        }
         return false;
     }
 
@@ -1635,6 +1728,11 @@ public class CameraEngine {
         }
 
         @Override
+        public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request, long timestamp, long frameNumber) {
+            if (SLOW_TAG.equals(request.getTag())) engine.noteSlowFrameStarted(timestamp);
+        }
+
+        @Override
         public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, android.hardware.camera2.CaptureFailure failure) {
             Log.w(TAG, "Capture failed frame " + failure.getFrameNumber() + " reason " + failure.getReason()
                 + " at " + (engine.currentExposureNs / 1000) + " us");
@@ -1795,7 +1893,8 @@ public class CameraEngine {
             if (engine.camMatrixIdx == 1) renderOrient = (renderOrient + 180) % 360;
 
             float vulkanMs = 0.0f;
-            engine.tagRingFrame(image.getTimestamp());
+            engine.lastImageTs = image.getTimestamp();
+            engine.tagRingFrame(engine.lastImageTs);
             HardwareBuffer hb = image.getHardwareBuffer();
             if (hb != null) {
                 try {

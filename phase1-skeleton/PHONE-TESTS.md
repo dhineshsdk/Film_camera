@@ -124,3 +124,13 @@ Same branch. Every normal shot is now a zero-lag GPU burst sized to the light: 4
 4. **HDR with people.** HDR on, a person moving in front of a bright window. Pass: the person is as sharp as a normal shot (no bracket blur), the window shows detail instead of white; log shows the base `GPU merge frame` lines, then two `HDR short frame at -2.00 EV` lines; preview exposure returns to normal afterwards.
 5. **HDR timeout.** HDR aimed at a scene where the exposure cannot drop 2 stops (already at the shortest shutter and lowest ISO). Pass: still saves a photo (the base burst) within about 3 s.
 6. **Off switch.** `automerge --ez on false`: shots are single frames again, exactly like main.
+
+## Stage A4: slow still shutter
+
+Same branch. When a shot would still be underexposed at the slowest live shutter (ISO 100 to 200 stocks at night), the app now sends 3 to 6 separate long still requests (up to 1/8 s, or 1/4 s on the OIS lenses, about 0.8 s in total) while the live stream keeps its normal shutter, and merges them on the GPU. Logcat: `Slow still: N x T us at ISO ...`, status `Hold still`, `Exposing n/N`, then the usual `GPU merge frame` and `Stack finish` lines. Off switch: `--es cmd slowstill --ez on false`.
+
+1. **Ektar 100 at night.** Dark street or a room lit by one lamp, Ektar 100, Auto, hand held. Pass: the photo is correctly exposed (not dark like issue 17), sharp at 100 percent, and the log shows the slow still lines with 1/8 or 1/4 s frames.
+2. **No wedge.** Repeat 20 times in a row, then switch lens and repeat 5 more. Pass: no HAL restart, phone reboot or frozen preview; every shot saves.
+3. **Live view during the shot.** Pass: the preview keeps moving during `Hold still` (it may flicker brighter for a moment); the shutter re-enables afterwards.
+4. **Not triggered in normal light.** Daylight and indoor shots never log `Slow still`.
+5. **Off switch.** With `slowstill` off, the same Ektar shot falls back to the A3 night burst (darker), proving the switch works.

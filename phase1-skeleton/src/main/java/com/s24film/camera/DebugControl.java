@@ -117,6 +117,9 @@ final class DebugControl extends BroadcastReceiver {
             case "flash":   // 0 off, 1 auto, 2 on
                 engine.setFlashMode(intent.getIntExtra("mode", 1));
                 break;
+            case "slowstill":   // Stage A4: long still frames when the live shutter runs out (--ez on true|false)
+                engine.setSlowStill(intent.getBooleanExtra("on", true));
+                break;
             case "automerge":   // Stage A3: merge every photo (--ez on true|false)
                 engine.setAutoMerge(intent.getBooleanExtra("on", true));
                 break;
