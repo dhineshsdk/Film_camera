@@ -166,6 +166,7 @@ struct LastFrameState {
     uint32_t slot = 0;
     uint32_t burstCount = 1;
     uint32_t ringSlots = 4;
+    bool hdrShoulder = false;   // slot holds an HDR merge with the RAW shoulder (PREP undoes it)
 };
 
 class VulkanRawPipeline {

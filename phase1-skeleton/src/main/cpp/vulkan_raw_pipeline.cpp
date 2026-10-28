@@ -1879,7 +1879,9 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     // Halation: TIR ring radius in output pixels -> Gaussian weights over mips 1..5 (log2 space).
     const float outLong = static_cast<float>(std::max(t.extent.width, t.extent.height));
     const FilmFormat& fmt = kFilmFormats[std::clamp(mFilmFormat.load(), 0, 3)];
-    const float ringPx = kHalationRingMm / fmt.frameLongMm * outLong;
+    // Stage B2: stocks without an anti-halation backing (CineStill, strength 0.3 and up) spread
+    // their red ring wider as well as brighter; ordinary stocks keep the TIR ring.
+    const float ringPx = kHalationRingMm / fmt.frameLongMm * outLong * (1.0f + 2.0f * std::max(baseHal - 0.2f, 0.0f));
     // Resolution: Gaussian with the system cut-off period, in output pixels.
     u.halW2[1] = 0.35f * outLong / (fmt.lpPerMm * fmt.frameLongMm);
     u.halW2[2] = fmt.gateVignette;
@@ -2005,7 +2007,8 @@ void VulkanRawPipeline::fillPushConstants(PushConstants& pc, const LastFrameStat
                       | (mirrorBit << 16u)
                       | (anamorphicBits << 17u)
                       | (gateBits << 19u)
-                      | (weaveBit << 21u);
+                      | (weaveBit << 21u)
+                      | ((st.hdrShoulder ? 1u : 0u) << 22u);
 }
 
 void VulkanRawPipeline::computeBarrier(VkCommandBuffer cmd) {
@@ -2238,6 +2241,7 @@ float VulkanRawPipeline::renderRawFrame(
     mLastFrame.slot = currentSlot;
     mLastFrame.burstCount = (mBurstModeEnabled.load() && !mForceSingleFrame.load()) ? std::max(mValidRingFrames, 1u) : 1u;
     mLastFrame.ringSlots = mRingSlots;
+    mLastFrame.hdrShoulder = false;
 
     vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
     vkResetFences(mDevice, 1, &mInFlightFence);
@@ -3186,6 +3190,7 @@ bool VulkanRawPipeline::stackFinish() {
     if (s.gpu) {
         if (!mGpuMerge.resolve(mLastFrame.slot)) return false;
         mForceSingleFrame.store(true);
+        mLastFrame.hdrShoulder = (s.mode == 4);
         LOGI("Stack finish mode %d, %d frames merged on the GPU into slot %u", s.mode, s.frames, mLastFrame.slot);
         return true;
     }
@@ -3234,6 +3239,7 @@ bool VulkanRawPipeline::stackFinish() {
         }
     });
     mForceSingleFrame.store(true);
+    mLastFrame.hdrShoulder = (s.mode == 1);
     LOGI("Stack finish mode %d, %d frames merged into slot %u", s.mode, s.frames, mLastFrame.slot);
     return true;
 }

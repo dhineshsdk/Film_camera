@@ -159,7 +159,7 @@ layout(push_constant) uniform PushConstants {
     float u_halation_strength; // 96
     float u_exposure_scale;    // 100
     uint u_cam_matrix_idx;     // 104 (0=Wide, 1=Front, 2=UW, 3=Tele)
-    uint u_packed_ring_info;   // 108 (bits 0..3 slot, 4..7 ring slots, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave)
+    uint u_packed_ring_info;   // 108 (bits 0..3 slot, 4..7 ring slots, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave, 22 HDR shoulder)
     uint u_level;              // 112 PYRAMID destination level (1..5)
     uint u_flags;              // 116 FLAG_*
     uint u_reserved0;          // 120 BOKEH (depth): first row of the band
@@ -214,9 +214,21 @@ float rawDN(int x, int y, uint slot) {
     return float(val16);
 }
 
+// HDR merges (Stage A3) store radiance above 0.6 of range through a shoulder that reaches 0.98;
+// PREP undoes it (Stage B2) so the film shoulder and halation see the real highlight values,
+// up to about 2x the sensor clip.
+const float HDR_CLIP_SCALE = 2.0;
+bool hdrShoulder() { return ((u_packed_ring_info >> 22u) & 1u) != 0u; }
+float hdrUnshoulder(float x) {
+    if (x <= 0.6) return x;
+    float t = min((x - 0.6) / 0.38, 0.9868);   // 0.975 of range: the top of what was merged
+    return 0.6 - 0.38 * log(1.0 - t);
+}
+
 float rawNorm(int x, int y, uint slot) {
     float bl = f_noise.z;
-    return (rawDN(x, y, slot) - bl) / max(u_white_level - bl, 1.0);
+    float v = (rawDN(x, y, slot) - bl) / max(u_white_level - bl, 1.0);
+    return hdrShoulder() ? hdrUnshoulder(v) : v;
 }
 
 // Forward GAT for var(x) = S*x + O (Camera2 SENSOR_NOISE_PROFILE convention):
@@ -558,6 +570,7 @@ void stageIsp() {
                          0.5 * (lscGainAt(pos, 1u) + lscGainAt(pos, 2u)),
                          lscGainAt(pos, 3u));
     }
+    if (hdrShoulder()) clipLevel *= HDR_CLIP_SCALE;
     vec3 clipFrac = camRgb / (clipLevel * 0.985);
     bool gClipped = clipFrac.g >= 1.0;
 
@@ -1397,6 +1410,9 @@ void stageFilm() {
     vec3 halSrc = f_halW.x * max(m1 - thr, 0.0) + f_halW.y * max(m2 - thr, 0.0)
                 + f_halW.z * max(m3 - thr, 0.0) + f_halW.w * max(m4 - thr, 0.0)
                 + f_halW2.x * max(m5 - thr, 0.0);
+    // Unclipped HDR highlights (B2) can sit far over the threshold: a soft cap keeps a street lamp's
+    // ring from swamping the frame while still glowing more than a clipped one.
+    halSrc = halSrc / (1.0 + 0.5 * halSrc);
     if (f_optics.y > 0.0) {
         const mat3 M_hal = transpose(mat3(
             1.35, 0.12, 0.00,

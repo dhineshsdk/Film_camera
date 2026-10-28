@@ -155,3 +155,12 @@ Same branch. New debug command `--es cmd iso --ei iso 800` (0 = auto) fixes the 
 1. **Grey card, per lens.** Grey card (or matte grey cardboard) filling the frame, slightly out of focus, even daylight, phone resting. For each lens: `.\tools\a5_shoot.ps1 -Kind grey -Lens 0` (then 2, 6, 1). About 30 s per lens.
 2. **White wall, per lens.** A plain white wall or paper, even light, filling the frame: `.\tools\a5_shoot.ps1 -Kind white -Lens 0` (then 2, 6, 1).
 3. **Fit.** `python tools\a5_calibrate.py calib`. Pass: it prints S and O per ISO and lens and the corner colour error per lens; send me `calib\a5_calibration.json` (or leave the `calib` folder in the Camera-App folder). The front camera should show the largest corner colour error (the magenta corners).
+
+## Stage B2: highlights and halation per stock
+
+Same branch. HDR shots now hand their real highlight values (up to about 2x the sensor clip) to the film stage instead of the rolled-off RAW, so the film shoulder shapes them; a soft cap keeps halation from exploding on lamps. Stocks without an anti-halation layer (CineStill 50D, 400D, 800T, 850D, BwXX; strength 0.3 and up) now spread their ring wider (800T about 1.7x), not only brighter. Normal (non-HDR) shots only see the wider CineStill ring.
+
+1. **Street lamps, CineStill 800T vs Portra 400.** Night street with lamps, HDR on. Pass: 800T shows a wide red-orange glow around each lamp; Portra shows almost none; neither shows a hard white disc with a cut-off edge.
+2. **Sky in HDR.** Daylight HDR with a bright sky on Portra 400 and Velvia. Pass: the sky holds colour and gradation into the bright parts (no flat white patch, no grey or cyan cast near the sun).
+3. **No change in plain shots.** A normal daytime shot on Portra 400 looks the same as before B2.
+4. **Look strength slider.** The darkroom halation slider still scales the glow from none to strong.
