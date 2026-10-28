@@ -134,3 +134,14 @@ Same branch. When a shot would still be underexposed at the slowest live shutter
 3. **Live view during the shot.** Pass: the preview keeps moving during `Hold still` (it may flicker brighter for a moment); the shutter re-enables afterwards.
 4. **Not triggered in normal light.** Daylight and indoor shots never log `Slow still`.
 5. **Off switch.** With `slowstill` off, the same Ektar shot falls back to the A3 night burst (darker), proving the switch works.
+
+## Stage A6: metering v3 (faces and shadows)
+
+Same branch. Metering now uses the camera's own face detector: the largest face is metered to land about 0.4 stop over mid-grey and counts 65 percent against the matrix. With automerge on, scenes that are mostly deep shadow with nothing clipped get a third of a stop more light. The highlight guard and the slow, steady loop are unchanged. Logcat at camera open: `Face metering: HAL face detect on` (or `no HAL face detect`). Off switch: `--es cmd facemeter --ez on false`.
+
+1. **Backlit portrait.** A person in front of a bright window, rear wide lens, no exposure compensation. Pass: the face is properly exposed (not a silhouette) with facemeter on; with it off, the face is clearly darker.
+2. **Face in the dark.** A face lit by a phone screen in a dark room. Pass: the face is not blown out.
+3. **Selfie.** Front camera, outdoors with sky behind. Pass: the face is exposed correctly.
+4. **No face.** Landscape and street scenes look the same as before (within a third of a stop).
+5. **Window interior (golden scene).** A room with a bright window and no people. Pass: the room is lighter than before A6 if it is mostly dark and the window does not clip more than before.
+6. **Stability.** The exposure does not pump when a face enters or leaves the frame (changes settle within about a second).

@@ -2196,6 +2196,27 @@ float VulkanRawPipeline::renderRawFrame(
                     }
                     mMeterZones[25].store(total ? static_cast<float>(clipped) / static_cast<float>(total) : 0.0f);
                 }
+                // Face mean (Stage A6) over the largest face the HAL found, in normalized sensor
+                // coordinates; -1 when there is none.
+                {
+                    float f[4] = {mFaceRect[0].load(), mFaceRect[1].load(), mFaceRect[2].load(), mFaceRect[3].load()};
+                    float faceMean = -1.0f;
+                    if (f[2] > f[0] && f[3] > f[1]) {
+                        const int x0 = std::clamp(static_cast<int>(f[0] * width), 0, width - 1);
+                        const int x1 = std::clamp(static_cast<int>(f[2] * width), x0 + 1, width);
+                        const int y0 = std::clamp(static_cast<int>(f[1] * height), 0, height - 1);
+                        const int y1 = std::clamp(static_cast<int>(f[3] * height), y0 + 1, height);
+                        const int step = std::max(2, ((x1 - x0) / 48) & ~1);
+                        double fs = 0.0; uint32_t fn = 0;
+                        for (int y = y0; y < y1; y += step) {
+                            const uint16_t* row = px + static_cast<size_t>(y) * static_cast<size_t>(stride);
+                            for (int x = x0; x < x1; x += step) { fs += row[x]; fn++; }
+                        }
+                        float blk = std::max(mBlackLevel.load(), 0.0f);
+                        if (fn > 0) faceMean = std::max((static_cast<float>(fs / fn) - blk) / std::max(whiteLevel - blk, 1.0f), 0.0f);
+                    }
+                    mMeterZones[26].store(faceMean);
+                }
             }
             AHardwareBuffer_unlock(ahb, nullptr);
         } else {
@@ -3456,9 +3477,15 @@ Java_com_s24film_camera_VulkanRenderer_nativeGetLastRawMean(JNIEnv* /*env*/, job
 JNIEXPORT void JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeGetMeterZones(JNIEnv* env, jobject /*thiz*/, jfloatArray out) {
     if (!gPipeline || !out || env->GetArrayLength(out) < 26) return;
-    float z[26];
+    float z[VulkanRawPipeline::kMeterValues];
     gPipeline->meterZones(z);
-    env->SetFloatArrayRegion(out, 0, 26, z);
+    env->SetFloatArrayRegion(out, 0, std::min<jsize>(env->GetArrayLength(out), VulkanRawPipeline::kMeterValues), z);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetFaceRect(JNIEnv* /*env*/, jobject /*thiz*/,
+    jfloat x0, jfloat y0, jfloat x1, jfloat y1) {
+    if (gPipeline) gPipeline->setFaceRect(x0, y0, x1, y1);
 }
 
 JNIEXPORT jboolean JNICALL

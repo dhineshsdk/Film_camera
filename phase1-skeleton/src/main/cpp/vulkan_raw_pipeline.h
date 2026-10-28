@@ -202,7 +202,13 @@ public:
     void setPortraitMode(bool on) { mPortraitMode.store(on); }
     void setVirtualAperture(float fNumber) { mVirtualFNumber.store(std::clamp(fNumber, 0.95f, 22.0f)); }
     float lastRawMean() const { return mLastRawMean.load(); }
-    void meterZones(float* out26) const { for (int i = 0; i < 26; ++i) out26[i] = mMeterZones[i].load(); }
+    // 25 zone means, the clipped fraction, then the face mean (-1 = no face).
+    static constexpr int kMeterValues = 27;
+    void meterZones(float* out) const { for (int i = 0; i < kMeterValues; ++i) out[i] = mMeterZones[i].load(); }
+    // Largest face, normalized sensor coordinates; x1 <= x0 clears it.
+    void setFaceRect(float x0, float y0, float x1, float y1) {
+        mFaceRect[0].store(x0); mFaceRect[1].store(y0); mFaceRect[2].store(x1); mFaceRect[3].store(y1);
+    }
     bool setEncoderWindow(ANativeWindow* encoderWindow);
     // Applies to the next setEncoderWindow: true = BT.2020 HLG (10-bit when the surface allows it).
     void setEncoderHlg(bool hlg) { mEncoderHlgRequested.store(hlg); }
@@ -488,7 +494,8 @@ private:
     std::atomic<float> mNoiseO{0.0f};
     std::atomic<float> mBlackLevel{0.0f};
     std::atomic<float> mLastRawMean{0.0f};
-    std::atomic<float> mMeterZones[26];   // 5x5 zone means (0..1 of range) + clipped-pixel fraction
+    std::atomic<float> mMeterZones[27];   // 5x5 zone means (0..1 of range), clipped-pixel fraction, face mean
+    std::atomic<float> mFaceRect[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     // CCT-interpolated ForwardMatrix from CameraCharacteristics (Java), row-major.
     std::mutex mFmMutex;

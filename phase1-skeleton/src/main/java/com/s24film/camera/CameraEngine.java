@@ -3,6 +3,7 @@ package com.s24film.camera;
 import android.content.Context;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
+import android.hardware.camera2.CameraMetadata;
 import android.graphics.SurfaceTexture;
 import android.hardware.HardwareBuffer;
 import android.hardware.camera2.CameraCaptureSession;
@@ -478,7 +479,7 @@ public class CameraEngine {
 
     // Centre-weighted 5x5 matrix: the whole frame counts (a bright sky pulls exposure down), the middle
     // counts most, and a clipped-pixel fraction above 1% lowers the exposure further so highlights keep detail.
-    private final float[] zoneBuf = new float[26];
+    private final float[] zoneBuf = new float[27];
     private static final float[] ZONE_W = {
         1, 1, 1, 1, 1,
         1, 2, 2, 2, 1,
@@ -494,7 +495,52 @@ public class CameraEngine {
         if (m <= 1e-5f) return centreMean;
         float clip = zoneBuf[25];
         if (clip > 0.01f) m *= 1f + Math.min(2.0f, 8f * (clip - 0.01f));   // up to ~1.6 stops lower
+        // Stage A6. Shadow protection: with every photo merged (A3) the shadows can take a third of
+        // a stop more light when most of the frame is deep shadow and nothing clips.
+        int dark = 0;
+        for (int i = 0; i < 25; i++) if (zoneBuf[i] < 0.02f) dark++;
+        if (autoMerge && dark >= 8 && clip < 0.005f) m *= 0.8f;
+        // Face priority: a face the HAL found lands about 0.4 stop over mid-grey (skin), weighted
+        // 65 / 35 against the matrix, so a backlit person is not a silhouette and a face in the dark
+        // is not blown out.
+        float face = zoneBuf[26];
+        if (faceMetering && face > 1e-4f && System.nanoTime() - faceSeenNs < FACE_HOLD_NS) {
+            m = 0.35f * m + 0.65f * (face / FACE_OVER_GREY);
+        }
         return m;
+    }
+
+    // Stage A6 face-priority metering, from the HAL's own face detector (no extra model).
+    private volatile boolean faceMetering = true;
+    public void setFaceMetering(boolean on) { faceMetering = on; if (!on) VulkanRenderer.nativeSetFaceRect(0f, 0f, 0f, 0f); }
+    private static final float FACE_OVER_GREY = 1.32f;            // +0.4 EV
+    private static final long FACE_HOLD_NS = 600_000_000L;        // keep the last face this long
+    private volatile long faceSeenNs = 0L;
+    private Rect faceArray = null;                                // coordinate space of the face rects
+
+    private void onFaces(android.hardware.camera2.params.Face[] faces) {
+        Rect a = faceArray;
+        if (!faceMetering || a == null || a.width() <= 0 || a.height() <= 0) return;
+        android.hardware.camera2.params.Face best = null;
+        long bestArea = 0;
+        if (faces != null) {
+            for (android.hardware.camera2.params.Face f : faces) {
+                Rect r = f.getBounds();
+                long area = (long) r.width() * r.height();
+                if (f.getScore() >= 30 && area > bestArea) { best = f; bestArea = area; }
+            }
+        }
+        if (best == null) {
+            if (System.nanoTime() - faceSeenNs > FACE_HOLD_NS) VulkanRenderer.nativeSetFaceRect(0f, 0f, 0f, 0f);
+            return;
+        }
+        Rect r = best.getBounds();
+        // Inner 60% of the box: skin, not hair or background.
+        float cx = r.exactCenterX() - a.left, cy = r.exactCenterY() - a.top;
+        float hw = r.width() * 0.3f, hh = r.height() * 0.3f;
+        VulkanRenderer.nativeSetFaceRect((cx - hw) / a.width(), (cy - hh) / a.height(),
+            (cx + hw) / a.width(), (cy + hh) / a.height());
+        faceSeenNs = System.nanoTime();
     }
 
     /** ISO x seconds (exposure index x shutter) that renders the reference brightness, or -1 if not ready. */
@@ -673,6 +719,16 @@ public class CameraEngine {
         }
         currentIso = iso;
         currentExposureNs = Math.max(minShutterNs, Math.min(maxShutterNs, t));
+    }
+
+    private void enableFaceDetect(CaptureRequest.Builder builder) {
+        faceArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+        int[] modes = characteristics.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES);
+        boolean simple = false;
+        if (modes != null) for (int m : modes) if (m == CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE) simple = true;
+        if (simple && faceMetering) builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE);
+        VulkanRenderer.nativeSetFaceRect(0f, 0f, 0f, 0f);
+        Log.i(TAG, "Face metering: " + (simple ? "HAL face detect on" : "no HAL face detect"));
     }
 
     private void applyManualExposure() {
@@ -1697,6 +1753,7 @@ public class CameraEngine {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                 engine.applyStabilization(builder);
+                engine.enableFaceDetect(builder);
 
                 engine.previewBuilder = builder;
                 if (engine.manualFocusDiopters >= 0f) {
@@ -1757,6 +1814,7 @@ public class CameraEngine {
             Long exp = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
             if (iso != null) engine.resultIso = iso;
             if (exp != null) engine.resultExposureNs = exp;
+            engine.onFaces(result.get(CaptureResult.STATISTICS_FACES));
             Long ts = result.get(CaptureResult.SENSOR_TIMESTAMP);
             if (ts != null && iso != null && exp != null) engine.recordFrameMeta(ts, iso, exp);
             Float focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE);

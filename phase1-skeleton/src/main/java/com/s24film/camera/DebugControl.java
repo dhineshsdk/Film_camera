@@ -120,6 +120,9 @@ final class DebugControl extends BroadcastReceiver {
             case "slowstill":   // Stage A4: long still frames when the live shutter runs out (--ez on true|false)
                 engine.setSlowStill(intent.getBooleanExtra("on", true));
                 break;
+            case "facemeter":   // Stage A6: face-priority metering (--ez on true|false)
+                engine.setFaceMetering(intent.getBooleanExtra("on", true));
+                break;
             case "automerge":   // Stage A3: merge every photo (--ez on true|false)
                 engine.setAutoMerge(intent.getBooleanExtra("on", true));
                 break;

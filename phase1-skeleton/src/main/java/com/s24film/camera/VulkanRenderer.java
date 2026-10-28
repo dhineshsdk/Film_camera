@@ -40,6 +40,9 @@ public class VulkanRenderer {
     public static native float nativeGetLastRawMean();
     /** 25 zone means (5x5, row-major, 0..1 of range) then the clipped-pixel fraction. */
     public static native void nativeGetMeterZones(float[] out26);
+    // Stage A6: largest face in normalized sensor coordinates (x1 <= x0 clears); its mean is out26[26]
+    // when the array has 27 entries (-1 = no face).
+    public static native void nativeSetFaceRect(float x0, float y0, float x1, float y1);
     public static native boolean nativeSetEncoderSurface(Surface encoderSurface);
     // Call before nativeSetEncoderSurface: true = encoder gets BT.2020 HLG (10-bit when the surface allows).
     public static native void nativeSetEncoderHlg(boolean hlg);
