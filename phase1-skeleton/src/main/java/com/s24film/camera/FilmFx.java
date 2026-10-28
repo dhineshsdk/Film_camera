@@ -13,6 +13,7 @@ final class FilmFx {
     private Vibrator vibrator;
     private int sShutterOpen, sShutterClose, sAdvance, sDetent, sIris, sRewind, sClick;
     private boolean enabled = true;
+    private boolean sound = true;      // Display tab: sounds off keeps the haptics
 
     FilmFx(Context context) {
         try {
@@ -40,9 +41,10 @@ final class FilmFx {
     }
 
     void setEnabled(boolean on) { enabled = on; }
+    void setSound(boolean on) { sound = on; }
 
     private void play(int id, float vol) {
-        if (pool != null && enabled && id != 0) pool.play(id, vol, vol, 1, 0, 1.0f);
+        if (pool != null && enabled && sound && id != 0) pool.play(id, vol, vol, 1, 0, 1.0f);
     }
 
     private void buzz(int effect) {

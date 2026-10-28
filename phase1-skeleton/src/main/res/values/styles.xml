@@ -18,17 +18,18 @@
         <item name="android:textAllCaps">false</item>
         <item name="android:stateListAnimator">@null</item>
     </style>
-    <!-- Film stock labels: plain text, yellow when active (like iOS Photographic Styles) -->
+    <!-- Film strip: plain labels, the active stock a filled gold pill -->
     <style name="StockLabel">
         <item name="android:layout_width">wrap_content</item>
-        <item name="android:layout_height">36dp</item>
+        <item name="android:layout_height">30dp</item>
+        <item name="android:layout_marginEnd">2dp</item>
         <item name="android:minWidth">0dp</item>
         <item name="android:minHeight">0dp</item>
         <item name="android:paddingStart">12dp</item>
         <item name="android:paddingEnd">12dp</item>
         <item name="android:paddingTop">0dp</item>
         <item name="android:paddingBottom">0dp</item>
-        <item name="android:background">@null</item>
+        <item name="android:background">@drawable/bg_stock</item>
         <item name="android:textColor">@color/stock_text</item>
         <item name="android:textSize">13sp</item>
         <item name="android:fontFamily">sans-serif-medium</item>
@@ -54,15 +55,14 @@
     <style name="ModeLabel">
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">wrap_content</item>
-        <item name="android:paddingStart">16dp</item>
-        <item name="android:paddingEnd">16dp</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
         <item name="android:paddingTop">6dp</item>
         <item name="android:paddingBottom">6dp</item>
         <item name="android:textColor">@color/mode_text</item>
-        <item name="android:textSize">14sp</item>
-        <item name="android:textStyle">bold</item>
+        <item name="android:textSize">13sp</item>
         <item name="android:fontFamily">sans-serif-medium</item>
-        <item name="android:letterSpacing">0.08</item>
+        <item name="android:letterSpacing">0.14</item>
     </style>
     <style name="SliderLabel">
         <item name="android:layout_width">wrap_content</item>
@@ -116,5 +116,38 @@
         <item name="android:progressTint">@color/accent</item>
         <item name="android:thumbTint">#FFFFFFFF</item>
         <item name="android:progressBackgroundTint">#55FFFFFF</item>
+    </style>
+    <!-- Quick bar on the top band: round icon toggles and short value chips -->
+    <style name="QuickIcon" parent="IconBtn">
+        <item name="android:layout_width">40dp</item>
+        <item name="android:layout_height">40dp</item>
+        <item name="android:padding">9dp</item>
+        <item name="android:tint">@color/icon_tint</item>
+    </style>
+    <style name="QuickChip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">32dp</item>
+        <item name="android:minWidth">44dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:paddingStart">11dp</item>
+        <item name="android:paddingEnd">11dp</item>
+        <item name="android:paddingTop">0dp</item>
+        <item name="android:paddingBottom">0dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:background">@drawable/bg_quick</item>
+        <item name="android:textColor">@color/quick_text</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:drawableTint">@color/quick_text</item>
+        <item name="android:drawablePadding">4dp</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+    <!-- Flexible gap between quick-bar items -->
+    <style name="QuickGap">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">1dp</item>
+        <item name="android:layout_weight">1</item>
     </style>
 </resources>

@@ -13,6 +13,9 @@ import android.os.BatteryManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.HapticFeedbackConstants;
@@ -110,10 +113,11 @@ public class MainActivity extends Activity implements
     private TextView tvShutterStatus;
     private TextView tvFilm, tvReadout;
     private View settingsSheet, sheetScrim;
-    private ImageButton btnSettings, btnTune;
-    private final TextView[] sheetTabs = new TextView[6];   // Tune, Film, Camera, Display, Debug, Pro
-    private final View[] sheetPages = new View[6];
-    private int sheetTab = 0;
+    private ImageButton btnSettings, btnFlash, btnPortrait;
+    private static final int TAB_LOOK = 0, TAB_CAPTURE = 1, TAB_DISPLAY = 2, TAB_DEBUG = 3;
+    private final TextView[] sheetTabs = new TextView[4];   // Look, Capture, Display, Debug
+    private final View[] sheetPages = new View[4];
+    private int sheetTab = TAB_LOOK;
     private boolean debugMenu = false;   // Debug tab unlocked (long-press the sheet title)
     private boolean showStats = false;   // pipeline stats pill
     private Button btnStats;
@@ -121,12 +125,25 @@ public class MainActivity extends Activity implements
     private SeekBar seekEv, seekGrain, seekHalation;
     private Button btn06x, btn1x, btn3x, btnFront, btnShutter, btnRecordVideo;
     private View viewShutterFlash;
-    private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnFlash, btnWb, btnRotate, btnPortrait;
+    private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnWb, btnRotate;
+    private Button btnTimer, btnGrid, btnSounds;
+    private ViewfinderHud vfHud;
+    private int timerSec = 0;          // self-timer: 0, 3 or 10 s
+    private int timerLeft = 0;         // > 0 while counting down
+    private int timerToken = 0;
+    private boolean gridOn = false;
+    private boolean soundsOn = true;
+    private String lastReadout = "";
+    private long lastBatteryReadMs = 0;
+    private float lastBatteryTempC = 0f;
     private final Button[] stockButtons = new Button[12];
     private HorizontalScrollView stripStocks;
     private final Button[] formatButtons = new Button[4];
     private Button btnSaveRaw;
-    private TextView modePhoto, modeVideo;
+    private TextView modePhoto, modeVideo, modePro;
+    // Capture modes on the mode strip, left to right: PRO | PHOTO | VIDEO
+    static final int MODE_PHOTO = 0, MODE_VIDEO = 1, MODE_PRO = 2;
+    private int captureMode = MODE_PHOTO;
     private FilmUi filmUi;
     private boolean testRunning = false;
     private int testStep = 0;
@@ -141,7 +158,7 @@ public class MainActivity extends Activity implements
     private final Button[] themeButtons = new Button[3];
     private View topBar, bottomBar;
     private FrameLayout filmRoot;
-    private static final long[] SPEED_NS = {0L, 1000000L, 2000000L, 4000000L, 8000000L, 16666667L, 33333333L,
+    static final long[] SPEED_NS = {0L, 1000000L, 2000000L, 4000000L, 8000000L, 16666667L, 33333333L,
         66666667L, 125000000L, 250000000L, 500000000L, 1000000000L, -1L};
     private final Button[] pushButtons = new Button[6];   // -2 .. +3 stops
     private Button btnFilmIso, btnAutoGain, btnPushFix;
@@ -194,6 +211,18 @@ public class MainActivity extends Activity implements
             a.refreshReadout();
             Toast.makeText(a, "New roll: 36 exposures", Toast.LENGTH_SHORT).show();
         }
+        @Override public float currentEv() { return a.userEvStops; }
+        @Override public void onProEv(float stops) { a.setUserEv(stops); }
+    }
+
+    /** Viewfinder gestures: tap point, drag-to-expose, pinch between rear lenses. */
+    static final class HudHost implements ViewfinderHud.Host {
+        private final MainActivity a;
+        HudHost(MainActivity a) { this.a = a; }
+        @Override public void onTapPoint(float u, float v) { DepthBokeh.setFocusPoint(u, v); }
+        @Override public float currentEv() { return a.userEvStops; }
+        @Override public void onEvDrag(float stops) { a.setUserEv(stops); }
+        @Override public void onPinchLens(int dir) { a.stepRearLens(dir); }
     }
     private int magFeetRemaining = 400;
     private int magFramesRemaining = 0;
@@ -210,8 +239,9 @@ public class MainActivity extends Activity implements
 
         surfaceView = findViewById(R.id.camera_surface);
         viewShutterFlash = findViewById(R.id.view_shutter_flash);
-        // A tap on the viewfinder picks the depth-bokeh focus point.
-        surfaceView.setOnTouchListener(new FocusTapListener());
+        // Taps, drags and pinches on the preview go to the viewfinder HUD (focus point, exposure, lens).
+        vfHud = findViewById(R.id.vf_hud);
+        vfHud.host = new HudHost(this);
         hudOverlay = findViewById(R.id.hud_overlay);
         tvShutterStatus = findViewById(R.id.tv_shutter_status);
         tvFilm = findViewById(R.id.btn_film);
@@ -219,11 +249,10 @@ public class MainActivity extends Activity implements
         settingsSheet = findViewById(R.id.settings_sheet);
         sheetScrim = findViewById(R.id.sheet_scrim);
         btnSettings = findViewById(R.id.btn_settings);
-        btnTune = findViewById(R.id.btn_tune);
         btnStats = findViewById(R.id.btn_stats);
-        int[] tabIds = {R.id.tab_tune, R.id.tab_film, R.id.tab_camera, R.id.tab_display, R.id.tab_debug, R.id.tab_pro};
-        int[] pageIds = {R.id.page_tune, R.id.page_film, R.id.page_camera, R.id.page_display, R.id.page_debug, R.id.page_pro};
-        for (int i = 0; i < 6; i++) {
+        int[] tabIds = {R.id.tab_look, R.id.tab_capture, R.id.tab_display, R.id.tab_debug};
+        int[] pageIds = {R.id.page_look, R.id.page_capture, R.id.page_display, R.id.page_debug};
+        for (int i = 0; i < sheetTabs.length; i++) {
             sheetTabs[i] = findViewById(tabIds[i]);
             sheetTabs[i].setOnClickListener(this);
             sheetPages[i] = findViewById(pageIds[i]);
@@ -252,6 +281,12 @@ public class MainActivity extends Activity implements
         btnFlash = findViewById(R.id.btn_flash);
         btnWb = findViewById(R.id.btn_wb);
         btnRotate = findViewById(R.id.btn_rotate);
+        btnTimer = findViewById(R.id.btn_timer);
+        btnGrid = findViewById(R.id.btn_grid);
+        btnSounds = findViewById(R.id.btn_sounds);
+        btnTimer.setOnClickListener(this);
+        btnGrid.setOnClickListener(this);
+        btnSounds.setOnClickListener(this);
 
         int[] stockBtnIds = {
             R.id.btn_stock_0, R.id.btn_stock_1, R.id.btn_stock_2, R.id.btn_stock_3,
@@ -266,8 +301,6 @@ public class MainActivity extends Activity implements
 
         lookCatalog = new LookCatalog(this);
         stockBrowser = new StockBrowser(this, lookCatalog, new LookPicked(this));
-        View browse = findViewById(R.id.btn_stock_browse);
-        if (browse != null) browse.setOnClickListener(this);
         int last = lookCatalog.lastUsed();
         if (last >= 0 && last < lookCatalog.looks.size()) pickedLookIndex = last;
 
@@ -295,22 +328,24 @@ public class MainActivity extends Activity implements
         findViewById(R.id.btn_test_series).setOnClickListener(this);
         modePhoto = findViewById(R.id.mode_photo);
         modeVideo = findViewById(R.id.mode_video);
+        modePro = findViewById(R.id.mode_pro);
         btnGallery = findViewById(R.id.btn_gallery);
         modePhoto.setOnClickListener(this);
         modeVideo.setOnClickListener(this);
+        modePro.setOnClickListener(this);
         btnGallery.setOnClickListener(this);
         findViewById(R.id.mode_strip).setOnTouchListener(new ModeSwipeListener(this));
         btnSaveRaw.setOnClickListener(this);
         tvFilm.setOnClickListener(this);
         btnSettings.setOnClickListener(this);
-        btnTune.setOnClickListener(this);
         btnStats.setOnClickListener(this);
         sheetScrim.setOnClickListener(this);
         findViewById(R.id.btn_sheet_done).setOnClickListener(this);
         findViewById(R.id.tv_sheet_title).setOnLongClickListener(this);
         // Icons and round buttons turn to stay upright in a landscape grip; text rows stay put.
         rotatingViews = new View[] {
-            btn06x, btn1x, btn3x, btnFront, btnShutter, btnRecordVideo, btnSettings, btnTune, btnGallery
+            btn06x, btn1x, btn3x, btnFront, btnShutter, btnRecordVideo, btnSettings, btnGallery,
+            btnFlash, btnPortrait, btnTimer
         };
         surfaceView.getHolder().addCallback(this);
 
@@ -353,14 +388,19 @@ public class MainActivity extends Activity implements
         }
         fx = new FilmFx(this);
         filmUi = new FilmUi(this, filmRoot, new FilmCallbacks(this), fx);
-        proPanel = new ProPanel(this, cameraEngine, filmUi, new NewRoll(this));
+        proPanel = new ProPanel(this, cameraEngine, filmUi, fx, new NewRoll(this));
         videoPanel = new VideoPanel(this, cameraEngine, new VideoHost(this));
-        uiTheme = getSharedPreferences("ui", 0).getInt("theme", 0);
-        debugMenu = getSharedPreferences("ui", 0).getBoolean("debug", false);
-        sheetTabs[4].setVisibility(debugMenu ? View.VISIBLE : View.GONE);
-        DepthBokeh.setPortrait(getSharedPreferences("ui", 0).getBoolean("portrait", false));
-        btnPortrait.setText(DepthBokeh.portrait ? "Portrait: On" : "Portrait: Off");
-        setMode(false);
+        android.content.SharedPreferences prefs = getSharedPreferences("ui", 0);
+        uiTheme = prefs.getInt("theme", 0);
+        debugMenu = prefs.getBoolean("debug", false);
+        sheetTabs[TAB_DEBUG].setVisibility(debugMenu ? View.VISIBLE : View.GONE);
+        DepthBokeh.setPortrait(prefs.getBoolean("portrait", false));
+        timerSec = prefs.getInt("timer", 0);
+        gridOn = prefs.getBoolean("grid", false);
+        soundsOn = prefs.getBoolean("sounds", true);
+        fx.setSound(soundsOn);
+        vfHud.setGrid(gridOn);
+        setCaptureMode(prefs.getInt("mode", MODE_PHOTO) == MODE_PRO ? MODE_PRO : MODE_PHOTO);
         applyTheme(uiTheme);
         loadLatestThumbnail();
         checkPermissions();
@@ -476,9 +516,35 @@ public class MainActivity extends Activity implements
         }
         boolean sheetOpen = settingsSheet.getVisibility() == View.VISIBLE;
         findViewById(R.id.group_video).setVisibility(videoMode ? View.VISIBLE : View.GONE);
-        btnSettings.setSelected(sheetOpen && sheetTab != 0);
-        btnTune.setSelected(sheetOpen && sheetTab == 0);
+        btnSettings.setSelected(sheetOpen);
+        btnGrid.setSelected(gridOn);
+        btnGrid.setText(gridOn ? "Grid: 3×3" : "Grid: Off");
+        btnSounds.setSelected(soundsOn);
+        btnSounds.setText(soundsOn ? "Sounds: On" : "Sounds: Off");
+        refreshQuickBar();
     }
+
+    // Quick bar on the top band. Video hides the still-only items (capture mode, timer, portrait).
+    private void refreshQuickBar() {
+        int fm = cameraEngine != null ? cameraEngine.getFlashMode() : 1;
+        btnFlash.setImageResource(fm == 0 ? R.drawable.ic_flash_off : (fm == 2 ? R.drawable.ic_flash_on : R.drawable.ic_flash_auto));
+        btnFlash.setSelected(fm == 2);
+        btnFlash.setContentDescription("Flash: " + FLASH_LABELS[fm]);
+        btnStack.setText(STACK_CHOICES[stackChoice]);
+        btnStack.setSelected(stackChoice != 0);
+        btnGate.setText(GATE_SHORT[cinemaGate]);
+        btnGate.setSelected(cinemaGate != 0);
+        btnTimer.setText(timerSec > 0 ? timerSec + "s" : "");
+        btnTimer.setSelected(timerSec > 0);
+        btnPortrait.setSelected(DepthBokeh.portrait);
+        int still = videoMode ? View.GONE : View.VISIBLE;
+        btnStack.setVisibility(still);
+        btnTimer.setVisibility(still);
+        btnPortrait.setVisibility(still);
+    }
+
+    private static final String[] FLASH_LABELS = {"Off", "Auto", "On"};
+    private static final String[] GATE_SHORT = {"3:4", "16:9", "2.39"};
 
     // Rotates the compact controls and the info pills so they read upright in a landscape grip.
     private void applyUiRotation() {
@@ -515,12 +581,33 @@ public class MainActivity extends Activity implements
         } else {
             sb.append(String.format(Locale.US, "   %02d/36 \u00b7 %d left", rollFrameCounter, 37 - rollFrameCounter));
         }
-        tvReadout.setText(sb.toString());
+        String plain = sb.toString();
+        if (plain.equals(lastReadout)) return;   // called every ~120 ms: skip relayout when nothing moved
+        lastReadout = plain;
+        tvReadout.setText(styleReadout(plain));
+    }
+
+    // Labels (A/M, ISO, EI, left, OIS) dim, values bright, manual and REC in gold.
+    private static CharSequence styleReadout(String t) {
+        SpannableStringBuilder b = new SpannableStringBuilder(t);
+        String[] dim = {"ISO", "EI", "left", "OIS", "/36", "\u00b7", "ROT"};
+        for (String k : dim) {
+            int at = t.indexOf(k);
+            while (at >= 0) {
+                b.setSpan(new ForegroundColorSpan(0x8CFFFFFF), at, at + k.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                at = t.indexOf(k, at + k.length());
+            }
+        }
+        if (t.startsWith("M ")) b.setSpan(new ForegroundColorSpan(0xFFFFC845), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        else b.setSpan(new ForegroundColorSpan(0x8CFFFFFF), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        int rec = t.indexOf("\u25cf REC");
+        if (rec >= 0) b.setSpan(new ForegroundColorSpan(0xFFFF453A), rec, rec + 5, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return b;
     }
 
     // Low-light banner: shows when the film-exposure logic is underexposing.
     private void updateExposureUi() {
-        refreshFilmData();
+        if (uiTheme != 0) refreshFilmData();   // the film-body data strip is only on screen in the film themes
         boolean show = lastUnderEv > 0.2f;
         if (show) {
             tvWarning.setText(String.format(Locale.US,
@@ -534,7 +621,7 @@ public class MainActivity extends Activity implements
     private void startTestSeries() {
         if (testRunning) return;
         if (videoRecorder != null && videoRecorder.isRecording()) return;
-        setMode(false);
+        setCaptureMode(MODE_PHOTO);
         testRunning = true;
         testStep = 0;
         cameraEngine.resetManualRotationOffset();   // a leftover ROT press turned a whole series sideways (issue 4)
@@ -649,10 +736,17 @@ public class MainActivity extends Activity implements
         uiTheme = t;
         getSharedPreferences("ui", 0).edit().putInt("theme", t).apply();
         boolean film = (t != 0);
+        if (film && captureMode == MODE_PRO) setCaptureMode(MODE_PHOTO);
+        if (film) cancelTimer();
         topBar.setVisibility(film ? View.GONE : View.VISIBLE);
         bottomBar.setVisibility(film ? View.GONE : View.VISIBLE);
         filmRoot.setVisibility(film ? View.VISIBLE : View.GONE);
-        if (film) filmUi.setTheme(t == 1 ? FilmUi.SLR : FilmUi.RF);
+        if (film) {
+            filmUi.setTheme(t == 1 ? FilmUi.SLR : FilmUi.RF);
+            new FilmCallbacks(this).onSpeed(filmUi.speedIndex());   // the speed dial owns the shutter here
+        } else if (captureMode != MODE_PRO) {
+            cameraEngine.setManualShutterNs(0L);                   // Modern PHOTO/VIDEO meter on auto
+        }
         // Modern: the sheet stops above the shutter row. Film themes: above the dials and pills.
         RelativeLayout.LayoutParams lp = (RelativeLayout.LayoutParams) settingsSheet.getLayoutParams();
         lp.bottomMargin = dpToPx(film ? 170 : 100);
@@ -788,7 +882,7 @@ public class MainActivity extends Activity implements
             b[index].performClick();
         }
 
-        @Override public void onMenu() { a.toggleSheet(1); }
+        @Override public void onMenu() { a.toggleSheet(a.sheetTab); }
 
         @Override public void onMode(boolean movie) {
             a.setMode(movie);
@@ -813,19 +907,42 @@ public class MainActivity extends Activity implements
         }
     }
 
-    // PHOTO / VIDEO: the shutter slot shows the photo button or the record button.
+    // Film themes only know STILL / MOVIE.
     private void setMode(boolean video) {
+        setCaptureMode(video ? MODE_VIDEO : MODE_PHOTO);
+    }
+
+    // PRO / PHOTO / VIDEO: the shutter slot shows the photo button or the record button, and PRO shows
+    // the pro bar (its manual values apply only while PRO is active).
+    private void setCaptureMode(int m) {
         if (videoRecorder != null && videoRecorder.isRecording()) return;
+        if (m != MODE_PHOTO) cancelTimer();
+        captureMode = m;
+        boolean video = (m == MODE_VIDEO);
         videoMode = video;
         if (cameraEngine != null) cameraEngine.setVideoMode(video);
         if (video) {
             if (videoPanel != null) videoPanel.apply();
             requestAudioPermissionOnce();
         }
-        modePhoto.setSelected(!video);
+        if (proPanel != null && proPanel.isActive() != (m == MODE_PRO)) proPanel.setActive(m == MODE_PRO);
+        modePhoto.setSelected(m == MODE_PHOTO);
         modeVideo.setSelected(video);
+        modePro.setSelected(m == MODE_PRO);
         btnShutter.setVisibility(video ? View.GONE : View.VISIBLE);
         btnRecordVideo.setVisibility(video ? View.VISIBLE : View.GONE);
+        if (m != MODE_VIDEO) getSharedPreferences("ui", 0).edit().putInt("mode", m).apply();
+        lastReadout = "";
+        refreshQuickBar();
+    }
+
+    // Position on the strip, left to right: PRO 0, PHOTO 1, VIDEO 2.
+    private static final int[] MODE_AT = {MODE_PRO, MODE_PHOTO, MODE_VIDEO};
+
+    private void stepMode(int dir) {
+        int at = (captureMode == MODE_PRO) ? 0 : (captureMode == MODE_PHOTO ? 1 : 2);
+        int next = Math.max(0, Math.min(2, at + dir));
+        if (next != at) setCaptureMode(MODE_AT[next]);
     }
 
     static class ModeSwipeListener implements View.OnTouchListener {
@@ -843,10 +960,10 @@ public class MainActivity extends Activity implements
             } else if (e.getAction() == MotionEvent.ACTION_UP) {
                 float dx = e.getX() - downX;
                 if (dx < -80f) {
-                    activity.setMode(true);
+                    activity.stepMode(1);
                     v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
                 } else if (dx > 80f) {
-                    activity.setMode(false);
+                    activity.stepMode(-1);
                     v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
                 }
             }
@@ -854,22 +971,68 @@ public class MainActivity extends Activity implements
         }
     }
 
-    private static final class FocusTapListener implements View.OnTouchListener {
-        @Override
-        public boolean onTouch(View v, MotionEvent e) {
-            if (e.getAction() == MotionEvent.ACTION_DOWN) return true;
-            if (e.getAction() == MotionEvent.ACTION_UP && v.getWidth() > 0 && v.getHeight() > 0) {
-                DepthBokeh.setFocusPoint(e.getX() / v.getWidth(), e.getY() / v.getHeight());
+    // Exposure from the Look tab slider, the viewfinder drag and the PRO EV dial all land here.
+    private void setUserEv(float stops) {
+        stops = Math.max(-2f, Math.min(2f, stops));
+        seekEv.setProgress(Math.round(stops * 10f) + 20);   // fires onProgressChanged, which pushes it native
+        if (proPanel != null && proPanel.isActive()) proPanel.refreshItems();
+    }
+
+    // Pinch on the viewfinder: out = longer rear lens, in = wider. The front camera is left alone.
+    private void stepRearLens(int dir) {
+        String[] ids = {"2", "0", "6"};
+        int at = "2".equals(currentCameraId) ? 0 : ("0".equals(currentCameraId) ? 1 : ("6".equals(currentCameraId) ? 2 : -1));
+        if (at < 0) return;
+        int next = Math.max(0, Math.min(2, at + dir));
+        if (next == at) return;
+        Button[] b = {btn06x, btn1x, btn3x};
+        b[next].performClick();
+    }
+
+    // Self-timer: the first shutter press starts the count on the viewfinder, a second press cancels it.
+    private void startTimer() {
+        timerToken++;
+        timerLeft = timerSec;
+        vfHud.setCountdown(timerLeft);
+        if (fx != null) fx.click();
+        mainHandler.postDelayed(new TimerTick(this, timerToken), 1000);
+    }
+
+    private void cancelTimer() {
+        if (timerLeft <= 0) return;
+        timerToken++;
+        timerLeft = 0;
+        vfHud.setCountdown(0);
+    }
+
+    static final class TimerTick implements Runnable {
+        private final MainActivity a;
+        private final int token;
+        TimerTick(MainActivity a, int token) { this.a = a; this.token = token; }
+        @Override public void run() {
+            if (token != a.timerToken || a.timerLeft <= 0) return;
+            a.timerLeft--;
+            a.vfHud.setCountdown(a.timerLeft);
+            if (a.timerLeft > 0) {
+                if (a.fx != null) a.fx.click();
+                a.mainHandler.postDelayed(this, 1000);
+            } else if (a.btnShutter.isEnabled()) {
+                a.capturePhoto();
             }
-            return false;
         }
     }
 
-    // Settings sheet: the tune button opens it on Tune, the gear on the last other tab. Pressing the
-    // button of the tab already showing closes it.
+    private void capturePhoto() {
+        triggerShutterFeedback();
+        showStatus("Developing " + activeLookLabel() + "…", true);
+        btnShutter.setEnabled(false);
+        cameraEngine.triggerCapture(activeFileTag(), this);
+    }
+
+    // Settings sheet: the gear (or the film-body MENU) opens it on the last tab; pressing it again closes it.
     private void toggleSheet(int tab) {
         boolean open = settingsSheet.getVisibility() == View.VISIBLE && settingsSheet.getAlpha() > 0.5f;
-        if (open && (tab == sheetTab || (tab != 0 && sheetTab != 0))) {
+        if (open && tab == sheetTab) {
             closeSheet();
             return;
         }
@@ -896,8 +1059,8 @@ public class MainActivity extends Activity implements
     private void setDebugMenu(boolean on) {
         debugMenu = on;
         getSharedPreferences("ui", 0).edit().putBoolean("debug", on).apply();
-        sheetTabs[4].setVisibility(on ? View.VISIBLE : View.GONE);
-        if (!on && sheetTab == 4) sheetTab = 1;
+        sheetTabs[TAB_DEBUG].setVisibility(on ? View.VISIBLE : View.GONE);
+        if (!on && sheetTab == TAB_DEBUG) sheetTab = TAB_CAPTURE;
         if (!on) showStats = false;
         Toast.makeText(this, on ? "Debug tools shown" : "Debug tools hidden", Toast.LENGTH_SHORT).show();
         refreshSelection();
@@ -912,13 +1075,16 @@ public class MainActivity extends Activity implements
         CameraEngine.STACK_LONG, CameraEngine.STACK_LONG, CameraEngine.STACK_LONG, CameraEngine.STACK_TRAILS};
     private static final long[] STACK_LONG_MS = {0, 0, 0, 2000, 4000, 8000, 8000};
     private static final String[] STACK_CHOICES = {
-        "Single", "Burst 8", "HDR 3", "Long 2s", "Long 4s", "Long 8s", "Trails 8s"};
+        "Single", "Burst", "HDR", "Long 2s", "Long 4s", "Long 8s", "Trails"};
+    private static final String[] STACK_HINTS = {
+        "Single frame", "Burst: 8 frames merged for less noise", "HDR: 3 bracketed frames merged",
+        "Long exposure 2 s", "Long exposure 4 s", "Long exposure 8 s", "Light trails 8 s"};
     private int stackChoice = 0;
 
     private void applyStackChoice() {
         cameraEngine.setStackMode(STACK_MODES[stackChoice]);
         if (STACK_LONG_MS[stackChoice] > 0) cameraEngine.setLongExposureMs(STACK_LONG_MS[stackChoice]);
-        btnStack.setText(STACK_CHOICES[stackChoice]);
+        if (btnStack != null) refreshQuickBar();
     }
 
     static class StackStatusBridge implements CameraEngine.StackStatus {
@@ -1006,31 +1172,55 @@ public class MainActivity extends Activity implements
         }
     }
 
-    // Gallery thumbnail: newest S24Film JPEG, decoded small.
+    // Gallery thumbnail: newest S24Film JPEG, decoded small. Listing the folder and decoding a 50 MP
+    // JPEG took the UI thread ~100+ ms right after each shot, so both run on a worker thread.
     private void loadLatestThumbnail() {
-        try {
-            File dir = new File("/sdcard/DCIM/S24Film");
-            File[] files = dir.listFiles();
-            File newest = null;
-            if (files != null) {
-                for (File f : files) {
-                    if (f.getName().endsWith(".jpg")
-                        && (newest == null || f.lastModified() > newest.lastModified())) {
-                        newest = f;
-                    }
-                }
-            }
-            if (newest != null) setThumbnail(newest.getAbsolutePath());
-        } catch (Throwable ignored) {}
+        new Thread(new ThumbJob(this, null), "thumb").start();
     }
 
     private void setThumbnail(String jpgPath) {
-        try {
-            BitmapFactory.Options opts = new BitmapFactory.Options();
-            opts.inSampleSize = 16;
-            Bitmap bmp = BitmapFactory.decodeFile(jpgPath, opts);
-            if (bmp != null) btnGallery.setImageBitmap(bmp);
-        } catch (Throwable ignored) {}
+        new Thread(new ThumbJob(this, jpgPath), "thumb").start();
+    }
+
+    static final class ThumbJob implements Runnable {
+        private final MainActivity a;
+        private final String path;   // null = find the newest JPEG
+        ThumbJob(MainActivity a, String path) { this.a = a; this.path = path; }
+        @Override public void run() {
+            try {
+                String p = path;
+                if (p == null) {
+                    File[] files = new File("/sdcard/DCIM/S24Film").listFiles();
+                    File newest = null;
+                    if (files != null) {
+                        for (File f : files) {
+                            if (f.getName().endsWith(".jpg")
+                                && (newest == null || f.lastModified() > newest.lastModified())) {
+                                newest = f;
+                            }
+                        }
+                    }
+                    if (newest == null) return;
+                    p = newest.getAbsolutePath();
+                }
+                BitmapFactory.Options opts = new BitmapFactory.Options();
+                opts.inSampleSize = 16;
+                Bitmap bmp = BitmapFactory.decodeFile(p, opts);
+                if (bmp != null) a.runOnUiThread(new ThumbSet(a, bmp));
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    static final class ThumbSet implements Runnable {
+        private final MainActivity a;
+        private final Bitmap bmp;
+        ThumbSet(MainActivity a, Bitmap bmp) { this.a = a; this.bmp = bmp; }
+        @Override public void run() {
+            a.btnGallery.setImageBitmap(bmp);
+            a.btnGallery.setScaleX(0.8f);
+            a.btnGallery.setScaleY(0.8f);
+            a.btnGallery.animate().scaleX(1f).scaleY(1f).setDuration(180).start();
+        }
     }
 
     private void openGallery() {
@@ -1061,6 +1251,7 @@ public class MainActivity extends Activity implements
         if (id == R.id.seek_ev) {
             userEvStops = (progress - 20) * 0.1f;
             tvEvLabel.setText(String.format(Locale.US, "EXPOSURE  %+.1f EV", userEvStops));
+            if (fromUser && proPanel != null && proPanel.isActive()) proPanel.refreshItems();
         } else if (id == R.id.seek_grain) {
             userGrainMult = progress / 100.0f;
             tvGrainLabel.setText(String.format(Locale.US, "GRAIN  %d%%", progress));
@@ -1088,10 +1279,30 @@ public class MainActivity extends Activity implements
         } else if (id == R.id.btn_front) {
             switchCamera("1", "Front Selfie (ISOCELL S5K3LU)");
         } else if (id == R.id.btn_shutter) {
-            triggerShutterFeedback();
-            showStatus("Developing " + activeLookLabel() + "…", true);
-            btnShutter.setEnabled(false);
-            cameraEngine.triggerCapture(activeFileTag(), this);
+            if (timerLeft > 0) {
+                cancelTimer();
+                showStatus("Timer cancelled", false);
+            } else if (timerSec > 0 && uiTheme == 0) {
+                startTimer();
+            } else {
+                capturePhoto();
+            }
+        } else if (id == R.id.btn_timer) {
+            timerSec = (timerSec == 0) ? 3 : (timerSec == 3 ? 10 : 0);
+            getSharedPreferences("ui", 0).edit().putInt("timer", timerSec).apply();
+            cancelTimer();
+            refreshQuickBar();
+            showStatus(timerSec > 0 ? "Self-timer " + timerSec + " s" : "Self-timer off", false);
+        } else if (id == R.id.btn_grid) {
+            gridOn = !gridOn;
+            getSharedPreferences("ui", 0).edit().putBoolean("grid", gridOn).apply();
+            vfHud.setGrid(gridOn);
+            refreshSelection();
+        } else if (id == R.id.btn_sounds) {
+            soundsOn = !soundsOn;
+            getSharedPreferences("ui", 0).edit().putBoolean("sounds", soundsOn).apply();
+            fx.setSound(soundsOn);
+            refreshSelection();
         } else if (id == R.id.btn_record_video) {
             if (videoRecorder.isRecording()) {
                 btnRecordVideo.setEnabled(false);
@@ -1120,11 +1331,12 @@ public class MainActivity extends Activity implements
         } else if (id == R.id.btn_portrait) {
             DepthBokeh.setPortrait(!DepthBokeh.portrait);
             getSharedPreferences("ui", 0).edit().putBoolean("portrait", DepthBokeh.portrait).apply();
-            btnPortrait.setText(DepthBokeh.portrait ? "Portrait: On" : "Portrait: Off");
+            refreshQuickBar();
             showStatus(DepthBokeh.portrait ? "Portrait on: tap to focus, aperture sets blur" : "Portrait off", false);
         } else if (id == R.id.btn_gate) {
             cinemaGate = (cinemaGate + 1) % 3;
-            btnGate.setText(GATE_LABELS[cinemaGate]);
+            refreshQuickBar();
+            showStatus(GATE_LABELS[cinemaGate].replace("Gate: ", "Frame "), false);
             syncLookToNative();
         } else if (id == R.id.btn_step_print) {
             stepPrint8fps = !stepPrint8fps;
@@ -1136,10 +1348,12 @@ public class MainActivity extends Activity implements
             syncLookToNative();
         } else if (id == R.id.btn_flash) {
             cameraEngine.setFlashMode((cameraEngine.getFlashMode() + 1) % 3);
-            btnFlash.setText("Flash: " + new String[] {"Off", "Auto", "On"}[cameraEngine.getFlashMode()]);
+            refreshQuickBar();
+            showStatus("Flash " + FLASH_LABELS[cameraEngine.getFlashMode()].toLowerCase(Locale.US), false);
         } else if (id == R.id.btn_stack) {
             stackChoice = (stackChoice + 1) % STACK_CHOICES.length;
             applyStackChoice();
+            showStatus(STACK_HINTS[stackChoice], false);
         } else if (id == R.id.btn_wb) {
             boolean nextWb = !cameraEngine.isAutoSceneWb();
             cameraEngine.setAutoSceneWb(nextWb);
@@ -1176,17 +1390,15 @@ public class MainActivity extends Activity implements
             cameraEngine.setPushStops(stops);
             refreshSelection();
         } else if (id == R.id.mode_photo) {
-            setMode(false);
+            setCaptureMode(MODE_PHOTO);
         } else if (id == R.id.mode_video) {
-            setMode(true);
-        } else if (id == R.id.btn_stock_browse) {
-            openStockBrowser();
+            setCaptureMode(MODE_VIDEO);
+        } else if (id == R.id.mode_pro) {
+            setCaptureMode(MODE_PRO);
         } else if (id == R.id.btn_gallery) {
             openGallery();
         } else if (id == R.id.btn_settings) {
-            toggleSheet(sheetTab == 0 ? 1 : sheetTab);
-        } else if (id == R.id.btn_tune) {
-            toggleSheet(0);
+            toggleSheet(sheetTab);
         } else if (id == R.id.btn_sheet_done || id == R.id.sheet_scrim) {
             closeSheet();
         } else if (id == R.id.btn_film) {
@@ -1194,10 +1406,9 @@ public class MainActivity extends Activity implements
         } else if (id == R.id.btn_stats) {
             showStats = !showStats;
             refreshSelection();
-        } else if (id == R.id.tab_tune || id == R.id.tab_film || id == R.id.tab_camera
-                   || id == R.id.tab_display || id == R.id.tab_debug || id == R.id.tab_pro) {
-            sheetTab = (id == R.id.tab_tune) ? 0 : (id == R.id.tab_film) ? 1 : (id == R.id.tab_camera) ? 2
-                     : (id == R.id.tab_display) ? 3 : (id == R.id.tab_pro) ? 5 : 4;
+        } else if (id == R.id.tab_look || id == R.id.tab_capture || id == R.id.tab_display || id == R.id.tab_debug) {
+            sheetTab = (id == R.id.tab_look) ? TAB_LOOK : (id == R.id.tab_capture) ? TAB_CAPTURE
+                     : (id == R.id.tab_display) ? TAB_DISPLAY : TAB_DEBUG;
             refreshSelection();
         } else {
             int[] stockBtnIds = {
@@ -1219,7 +1430,7 @@ public class MainActivity extends Activity implements
 
     void triggerUiCapture() {
         if (btnShutter != null && btnShutter.isEnabled()) {
-            btnShutter.performClick();
+            capturePhoto();   // adb capture skips the self-timer
         }
     }
 
@@ -1232,7 +1443,8 @@ public class MainActivity extends Activity implements
         refreshReadout();
         showStatus("Switching to " + label + "…", false);
         cameraEngine.openCamera(camId);   // also clears the ROT override
-        btnRotate.setText("ROT +" + cameraEngine.getManualRotationOffset() + "°");        if (proPanel != null) proPanel.onLensChanged();
+        btnRotate.setText("ROT +" + cameraEngine.getManualRotationOffset() + "°");
+        if (proPanel != null) proPanel.onLensChanged();
     }
 
     // Microphone is asked for the first time video mode is entered; a take is silent if denied.
@@ -1302,6 +1514,7 @@ public class MainActivity extends Activity implements
     protected void onPause() {
         super.onPause();
         if (DebugControl.ui == this) DebugControl.ui = null;
+        cancelTimer();
         if (videoRecorder != null && videoRecorder.isRecording()) {
             videoRecorder.stopRecording();
         }
@@ -1396,7 +1609,11 @@ public class MainActivity extends Activity implements
         lastHudUpdateTimeMs = now;
 
         final double gyroHz = imuTelemetry.getGyroHz();
-        final float batteryTempC = showStats ? getBatteryTemperature() : 0f;
+        if (showStats && now - lastBatteryReadMs > 5000) {   // a sticky-broadcast read every frame tick is wasteful
+            lastBatteryReadMs = now;
+            lastBatteryTempC = getBatteryTemperature();
+        }
+        final float batteryTempC = showStats ? lastBatteryTempC : 0f;
         final String cfaName = (cfa == 0) ? "RGGB" : (cfa == 1 ? "GRBG" : (cfa == 2 ? "GBRG" : "BGGR"));
         final boolean rec = (videoRecorder != null && videoRecorder.isRecording());
 

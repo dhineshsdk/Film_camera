@@ -89,3 +89,60 @@ Use a tripod or rest the phone on something for 2 to 6.
 6. **Trails 8s.** Night, car lights or a torch swung around. Pass: bright paths accumulate; the dark background stays dark.
 7. **Stability.** Run each mode 5 times in a row, then switch lens (0.6 / 1 / 3 / front) in the middle of a Long 8s. Pass: no HAL restart or phone reboot, shutter button re-enables (`Stack cancelled` if the lens switch cut a shot).
 8. **Film looks.** Repeat 2, 3 and 5 on Portra 400 and on a B&W stock. Pass: same look as Single, exposure and grain consistent.
+
+## UI overhaul (branch `claude/project-thread-n9smr3`)
+
+Replaces the Batch B top band and sheet layout. Install, open in the Modern theme, portrait first.
+
+Top band
+1. One quick bar: flash icon (left), **Single** chip, **3:4** chip, timer icon, portrait icon, gear (right), with the
+   readout under it. Labels in the readout (`ISO`, `EI`, `left`) are dim and values bright; nothing overlaps the punch hole.
+2. Flash: each tap cycles Auto (bolt with A), On (bolt, gold), Off (crossed bolt), and the status pill says
+   "Flash on/off/auto". Shoot once on On with the rear camera: flash behaves as before.
+3. Capture chip: each tap cycles Single, Burst, HDR, Long 2s, Long 4s, Long 8s, Trails (gold when not Single), with a
+   one-line hint in the status pill. Take one Burst and one HDR shot: the stack status shows and both save.
+4. Frame chip: 3:4, 16:9, 2.39 (pill says "Frame 16:9" etc.); the preview mask changes as the old Gate chip did.
+5. Timer: tap cycles off, 3s, 10s. On 3s press the shutter: a big 3, 2, 1 counts down on the preview with a click
+   each second, then the shot is taken. Press the shutter again during the count: it cancels ("Timer cancelled").
+6. Portrait icon toggles portrait blur (gold when on); same behaviour as the old Portrait chip.
+7. Gear opens the sheet; gear again, Done, a tap outside or Back closes it. The sheet reopens on the last tab.
+
+Viewfinder
+8. Tap the preview: a white ring appears at the finger and fades after ~2.5 s. With Portrait on, the blur focus
+   follows the tap as before.
+9. Touch the preview and drag up/down: a gold sun scale appears beside the ring and exposure brightens (up) or
+   darkens (down) in 0.1 EV steps, with a light tick every half stop, clamped at ±2.0. Open the sheet: Look >
+   EXPOSURE shows the same value.
+10. Pinch out on the preview: steps .6 → 1× → 3; pinch in goes back. On the front camera pinch does nothing.
+11. Display > Grid: 3×3 draws thirds lines inside the preview only (not on the black bands). Survives restart.
+
+Film strip and modes
+12. The first chip of the strip is the active film (gold outline, film icon); tapping it opens the stock browser.
+    Picking a stock label fills that label gold and the first chip shows its full name.
+13. Mode strip reads **PRO  PHOTO  VIDEO**. Tap each, and swipe left/right across the strip: PRO ← PHOTO → VIDEO.
+    VIDEO hides the capture, timer and portrait items in the quick bar and shows the record button.
+
+PRO mode
+14. In PRO a dark bar appears above the film strip with ISO, SPEED, WB, TINT, FOCUS, f/, EV, each showing AUTO
+    (or its value). Tap ISO: a ruler opens above the row with a gold index; drag it or tap left/right of the index.
+    Each step clicks (sound + haptic) and the value turns gold when manual. Tap ISO again to close the ruler.
+15. SPEED 1/1000 on a bright scene darkens the preview and the readout starts with a gold `M`. Set it back to AUTO.
+    Also try 1/4 and 1": the preview keeps running (the same speeds the film-body dial already offers); log any freeze.
+16. WB 3000K and 7000K shift the colour the same way the old WB slider did; TINT G/M shifts green/magenta.
+17. FOCUS: ∞ then MIN on the 1× lens; the image racks focus. Switch lens: FOCUS goes back to AF.
+18. Leave PRO for PHOTO: the readout loses the `M`, ISO is auto again. Go back to PRO: the last PRO values return.
+    Restart the app in PRO: it reopens in PRO with the values kept (focus starts on AF).
+19. f/ and EV in PRO are the same values as portrait blur and Look > EXPOSURE (change one, the other follows).
+
+Sheet
+20. Three tabs: **Look** (push/pull, exposure, grain, halation, format, lens character), **Capture** (Film ISO, Auto
+    Gain, WB, Save RAW, 4F Burst, 24fps step print, Desqueeze, plus the VIDEO rows in video mode), **Display**
+    (theme, grid, peaking, histogram, zones, sounds, new roll). Long-press "Settings" still shows the Debug tab.
+21. Display > Sounds: Off silences shutter / detent / click sounds but haptics stay.
+
+Film themes and performance
+22. Switch to Black SLR from PRO: the app drops to PHOTO and the speed dial controls the shutter. Back to Modern:
+    shutter is auto again (readout `A`).
+23. Take 10 shots quickly: the shutter button and the readout do not stutter right after each shot (the gallery
+    thumbnail now decodes off the UI thread), and the thumbnail pops in with a small scale animation.
+24. Landscape both ways: zoom pills, shutter, gallery, flip, flash, timer and portrait icons turn upright.

@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="accent">#FFD60A</color>
+    <!-- Warm film-gold accent on near-black glass -->
+    <color name="accent">#FFC845</color>
+    <color name="accent_soft">#33FFC845</color>
     <color name="ink">#FFFFFF</color>
     <color name="ink_dim">#99FFFFFF</color>
-    <color name="pill">#66000000</color>
-    <color name="panel">#F01C1C1E</color>
-    <color name="rec_red">#FF3B30</color>
+    <color name="ink_faint">#59FFFFFF</color>
+    <color name="pill">#73000000</color>
+    <color name="glass">#B3101012</color>
+    <color name="panel">#F2161618</color>
+    <color name="panel_raised">#2A2A2D</color>
+    <color name="hairline">#26FFFFFF</color>
+    <color name="rec_red">#FF453A</color>
 </resources>
