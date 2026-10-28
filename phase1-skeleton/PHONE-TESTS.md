@@ -102,3 +102,14 @@ Build: branch `claude/project-thread-4h4og3` (PR "Stage A1: zero-lag RAW ring").
 6. **Lens switch.** Switch .6 / 1 / 3 / front and shoot a Burst 8 right after each switch. Pass: no frames from the previous lens (no double image), log ring count may be low on the first shot.
 7. **Soak.** 10 minutes of live view with a lens switch every minute and a Burst 8 shot every minute. Pass: no HAL restart or phone reboot, preview stays live, no `ring slot ... skipped` lines.
 8. **A0 bursts.** `rawburst` still saves N consecutive frames as before.
+
+## Stage A2: GPU tile merge
+
+Same branch as A1. Logcat: `GPU merge ready` (tag `S24FilmMerge`) at start, `Stack begin mode 0 ... (GPU)`, one `GPU merge frame n (slot s): x ms, median shift dx,dy px` per frame, `Stack finish mode 0, n frames merged on the GPU`. Bursts now align every 32 x 32 RAW-pixel tile separately (hand shake and some subject motion), on the GPU; HDR and long exposures still use the CPU merge. Desktop check that already passed: `tools/gpu_merge_test.sh` (synthetic burst with hand shake and a moving square: 2.7x less noise of an ideal 2.8x, no ghost).
+
+1. **GPU path is on.** Burst 8 in a dim room. Pass: `(GPU)` on the Stack begin line, 8 `GPU merge frame` lines, each under 40 ms; `Merged 8 frames` comes much sooner than with A1 alone.
+2. **Handheld night.** Burst 8 handheld (no table) on text or a brick wall. Pass: sharp, no double edges; median shifts in the log are a few to tens of pixels.
+3. **Walking people.** Burst 8 of people walking past. Pass: no ghosts or half-transparent copies; walkers look like one frame (a little noisier than the static background is fine).
+4. **Rotation.** Twist the phone slightly while the burst runs. Pass: corners as sharp as the centre (tiles follow the rotation).
+5. **Fallback.** If `GPU merge unavailable` appears instead, bursts must still work as in A1 (CPU merge). Note it.
+6. **Golden set (A0).** Run `tools/ab_compare.py` on the walking-people and handheld-night bursts, A1 vs A2. Pass: lower noise, no ghost in the side-by-side.

@@ -4,6 +4,7 @@
 #include "S24HardwareCalibrationMaster.h"
 #include "shaders/demosaic_spv.h"
 #include "shaders/encode_hlg_spv.h"
+#include "shaders/merge_spv.h"
 
 #include <cstring>
 #include <algorithm>
@@ -1642,6 +1643,10 @@ bool VulkanRawPipeline::createComputeResources() {
     if (!createSharedResources()) { LOGE("createSharedResources failed"); return false; }
     if (!createDescriptorLayoutAndPipelines()) { LOGE("createDescriptorLayoutAndPipelines failed"); return false; }
     if (!createTargets(mLiveTargets, mSwapchainExtent, false)) { LOGE("live targets failed"); return false; }
+    // GPU burst merge (Stage A2); without it bursts fall back to the CPU merge.
+    if (!mGpuMerge.init(mPhysicalDevice, mDevice, mQueue, mQueueFamilyIndex, merge_spv, merge_spv_size)) {
+        LOGW("GPU merge unavailable, bursts use the CPU merge");
+    }
 
     // Live RGBA16F readback for the fallback capture path.
     mReadbackBufferSize = static_cast<VkDeviceSize>(mLiveTargets.extent.width) * mLiveTargets.extent.height * 8;
@@ -1725,6 +1730,7 @@ void VulkanRawPipeline::destroy() {
     std::lock_guard<std::mutex> lock(mRenderMutex);
     if (mDevice != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(mDevice);
+        mGpuMerge.destroy();
         destroyComputeResources();
         destroySwapchain();
         vkDestroyDevice(mDevice, nullptr);
@@ -3000,7 +3006,13 @@ bool VulkanRawPipeline::stackBegin(int mode) {
     s.black = std::max(mBlackLevel.load(), 0.0f);
     s.white = mLastFrame.whiteLevel;
     size_t px = static_cast<size_t>(s.width) * static_cast<size_t>(s.height);
-    if (mode == 3) {
+    // Burst: tile-aligned merge on the GPU when it is there; the CPU accumulators are then unused.
+    s.gpu = (mode == 0) && mGpuMerge.ready()
+        && mGpuMerge.begin(mRawStorageBuffer, s.width, s.height, s.stride, s.black, s.white,
+                           mNoiseS.load(), mNoiseO.load());
+    if (s.gpu) {
+        // nothing to allocate here
+    } else if (mode == 3) {
         s.peak.assign(px, 0);
     } else {
         s.num.assign(px, 0.0f);
@@ -3010,7 +3022,8 @@ bool VulkanRawPipeline::stackBegin(int mode) {
     mStack = std::move(s);
     mStackActive.store(true);
     mForceSingleFrame.store(false);
-    LOGI("Stack begin mode %d %dx%d black %.1f white %.1f", mode, mStack.width, mStack.height, mStack.black, mStack.white);
+    LOGI("Stack begin mode %d %dx%d black %.1f white %.1f%s", mode, mStack.width, mStack.height, mStack.black, mStack.white,
+         mStack.gpu ? " (GPU)" : "");
     return true;
 }
 
@@ -3029,6 +3042,14 @@ bool VulkanRawPipeline::stackAddSlot(uint32_t slot, int width, int height, int s
     if (frameBytes * mRingSlots > mRawStorageBufferSize) return false;
     const uint16_t* src = reinterpret_cast<const uint16_t*>(
         static_cast<const uint8_t*>(mMappedRawBuffer) + static_cast<size_t>(slot) * frameBytes);
+    if (s.gpu) {
+        GpuBurstMerge::AddStats st;
+        if (!mGpuMerge.add(slot, &st)) return false;
+        LOGI("GPU merge frame %d (slot %u): %.1f ms, median shift %d,%d px", s.frames, slot, st.ms,
+             2 * st.medianDx, 2 * st.medianDy);
+        s.frames++;
+        return true;
+    }
 
     const int W = s.width, H = s.height;
     const float black = s.black;
@@ -3138,6 +3159,12 @@ bool VulkanRawPipeline::stackFinish() {
     if (!mStackActive.load() || s.mode < 0 || s.frames < 1 || !mMappedRawBuffer || !mLastFrame.valid) return false;
     // The live render of the newest slot may still be reading it.
     vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
+    if (s.gpu) {
+        if (!mGpuMerge.resolve(mLastFrame.slot)) return false;
+        mForceSingleFrame.store(true);
+        LOGI("Stack finish mode %d, %d frames merged on the GPU into slot %u", s.mode, s.frames, mLastFrame.slot);
+        return true;
+    }
 
     const size_t frameBytes = static_cast<size_t>(mLastFrame.height) * static_cast<size_t>(s.stride) * 2;
     uint16_t* dst = reinterpret_cast<uint16_t*>(

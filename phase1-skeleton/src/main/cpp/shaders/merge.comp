@@ -1,0 +1,182 @@
+#version 450
+// =============================================================================
+// GPU burst merge (Stage A2): tile alignment on a 4-level luma pyramid and a
+// noise-aware robust merge of whole Bayer cells, all in RAW.
+//
+//   LUMA     raw ring slot -> half-res luma (mean of the 2x2 Bayer cell, 0..1)
+//   DOWN     box-downsample one pyramid level by `factor`
+//   ALIGN    per tile at one level: best offset within +-radius around the
+//            offset of the coarser level (L1 cost), coarse to fine
+//   INIT     reference frame into the accumulators (weight 1)
+//   MERGE    aligned alternate frame into the accumulators, weighted by how
+//            far its local luma departs from the reference beyond the noise
+//   RESOLVE  accumulators -> packed uint16 RAW over a ring slot
+//
+// Offsets are in half-res pixels, i.e. whole Bayer cells, so the CFA phase holds.
+// =============================================================================
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer RawRing { uint u_raw[]; };   // packed uint16 frames
+layout(std430, binding = 1) buffer Pyr { float u_pyr[]; };      // ref and alt luma levels
+layout(std430, binding = 2) buffer Tiles { ivec2 u_tiles[]; };  // offsets, all levels
+layout(std430, binding = 3) buffer Num { float u_num[]; };      // per RAW pixel, black removed
+layout(std430, binding = 4) buffer Den { float u_den[]; };      // per Bayer cell
+
+const uint PASS_LUMA = 0u;
+const uint PASS_DOWN = 1u;
+const uint PASS_ALIGN = 2u;
+const uint PASS_INIT = 3u;
+const uint PASS_MERGE = 4u;
+const uint PASS_RESOLVE = 5u;
+
+layout(push_constant) uniform PC {
+    uint pass;
+    uint slot;        // ring slot read (LUMA, INIT, MERGE) or written (RESOLVE)
+    uint width;       // RAW width (even)
+    uint height;      // RAW height (even)
+    uint stride;      // RAW row stride in pixels
+    float black;
+    float range;      // white - black
+    uint dstOff;      // LUMA, DOWN: output level; ALIGN: alt level
+    uint srcOff;      // DOWN: input level; ALIGN: ref level
+    uint dstW, dstH;  // DOWN, LUMA: output size; ALIGN: level size
+    uint srcW, srcH;  // DOWN: input size
+    uint factor;      // DOWN: box size; ALIGN: scale from the coarser level
+    uint tileSize;    // ALIGN: tile size at this level; MERGE: tile size at L0
+    int radius;       // ALIGN: search radius
+    uint tileOff;     // ALIGN: this level's tiles; MERGE: L0 tiles
+    uint tilesW, tilesH;
+    uint prevOff;     // ALIGN: coarser level's tiles (0xFFFFFFFF = none)
+    uint prevW, prevH, prevTile;
+    float noiseS;     // Camera2 noise profile, normalized units: var = S x + O
+    float noiseO;
+    uint refL0;       // MERGE: ref and alt L0 luma offsets
+    uint altL0;
+} pc;
+
+uint rawAt(uint x, uint y) {
+    uint idx16 = pc.slot * pc.stride * pc.height + y * pc.stride + x;
+    uint word = u_raw[idx16 >> 1u];
+    return ((idx16 & 1u) != 0u) ? (word >> 16u) : (word & 0xFFFFu);
+}
+
+float lvl(uint off, uint w, uint h, int x, int y) {
+    x = clamp(x, 0, int(w) - 1);
+    y = clamp(y, 0, int(h) - 1);
+    return u_pyr[off + uint(y) * w + uint(x)];
+}
+
+void passLuma(uvec2 p) {
+    if (p.x >= pc.dstW || p.y >= pc.dstH) return;
+    uint x = p.x * 2u, y = p.y * 2u;
+    float s = float(rawAt(x, y) + rawAt(x + 1u, y) + rawAt(x, y + 1u) + rawAt(x + 1u, y + 1u));
+    u_pyr[pc.dstOff + p.y * pc.dstW + p.x] = max(s * 0.25 - pc.black, 0.0) / pc.range;
+}
+
+void passDown(uvec2 p) {
+    if (p.x >= pc.dstW || p.y >= pc.dstH) return;
+    float s = 0.0;
+    for (uint j = 0u; j < pc.factor; ++j)
+        for (uint i = 0u; i < pc.factor; ++i)
+            s += lvl(pc.srcOff, pc.srcW, pc.srcH, int(p.x * pc.factor + i), int(p.y * pc.factor + j));
+    u_pyr[pc.dstOff + p.y * pc.dstW + p.x] = s / float(pc.factor * pc.factor);
+}
+
+void passAlign(uvec2 t) {
+    if (t.x >= pc.tilesW || t.y >= pc.tilesH) return;
+    int T = int(pc.tileSize);
+    ivec2 origin = ivec2(t) * T;
+    ivec2 guess = ivec2(0);
+    if (pc.prevOff != 0xFFFFFFFFu) {
+        ivec2 c = (origin + T / 2) / int(pc.factor);
+        ivec2 pt = clamp(c / int(pc.prevTile), ivec2(0), ivec2(int(pc.prevW) - 1, int(pc.prevH) - 1));
+        guess = u_tiles[pc.prevOff + uint(pt.y) * pc.prevW + uint(pt.x)] * int(pc.factor);
+    }
+    float best = 3.4e38;
+    ivec2 bestD = guess;
+    for (int dy = -pc.radius; dy <= pc.radius; ++dy) {
+        for (int dx = -pc.radius; dx <= pc.radius; ++dx) {
+            ivec2 d = guess + ivec2(dx, dy);
+            float cost = 0.0;
+            for (int y = 0; y < T; ++y) {
+                for (int x = 0; x < T; ++x) {
+                    ivec2 q = origin + ivec2(x, y);
+                    cost += abs(lvl(pc.srcOff, pc.dstW, pc.dstH, q.x, q.y)
+                              - lvl(pc.dstOff, pc.dstW, pc.dstH, q.x + d.x, q.y + d.y));
+                }
+            }
+            // Ties go to the smaller move, so flat tiles stay put instead of drifting.
+            cost *= 1.0 + 0.002 * float(dx * dx + dy * dy);
+            if (cost < best) { best = cost; bestD = d; }
+        }
+    }
+    u_tiles[pc.tileOff + t.y * pc.tilesW + t.x] = bestD;
+}
+
+void passInit(uvec2 p) {
+    uint cw = pc.width / 2u, ch = pc.height / 2u;
+    if (p.x >= cw || p.y >= ch) return;
+    uint x = p.x * 2u, y = p.y * 2u;
+    for (uint j = 0u; j < 2u; ++j)
+        for (uint i = 0u; i < 2u; ++i)
+            u_num[(y + j) * pc.width + x + i] = max(float(rawAt(x + i, y + j)) - pc.black, 0.0);
+    u_den[p.y * cw + p.x] = 1.0;
+}
+
+void passMerge(uvec2 p) {
+    uint cw = pc.width / 2u, ch = pc.height / 2u;
+    if (p.x >= cw || p.y >= ch) return;
+    uvec2 tile = min(p / pc.tileSize, uvec2(pc.tilesW - 1u, pc.tilesH - 1u));
+    ivec2 d = u_tiles[pc.tileOff + tile.y * pc.tilesW + tile.x];
+    ivec2 q = ivec2(p) + d;
+    if (q.x < 0 || q.y < 0 || q.x >= int(cw) || q.y >= int(ch)) return;
+
+    // Mean luma difference over 3x3 cells, against what noise alone would give.
+    float diff = 0.0, refMean = 0.0;
+    for (int j = -1; j <= 1; ++j) {
+        for (int i = -1; i <= 1; ++i) {
+            float r = lvl(pc.refL0, cw, ch, int(p.x) + i, int(p.y) + j);
+            diff += lvl(pc.altL0, cw, ch, q.x + i, q.y + j) - r;
+            refMean += r;
+        }
+    }
+    diff /= 9.0;
+    refMean /= 9.0;
+    float varLuma = max(pc.noiseS * refMean + pc.noiseO, 1e-7) * 0.25;   // mean of 4 samples
+    float varDiff = 2.0 * varLuma / 9.0;
+    float thr = 4.0 * varDiff + 0.0016 * refMean * refMean;              // 2 sigma, plus 4% of signal
+    float w = clamp(2.0 - diff * diff / thr, 0.0, 1.0);
+    if (w <= 0.0) return;
+
+    uint x = uint(q.x) * 2u, y = uint(q.y) * 2u;
+    uint ox = p.x * 2u, oy = p.y * 2u;
+    for (uint j = 0u; j < 2u; ++j)
+        for (uint i = 0u; i < 2u; ++i)
+            u_num[(oy + j) * pc.width + ox + i] += w * max(float(rawAt(x + i, y + j)) - pc.black, 0.0);
+    u_den[p.y * cw + p.x] += w;
+}
+
+void passResolve(uvec2 p) {
+    uint cw = pc.width / 2u, ch = pc.height / 2u;
+    if (p.x >= cw || p.y >= ch) return;
+    float den = max(u_den[p.y * cw + p.x], 1e-6);
+    uint x = p.x * 2u, y = p.y * 2u;
+    float top = pc.black + pc.range;
+    for (uint j = 0u; j < 2u; ++j) {
+        float a = clamp(u_num[(y + j) * pc.width + x] / den + pc.black + 0.5, 0.0, top);
+        float b = clamp(u_num[(y + j) * pc.width + x + 1u] / den + pc.black + 0.5, 0.0, top);
+        // x is even and the stride is even, so the pair is one aligned 32-bit word.
+        uint idx16 = pc.slot * pc.stride * pc.height + (y + j) * pc.stride + x;
+        u_raw[idx16 >> 1u] = (uint(a) & 0xFFFFu) | ((uint(b) & 0xFFFFu) << 16u);
+    }
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (pc.pass == PASS_LUMA) passLuma(p);
+    else if (pc.pass == PASS_DOWN) passDown(p);
+    else if (pc.pass == PASS_ALIGN) passAlign(p);
+    else if (pc.pass == PASS_INIT) passInit(p);
+    else if (pc.pass == PASS_MERGE) passMerge(p);
+    else if (pc.pass == PASS_RESOLVE) passResolve(p);
+}

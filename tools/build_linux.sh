@@ -47,7 +47,7 @@ with open(sys.argv[2],'w') as f:
 PY
 }
 S="$P/src/main/cpp/shaders"
-for s in demosaic encode_hlg; do
+for s in demosaic encode_hlg merge; do
   "$GLSLC" -fshader-stage=compute "$S/$s.comp" -o "$S/$s.spv"
   spv2h "$S/$s.spv" "$S/${s}_spv.h" "${s}_spv"
 done

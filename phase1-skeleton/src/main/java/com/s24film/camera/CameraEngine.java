@@ -1225,6 +1225,7 @@ public class CameraEngine {
     private long stackTargetExpNs = 10_000_000L;
     private long ringMarkSeq = 0L;   // newest ring frame at the shutter press (0 = none)
     private int ringLeft = 0;        // ring frames still to fold into the burst
+    private static final long RING_BUDGET_NS = 30_000_000L;   // keeps the RAW stream drained
 
     public void setStackMode(int mode) { stackMode = Math.max(STACK_OFF, Math.min(STACK_TRAILS, mode)); }
     public int getStackMode() { return stackMode; }
@@ -1335,14 +1336,20 @@ public class CameraEngine {
         switch (stackMode) {
             case STACK_BURST:
                 if (ringLeft > 0) {
-                    // Zero lag: one pre-press frame per camera frame, the same pace as a live add.
-                    int left = VulkanRenderer.nativeStackAddFromRing();
-                    if (left < 0) return stackAbort("ring add failed");
-                    ringLeft = left;
+                    // Zero lag: pre-press frames, as many as fit in RING_BUDGET_NS per camera frame
+                    // (one at a time with the CPU merge, several with the GPU merge).
+                    long t0 = System.nanoTime();
+                    do {
+                        int left = VulkanRenderer.nativeStackAddFromRing();
+                        if (left < 0) return stackAbort("ring add failed");
+                        ringLeft = left;
+                        stackFrames++;
+                    } while (ringLeft > 0 && stackFrames < burstTarget && System.nanoTime() - t0 < RING_BUDGET_NS);
                 } else if (!VulkanRenderer.nativeStackAdd(1.0f)) {
                     return stackAbort("add failed");
+                } else {
+                    stackFrames++;
                 }
-                stackFrames++;
                 postStack("Burst " + stackFrames + "/" + burstTarget);
                 if (stackFrames >= burstTarget) return stackFinish();
                 return false;

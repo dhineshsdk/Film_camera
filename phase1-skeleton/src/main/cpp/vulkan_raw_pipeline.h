@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include "SpectralFilm.h"
+#include "gpu_merge.h"
 
 #define LOG_TAG "S24FilmVulkan"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -260,6 +261,7 @@ private:
         std::vector<uint16_t> peak;
         std::vector<float> refSmall;   // reference frame boxed down 8x (burst alignment)
         int smallW = 0, smallH = 0;
+        bool gpu = false;                  // burst merged by mGpuMerge
         std::vector<uint32_t> ringQueue;   // ring slots still to fold, newest first
         double refProd = 0.0;              // ISO x shutter of the first ring frame
     };
@@ -274,6 +276,7 @@ private:
     };
     bool stackAddSlot(uint32_t slot, int width, int height, int stride, float relExposure);
     StackState mStack;
+    GpuBurstMerge mGpuMerge;
     std::atomic<bool> mStackActive{false};
     std::atomic<bool> mForceSingleFrame{false};
 
