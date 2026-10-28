@@ -113,3 +113,14 @@ Same branch as A1. Logcat: `GPU merge ready` (tag `S24FilmMerge`) at start, `Sta
 4. **Rotation.** Twist the phone slightly while the burst runs. Pass: corners as sharp as the centre (tiles follow the rotation).
 5. **Fallback.** If `GPU merge unavailable` appears instead, bursts must still work as in A1 (CPU merge). Note it.
 6. **Golden set (A0).** Run `tools/ab_compare.py` on the walking-people and handheld-night bursts, A1 vs A2. Pass: lower noise, no ghost in the side-by-side.
+
+## Stage A3: merge on every photo, HDR+ style
+
+Same branch. Every normal shot is now a zero-lag GPU burst sized to the light: 4 frames at ISO 200 or less, 6 up to ISO 800, 8 above (the night push still goes to 8 or 12). Turn it off with `adb shell am broadcast -a com.s24film.camera.DEBUG --es cmd automerge --ez on false`. HDR is now the HDR+ style: a 6-frame zero-lag burst at the metered exposure, then two -2 EV frames that are used only where the burst clips (the old base / -2 / +2 bracket is only used if the GPU merge is unavailable). Desktop check that passed: `tools/gpu_merge_test.sh` HDR case recovers clipped highlights to within 0.017 of the true values (the clipped frame was off by 0.36).
+
+1. **Every shot merges, without waiting.** Single on, daylight, 10 shots in a row. Pass: log shows `Burst: 4 of 4 frames from before the press` and `GPU merge frame` lines; the shutter feels the same as before A1; no `Stack failed`.
+2. **Noise.** Indoor evening light (ISO 400 to 1600), the same scene with automerge on and off. Pass: visibly cleaner shadows with it on; A0 compare on the golden indoor scenes shows shadow noise down by about half.
+3. **Moving subject.** A person walking across at ISO 800. Pass: no ghost or double edge.
+4. **HDR with people.** HDR on, a person moving in front of a bright window. Pass: the person is as sharp as a normal shot (no bracket blur), the window shows detail instead of white; log shows the base `GPU merge frame` lines, then two `HDR short frame at -2.00 EV` lines; preview exposure returns to normal afterwards.
+5. **HDR timeout.** HDR aimed at a scene where the exposure cannot drop 2 stops (already at the shortest shutter and lowest ISO). Pass: still saves a photo (the base burst) within about 3 s.
+6. **Off switch.** `automerge --ez on false`: shots are single frames again, exactly like main.

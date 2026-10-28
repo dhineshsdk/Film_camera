@@ -227,7 +227,8 @@ public:
     // (relExposure = this frame's ISO x shutter over the reference frame's, 1 for equal frames);
     // Finish writes the merged mosaic back over the newest ring slot so the master render uses it
     // alone; End clears the flag. Modes: 0 burst average with ghost rejection, 1 HDR bracket,
-    // 2 long exposure average, 3 long exposure lighten.
+    // 2 long exposure average, 3 long exposure lighten, 4 GPU HDR (burst plus short highlight
+    // frames; fails without the GPU merge).
     bool stackBegin(int mode);
     bool stackAdd(float relExposure);
     bool stackFinish();
@@ -248,6 +249,7 @@ public:
     int stackPrimeFromRing(uint64_t markSeq, int maxFrames);
     int stackAddFromRing();
     uint32_t ringSlots() const { return mRingSlots; }
+    bool gpuMergeReady() const { return mGpuMerge.ready(); }
 
 private:
     struct StackState {

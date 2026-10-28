@@ -12,6 +12,10 @@
 //            far its local luma departs from the reference beyond the noise
 //   RESOLVE  accumulators -> packed uint16 RAW over a ring slot
 //
+// HDR (Stage A3): the burst is the metered exposure; a couple of short frames
+// (relExp < 1) are folded in only where the burst nears clipping, scaled back
+// up by 1/relExp, and RESOLVE rolls the extended range off with a shoulder.
+//
 // Offsets are in half-res pixels, i.e. whole Bayer cells, so the CFA phase holds.
 // =============================================================================
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
@@ -52,7 +56,11 @@ layout(push_constant) uniform PC {
     float noiseO;
     uint refL0;       // MERGE: ref and alt L0 luma offsets
     uint altL0;
+    float relExp;     // LUMA, MERGE: this frame's exposure over the reference's
+    uint hdr;         // 1 = HDR burst (clip-aware INIT and MERGE, shoulder in RESOLVE)
 } pc;
+
+const float CLIP = 0.97;   // of range: a cell this bright carries no reliable value
 
 uint rawAt(uint x, uint y) {
     uint idx16 = pc.slot * pc.stride * pc.height + y * pc.stride + x;
@@ -70,7 +78,12 @@ void passLuma(uvec2 p) {
     if (p.x >= pc.dstW || p.y >= pc.dstH) return;
     uint x = p.x * 2u, y = p.y * 2u;
     float s = float(rawAt(x, y) + rawAt(x + 1u, y) + rawAt(x, y + 1u) + rawAt(x + 1u, y + 1u));
-    u_pyr[pc.dstOff + p.y * pc.dstW + p.x] = max(s * 0.25 - pc.black, 0.0) / pc.range;
+    // Short HDR frames are brought to the reference exposure so alignment compares like with like.
+    u_pyr[pc.dstOff + p.y * pc.dstW + p.x] = max(s * 0.25 - pc.black, 0.0) / (pc.range * pc.relExp);
+}
+
+float cellMax(uint x, uint y) {
+    return float(max(max(rawAt(x, y), rawAt(x + 1u, y)), max(rawAt(x, y + 1u), rawAt(x + 1u, y + 1u))));
 }
 
 void passDown(uvec2 p) {
@@ -101,8 +114,10 @@ void passAlign(uvec2 t) {
             for (int y = 0; y < T; ++y) {
                 for (int x = 0; x < T; ++x) {
                     ivec2 q = origin + ivec2(x, y);
-                    cost += abs(lvl(pc.srcOff, pc.dstW, pc.dstH, q.x, q.y)
-                              - lvl(pc.dstOff, pc.dstW, pc.dstH, q.x + d.x, q.y + d.y));
+                    // Both sides are cut at the clip level: a short HDR frame still has detail
+                    // where the reference is flat white, and that must not pull the tile away.
+                    cost += abs(min(lvl(pc.srcOff, pc.dstW, pc.dstH, q.x, q.y), CLIP)
+                              - min(lvl(pc.dstOff, pc.dstW, pc.dstH, q.x + d.x, q.y + d.y), CLIP));
                 }
             }
             // Ties go to the smaller move, so flat tiles stay put instead of drifting.
@@ -117,10 +132,12 @@ void passInit(uvec2 p) {
     uint cw = pc.width / 2u, ch = pc.height / 2u;
     if (p.x >= cw || p.y >= ch) return;
     uint x = p.x * 2u, y = p.y * 2u;
+    // HDR: a clipped reference cell keeps a token weight so short frames take over there.
+    float w = (pc.hdr != 0u && cellMax(x, y) >= pc.black + CLIP * pc.range) ? 0.02 : 1.0;
     for (uint j = 0u; j < 2u; ++j)
         for (uint i = 0u; i < 2u; ++i)
-            u_num[(y + j) * pc.width + x + i] = max(float(rawAt(x + i, y + j)) - pc.black, 0.0);
-    u_den[p.y * cw + p.x] = 1.0;
+            u_num[(y + j) * pc.width + x + i] = w * max(float(rawAt(x + i, y + j)) - pc.black, 0.0);
+    u_den[p.y * cw + p.x] = w;
 }
 
 void passMerge(uvec2 p) {
@@ -142,18 +159,40 @@ void passMerge(uvec2 p) {
     }
     diff /= 9.0;
     refMean /= 9.0;
-    float varLuma = max(pc.noiseS * refMean + pc.noiseO, 1e-7) * 0.25;   // mean of 4 samples
-    float varDiff = 2.0 * varLuma / 9.0;
-    float thr = 4.0 * varDiff + 0.0016 * refMean * refMean;              // 2 sigma, plus 4% of signal
-    float w = clamp(2.0 - diff * diff / thr, 0.0, 1.0);
-    if (w <= 0.0) return;
+    float e = pc.relExp;
+    // Noise of each side in reference units (a short frame's noise grows by 1/e once scaled up).
+    float varRef = max(pc.noiseS * refMean + pc.noiseO, 1e-7) * 0.25;   // mean of 4 samples
+    float varAlt = max(pc.noiseS * refMean * e + pc.noiseO, 1e-7) * 0.25 / (e * e);
+    float varDiff = (varRef + varAlt) / 9.0;
+    float thr = 2.0 * varDiff + 0.0016 * refMean * refMean;             // ~2 sigma, plus 4% of signal
 
     uint x = uint(q.x) * 2u, y = uint(q.y) * 2u;
+    if (cellMax(x, y) >= pc.black + CLIP * pc.range) return;            // clipped here: no information
+    float w;
+    if (pc.hdr != 0u && e < 0.99) {
+        // Short frame: only for highlights the burst is losing. Where the reference is clipped the
+        // difference test cannot work, so the tile alignment alone decides.
+        w = smoothstep(0.55, 0.9, refMean);
+        if (refMean < 0.9) w *= clamp(2.0 - diff * diff / thr, 0.0, 1.0);
+    } else {
+        w = clamp(2.0 - diff * diff / thr, 0.0, 1.0);
+    }
+    if (w <= 0.0) return;
+
     uint ox = p.x * 2u, oy = p.y * 2u;
+    float gain = w / e;
     for (uint j = 0u; j < 2u; ++j)
         for (uint i = 0u; i < 2u; ++i)
-            u_num[(oy + j) * pc.width + ox + i] += w * max(float(rawAt(x + i, y + j)) - pc.black, 0.0);
+            u_num[(oy + j) * pc.width + ox + i] += gain * max(float(rawAt(x + i, y + j)) - pc.black, 0.0);
     u_den[p.y * cw + p.x] += w;
+}
+
+// Merged radiance can exceed the frame's range in HDR: linear below 0.6 of range, then a smooth
+// shoulder to 0.98 (same curve as the CPU HDR merge).
+float shoulder(float lin) {
+    float xr = lin / pc.range;
+    if (xr > 0.6) xr = 0.6 + 0.38 * (1.0 - exp(-(xr - 0.6) / 0.38));
+    return xr * pc.range;
 }
 
 void passResolve(uvec2 p) {
@@ -163,8 +202,11 @@ void passResolve(uvec2 p) {
     uint x = p.x * 2u, y = p.y * 2u;
     float top = pc.black + pc.range;
     for (uint j = 0u; j < 2u; ++j) {
-        float a = clamp(u_num[(y + j) * pc.width + x] / den + pc.black + 0.5, 0.0, top);
-        float b = clamp(u_num[(y + j) * pc.width + x + 1u] / den + pc.black + 0.5, 0.0, top);
+        float la = u_num[(y + j) * pc.width + x] / den;
+        float lb = u_num[(y + j) * pc.width + x + 1u] / den;
+        if (pc.hdr != 0u) { la = shoulder(la); lb = shoulder(lb); }
+        float a = clamp(la + pc.black + 0.5, 0.0, top);
+        float b = clamp(lb + pc.black + 0.5, 0.0, top);
         // x is even and the stride is even, so the pair is one aligned 32-bit word.
         uint idx16 = pc.slot * pc.stride * pc.height + (y + j) * pc.stride + x;
         u_raw[idx16 >> 1u] = (uint(a) & 0xFFFFu) | ((uint(b) & 0xFFFFu) << 16u);

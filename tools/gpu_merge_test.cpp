@@ -130,7 +130,7 @@ int main() {
     int bad = 0;
     for (int f = 0; f < N; ++f) {
         GpuBurstMerge::AddStats st;
-        if (!m.add(uint32_t(f), &st)) return fail("add");
+        if (!m.add(uint32_t(f), 1.0f, &st)) return fail("add");
         int ex = shift[f][0] / 2, ey = shift[f][1] / 2;
         std::printf("frame %d: %.1f ms, median offset %d,%d (expected %d,%d)\n", f, st.ms, st.medianDx, st.medianDy, ex, ey);
         if (f > 0 && (st.medianDx != ex || st.medianDy != ey)) bad++;
@@ -161,8 +161,51 @@ int main() {
                 std::sqrt(eSingle / n), std::sqrt(eMerged / n), gain, std::sqrt(double(N)));
     std::printf("ghost path: mean abs error merged %.4f vs single frame %.4f\n", eGhost / ng, eGhostSingle / ng);
 
+    // HDR: six burst frames where the bright half of the scene clips, plus two short frames at
+    // -2 EV with their own shake. The clipped highlights must come back with their texture.
+    const float bright = 2.2f, eShort = 0.25f;
+    int nClip = 0;
+    for (int f = 0; f < N; ++f) {
+        const float e = (f >= 6) ? eShort : 1.0f;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                float c = scene[size_t(y - shift[f][1] + M) * SW + (x - shift[f][0] + M)] * bright * e;
+                float v = c + std::sqrt(noiseS * std::min(c, 1.0f) + noiseO) * g(rng);
+                ringMap[size_t(f) * S * H + size_t(y) * S + x] = uint16_t(std::clamp(black + v * range + 0.5f, 0.f, white));
+            }
+    }
+    if (!m.begin(ring, W, H, S, black, white, noiseS, noiseO, true)) return fail("hdr begin");
+    for (int f = 0; f < N; ++f) {
+        if (!m.add(uint32_t(f), (f >= 6) ? eShort : 1.0f)) return fail("hdr add");
+    }
+    if (!m.resolve(0)) return fail("hdr resolve");
+    if (const float* den = m.debugDen()) {
+        for (int k = 0; k < 6; ++k) {
+            int x = 200 + 150 * k, y = 300;
+            double c = scene[size_t(y + M) * SW + (x + M)] * bright;
+            std::printf("  dbg c %.2f den %.3f\n", c, den[size_t(y / 2) * (W / 2) + x / 2]);
+        }
+    }
+    // Where the base clips, merged values must follow the true radiance through the resolve
+    // shoulder (linear to 0.6, rolling off to 0.98), not sit flat at the clip.
+    auto shoulder = [](double xr) { return xr > 0.6 ? 0.6 + 0.38 * (1.0 - std::exp(-(xr - 0.6) / 0.38)) : xr; };
+    double eHdr = 0, eClip = 0;
+    for (int y = 40; y < H - 40; y += 2)
+        for (int x = 40; x < W - 40; x += 2) {
+            double c = scene[size_t(y + M) * SW + (x + M)] * bright;
+            if (c < 1.05 || c > 3.5) continue;
+            nClip++;
+            double mg = (ringMap[size_t(y) * S + x] - black) / range;
+            eHdr += std::fabs(mg - shoulder(c));
+            eClip += std::fabs(1.0 - c);
+        }
+    eHdr /= std::max(nClip, 1);
+    eClip /= std::max(nClip, 1);
+    std::printf("hdr: %d clipped samples, mean error vs true (through the shoulder) %.4f; the clipped frame was off by %.3f\n",
+                nClip, eHdr, eClip);
     m.destroy();
     int rc = 0;
+    if (eHdr > 0.03) rc = fail("HDR highlights not recovered");
     if (bad) rc = fail("tile offsets do not match the shake");
     if (gain < 2.0) rc = fail("noise reduction under 2x");
     if (eGhost / ng > 2.0 * eGhostSingle / ng) rc = fail("moving square leaves a ghost");

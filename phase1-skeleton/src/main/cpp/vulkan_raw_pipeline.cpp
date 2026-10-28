@@ -2997,7 +2997,8 @@ static void estimateShift(const std::vector<float>& refSmall, const std::vector<
 
 bool VulkanRawPipeline::stackBegin(int mode) {
     std::lock_guard<std::mutex> lock(mRenderMutex);
-    if (!mDevice || !mLastFrame.valid || mode < 0 || mode > 3) return false;
+    if (!mDevice || !mLastFrame.valid || mode < 0 || mode > 4) return false;
+    if (mode == 4 && !mGpuMerge.ready()) return false;
     StackState s;
     s.mode = mode;
     s.width = mLastFrame.width & ~1;
@@ -3007,9 +3008,11 @@ bool VulkanRawPipeline::stackBegin(int mode) {
     s.white = mLastFrame.whiteLevel;
     size_t px = static_cast<size_t>(s.width) * static_cast<size_t>(s.height);
     // Burst: tile-aligned merge on the GPU when it is there; the CPU accumulators are then unused.
-    s.gpu = (mode == 0) && mGpuMerge.ready()
+    // Mode 4 (GPU HDR) is the same merge with short highlight frames on top.
+    s.gpu = (mode == 0 || mode == 4) && mGpuMerge.ready()
         && mGpuMerge.begin(mRawStorageBuffer, s.width, s.height, s.stride, s.black, s.white,
-                           mNoiseS.load(), mNoiseO.load());
+                           mNoiseS.load(), mNoiseO.load(), mode == 4);
+    if (mode == 4 && !s.gpu) return false;
     if (s.gpu) {
         // nothing to allocate here
     } else if (mode == 3) {
@@ -3044,9 +3047,9 @@ bool VulkanRawPipeline::stackAddSlot(uint32_t slot, int width, int height, int s
         static_cast<const uint8_t*>(mMappedRawBuffer) + static_cast<size_t>(slot) * frameBytes);
     if (s.gpu) {
         GpuBurstMerge::AddStats st;
-        if (!mGpuMerge.add(slot, &st)) return false;
-        LOGI("GPU merge frame %d (slot %u): %.1f ms, median shift %d,%d px", s.frames, slot, st.ms,
-             2 * st.medianDx, 2 * st.medianDy);
+        if (!mGpuMerge.add(slot, relExposure, &st)) return false;
+        LOGI("GPU merge frame %d (slot %u, x%.2f): %.1f ms, median shift %d,%d px", s.frames, slot, relExposure,
+             st.ms, 2 * st.medianDx, 2 * st.medianDy);
         s.frames++;
         return true;
     }
@@ -3237,7 +3240,7 @@ void VulkanRawPipeline::ringReset() {
 int VulkanRawPipeline::stackPrimeFromRing(uint64_t markSeq, int maxFrames) {
     std::lock_guard<std::mutex> lock(mRenderMutex);
     StackState& s = mStack;
-    if (!mStackActive.load() || s.mode != 0 || s.frames != 0 || !mLastFrame.valid || markSeq == 0) return 0;
+    if (!mStackActive.load() || (s.mode != 0 && s.mode != 4) || s.frames != 0 || !mLastFrame.valid || markSeq == 0) return 0;
     // Keep two slots free so live frames still have somewhere to land while the merge runs.
     const int cap = std::min(maxFrames, static_cast<int>(mRingSlots) - 2);
     if (cap < 2) return 0;
@@ -3636,6 +3639,11 @@ JNIEXPORT jint JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeStackPrimeFromRing(JNIEnv* /*env*/, jobject /*thiz*/,
     jlong markSeq, jint maxFrames) {
     return gPipeline ? gPipeline->stackPrimeFromRing(static_cast<uint64_t>(markSeq), maxFrames) : 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeGpuMergeReady(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return (gPipeline && gPipeline->gpuMergeReady()) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL

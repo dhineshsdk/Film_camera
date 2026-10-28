@@ -25,6 +25,8 @@ struct MergePc {
     uint32_t tileOff, tilesW, tilesH, prevOff, prevW, prevH, prevTile;
     float noiseS, noiseO;
     uint32_t refL0, altL0;
+    float relExp;
+    uint32_t hdr;
 };
 static_assert(sizeof(MergePc) <= 128, "push constants must fit the 128-byte minimum");
 
@@ -179,7 +181,7 @@ void GpuBurstMerge::destroy() {
 }
 
 bool GpuBurstMerge::begin(VkBuffer rawRing, int width, int height, int stride, float black, float white,
-                          float noiseS, float noiseO) {
+                          float noiseS, float noiseO, bool hdr) {
     if (!ready() || !rawRing || width < 128 || height < 128 || (width & 1) || (height & 1) || (stride & 1)) return false;
     const bool resize = (width != mWidth || height != mHeight);
     if (resize || rawRing != mRing) {
@@ -203,7 +205,11 @@ bool GpuBurstMerge::begin(VkBuffer rawRing, int width, int height, int stride, f
             if (!createBuf(mPyr, VkDeviceSize(pyrFloats) * 2 * sizeof(float), false)
                 || !createBuf(mTiles, VkDeviceSize(tileCount) * 2 * sizeof(int32_t), true)
                 || !createBuf(mNum, px * sizeof(float), false)
+#ifdef __ANDROID__
                 || !createBuf(mDen, px / 4 * sizeof(float), false)) {
+#else
+                || !createBuf(mDen, px / 4 * sizeof(float), true)) {   // desktop tests read it back
+#endif
                 GM_LOGE("GPU merge: buffers for %dx%d failed", width, height);
                 destroyBuf(mPyr); destroyBuf(mTiles); destroyBuf(mNum); destroyBuf(mDen);
                 mWidth = mHeight = 0;
@@ -234,6 +240,7 @@ bool GpuBurstMerge::begin(VkBuffer rawRing, int width, int height, int stride, f
     mNoiseS = std::max(noiseS, 2e-5f);
     mNoiseO = std::max(noiseO, 1e-7f);
     mFrames = 0;
+    mHdr = hdr;
     return true;
 }
 
@@ -280,8 +287,10 @@ bool GpuBurstMerge::submit(VkCommandBuffer cmd) {
     return vkWaitForFences(mDevice, 1, &mFence, VK_TRUE, 2'000'000'000ull) == VK_SUCCESS;
 }
 
-bool GpuBurstMerge::add(uint32_t slot, AddStats* stats) {
+bool GpuBurstMerge::add(uint32_t slot, float relExp, AddStats* stats) {
     if (!ready() || mWidth == 0) return false;
+    // The reference defines the exposure scale; short frames only make sense after it.
+    if (mFrames == 0) relExp = 1.0f;
     auto t0 = std::chrono::steady_clock::now();
     const bool first = (mFrames == 0);
     MergePc base = {};
@@ -294,6 +303,8 @@ bool GpuBurstMerge::add(uint32_t slot, AddStats* stats) {
     base.noiseS = mNoiseS;
     base.noiseO = mNoiseO;
     base.prevOff = kNoPrev;
+    base.relExp = std::clamp(relExp, 1.0f / 64.0f, 64.0f);
+    base.hdr = mHdr ? 1u : 0u;
 
     VkCommandBuffer cmd = beginCmd();
     // Luma pyramid of this frame (into the reference levels for the first frame).
@@ -372,6 +383,8 @@ bool GpuBurstMerge::resolve(uint32_t slot) {
     p.stride = static_cast<uint32_t>(mStride);
     p.black = mBlack;
     p.range = mRange;
+    p.relExp = 1.0f;
+    p.hdr = mHdr ? 1u : 0u;
     dispatch(cmd, &p, mLv[0].w, mLv[0].h);
     return submit(cmd);
 }

@@ -27,15 +27,20 @@ public:
     bool ready() const { return mPipeline != VK_NULL_HANDLE; }
 
     // Sizes the buffers for this frame size (kept between bursts) and clears the burst.
+    // hdr: clip-aware merge for a burst plus short highlight frames, with a shoulder on resolve.
     bool begin(VkBuffer rawRing, int width, int height, int stride, float black, float white,
-               float noiseS, float noiseO);
-    // Folds ring slot `slot` in; the first call sets the reference. Waits for the GPU.
-    bool add(uint32_t slot, AddStats* stats = nullptr);
+               float noiseS, float noiseO, bool hdr = false);
+    // Folds ring slot `slot` in; the first call sets the reference. relExp is this frame's
+    // ISO x shutter over the reference's (1 for burst frames, < 1 for HDR highlight frames).
+    // Waits for the GPU.
+    bool add(uint32_t slot, float relExp = 1.0f, AddStats* stats = nullptr);
     // Writes the merged mosaic over ring slot `slot`. Waits for the GPU.
     bool resolve(uint32_t slot);
     int frames() const { return mFrames; }
     // Copies the L0 offsets of the last add (tilesW x tilesH, x/y pairs) for tests.
     bool readTiles(std::vector<int32_t>& out, uint32_t& tilesW, uint32_t& tilesH);
+    // Merge weight per Bayer cell (desktop builds only; null on Android).
+    const float* debugDen() const { return static_cast<const float*>(mDen.map); }
 
 private:
     struct Level { uint32_t w = 0, h = 0, refOff = 0, altOff = 0, tile = 0, radius = 0,
@@ -69,4 +74,5 @@ private:
     int mWidth = 0, mHeight = 0, mStride = 0;
     float mBlack = 0.0f, mRange = 1.0f, mNoiseS = 0.0f, mNoiseO = 0.0f;
     int mFrames = 0;
+    bool mHdr = false;
 };

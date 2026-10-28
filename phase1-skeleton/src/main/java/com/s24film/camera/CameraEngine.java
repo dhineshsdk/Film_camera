@@ -1171,11 +1171,20 @@ public class CameraEngine {
             burstTarget = (autoPushStops >= 3f) ? 12 : BURST_FRAMES;
         } else if (stackMode == STACK_BURST) {
             burstTarget = BURST_FRAMES;
+        } else if (stackMode == STACK_OFF && autoMerge && !videoMode && !stackActive && gpuMerge()) {
+            // Stage A3: every photo is a merge of the frames already captured, sized to the light.
+            stackMode = STACK_BURST;
+            nightRestore = true;
+            int iso = resultIso;
+            burstTarget = (iso <= 200) ? 4 : (iso <= 800) ? 6 : BURST_FRAMES;
         }
+        if (stackMode == STACK_HDR) burstTarget = HDR_BASE_FRAMES;
         if (stackMode != STACK_OFF && !stackActive && (stackMode != STACK_HDR || manualAeActive)) {
             // Multi-frame shot: the frame listener collects the frames, then takes the normal capture path.
-            // A burst starts from the frames already in the ring, up to the one on screen now.
-            this.ringMarkSeq = (stackMode == STACK_BURST) ? VulkanRenderer.nativeRingMark() : 0L;
+            // A burst (and a GPU HDR's base burst) starts from the frames already in the ring, up to
+            // the one on screen now.
+            boolean fromRing = stackMode == STACK_BURST || (stackMode == STACK_HDR && gpuMerge());
+            this.ringMarkSeq = fromRing ? VulkanRenderer.nativeRingMark() : 0L;
             this.stackBegun = false;
             this.stackActive = true;
             return;
@@ -1201,6 +1210,8 @@ public class CameraEngine {
     private static final long HDR_MAX_SHUTTER_NS = 33_333_333L;    // 1/30 s: no long frame to blur by hand; ISO and the aligned merge make up the rest
     private static final float HDR_STEP_UNDER = 0.25f;
     private static final float HDR_STEP_OVER = 4.0f;
+    private static final int HDR_BASE_FRAMES = 6;    // GPU HDR: zero-lag base burst
+    private static final int HDR_SHORT_FRAMES = 2;   // GPU HDR: -2 EV highlight frames
 
     public interface StackStatus {
         void onStackStatus(String text);
@@ -1246,9 +1257,20 @@ public class CameraEngine {
         postStack(text);
     }
 
-    private static int nativeStackMode(int mode) {
+    // Merge every photo (Stage A3): a single shot becomes a 4 to 8 frame zero-lag burst when the
+    // GPU merge is there. Off = the old single frame.
+    private volatile boolean autoMerge = true;
+    public void setAutoMerge(boolean on) { autoMerge = on; }
+    public boolean isAutoMerge() { return autoMerge; }
+    private Boolean gpuMergeReady = null;
+    private boolean gpuMerge() {
+        if (gpuMergeReady == null || !gpuMergeReady) gpuMergeReady = VulkanRenderer.nativeGpuMergeReady();
+        return gpuMergeReady;
+    }
+
+    private int nativeStackMode(int mode) {
         switch (mode) {
-            case STACK_HDR: return 1;
+            case STACK_HDR: return gpuMerge() ? 4 : 1;   // 4: GPU burst plus short highlight frames
             case STACK_LONG: return 2;
             case STACK_TRAILS: return 3;
             default: return 0;
@@ -1326,7 +1348,7 @@ public class CameraEngine {
             stackBaseExpNs = currentExposureNs;
             stackBaseProd = (double) resultIso * (double) resultExposureNs;
             if (stackBaseProd <= 0.0) stackBaseProd = (double) currentIso * currentExposureNs;
-            ringLeft = (stackMode == STACK_BURST && ringMarkSeq > 0L)
+            ringLeft = ((stackMode == STACK_BURST || stackMode == STACK_HDR) && ringMarkSeq > 0L)
                 ? VulkanRenderer.nativeStackPrimeFromRing(ringMarkSeq, burstTarget) : 0;
             if (stackMode == STACK_BURST) Log.i(TAG, "Burst: " + ringLeft + " of " + burstTarget + " frames from before the press (ring " + VulkanRenderer.nativeRingSlots() + ")");
         }
@@ -1366,11 +1388,51 @@ public class CameraEngine {
             }
 
             case STACK_HDR:
-                return hdrStep();
+                return (ringMarkSeq > 0L) ? hdrGpuStep() : hdrStep();
 
             default:
                 return stackAbort("bad mode");
         }
+    }
+
+    // GPU HDR (Stage A3), HDR+ style: the base is a zero-lag burst at the metered exposure, so
+    // people in it are as sharp as in a normal shot; then two short frames at -2 EV are added only
+    // where the burst clips. Phases: 0 base burst, 1 short frames, then merge.
+    private boolean hdrGpuStep() {
+        if (stackPhase == 0) {
+            long t0 = System.nanoTime();
+            if (ringLeft > 0) {
+                do {
+                    int left = VulkanRenderer.nativeStackAddFromRing();
+                    if (left < 0) return stackAbort("ring add failed");
+                    ringLeft = left;
+                    stackFrames++;
+                } while (ringLeft > 0 && System.nanoTime() - t0 < RING_BUDGET_NS);
+                if (ringLeft > 0) return false;
+            } else if (stackFrames == 0) {
+                if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
+                stackFrames++;
+            }
+            postStack("HDR highlights");
+            planBracket(HDR_STEP_UNDER);
+            stackPhase = 1;
+            stackSettle = 0;
+            stackWait = 0;
+            currentIso = stackTargetIso;
+            currentExposureNs = stackTargetExpNs;
+            applyManualExposure();
+            return false;
+        }
+        // The burst alone is a good photo: if the short exposure never lands, keep it.
+        if (stackWait > STACK_TIMEOUT_FRAMES) return stackFinish();
+        stackSettle = resultMatches(stackTargetIso, stackTargetExpNs) ? stackSettle + 1 : 0;
+        if (stackSettle < STACK_SETTLE_FRAMES) return false;
+        float rel = (float) ((double) resultIso * (double) resultExposureNs / stackBaseProd);
+        if (!VulkanRenderer.nativeStackAdd(rel)) return stackAbort("add failed");
+        stackFrames++;
+        Log.i(TAG, "HDR short frame at " + String.format(java.util.Locale.US, "%+.2f EV", Math.log(rel) / Math.log(2.0)));
+        if (++stackPhase > HDR_SHORT_FRAMES) return stackFinish();
+        return false;
     }
 
     // Phases: 0 base frame, 1 under (-2 EV), 2 over (+2 EV), 3 back to base, then merge.

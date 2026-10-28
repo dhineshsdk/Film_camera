@@ -89,4 +89,6 @@ public class VulkanRenderer {
     public static native int nativeRingSlots();
     public static native int nativeStackPrimeFromRing(long markSeq, int maxFrames);
     public static native int nativeStackAddFromRing();
+    // True when the GPU burst merge (Stage A2) initialised; bursts and HDR then run on the GPU.
+    public static native boolean nativeGpuMergeReady();
 }
