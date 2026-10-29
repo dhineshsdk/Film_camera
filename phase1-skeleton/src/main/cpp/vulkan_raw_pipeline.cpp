@@ -50,7 +50,8 @@ static constexpr FilmFormat kFilmFormats[4] = {
     {5.79f, 1.90f, 60.0f, 0.35f},   // Super 8
     {69.5f, 0.70f, 70.0f, 0.00f},   // 6x7 medium format
 };
-static constexpr float kGrainClumpMm = 0.0105f;    // visible silver/dye clump scale
+static constexpr float kGrainClumpMm = 0.0105f;
+static constexpr float kAdjacencyMm = 0.1f;        // developer diffusion width (edge effects, B4)    // visible silver/dye clump scale
 static constexpr float kSuper70FocalMm = 80.0f;     // Super 70mm IMAX archetype: 80 mm f/2.0
 static constexpr float kSuper70FNumber = 2.0f;
 static constexpr float kSuper70GateLongMm = 52.5f;  // 52.5 x 23 mm gate
@@ -1112,7 +1113,7 @@ namespace {
 // than their speed, classic cubic-grain stocks (Tri-X, HP5, Fomapan...) coarser. Clump mixes
 // in a second, larger grain scale so fast films look clumpy rather than just noisy. Best-guess
 // values, to be tuned against real scans.
-struct GrainCharacter { float size, clump, colour; };
+struct GrainCharacter { float size, clump, colour, adjacency; };
 
 GrainCharacter grainCharacter(const s24film::LookProfile120& lp, int boxIso) {
     const std::string id = lp.lookId ? lp.lookId : "";
@@ -1135,7 +1136,19 @@ GrainCharacter grainCharacter(const s24film::LookProfile120& lp, int boxIso) {
     float colour = 0.47f;
     if (lp.category == s24film::LookCategory::COLOR_REVERSAL_SLIDE) colour = 0.32f;
     else if (lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2) colour = 0.38f;
-    return {size, clump, colour};
+    // Stage B4: development adjacency (edge) effect strength. Strongest in B&W (acutance
+    // developers), moderate in colour negative and cine, weak in slides; none for digital looks.
+    float adj = 0.0f;
+    switch (lp.category) {
+        case s24film::LookCategory::BLACK_AND_WHITE:          adj = has("xp2") ? 0.18f : 0.32f; break;
+        case s24film::LookCategory::COLOR_NEGATIVE_C41:       adj = 0.18f; break;
+        case s24film::LookCategory::MOTION_PICTURE_ECN2:      adj = 0.20f; break;
+        case s24film::LookCategory::COLOR_REVERSAL_SLIDE:     adj = 0.12f; break;
+        case s24film::LookCategory::FUJIFILM_SIMULATION:      adj = 0.10f; break;
+        case s24film::LookCategory::CREATIVE_INSTANT_EXPIRED: adj = 0.10f; break;
+        default: break;
+    }
+    return {size, clump, colour, adj};
 }
 }  // namespace
 
@@ -1253,7 +1266,7 @@ bool VulkanRawPipeline::loadLookLut() {
         g.misc2[3] = 0.0f;
         {
             const GrainCharacter gc = grainCharacter(lp, i < s24film::kTotalMasterLooks ? s24film::kMasterLookBoxIso[i] : 0);
-            g.grain[0] = gc.size; g.grain[1] = gc.clump; g.grain[2] = gc.colour; g.grain[3] = 0.0f;
+            g.grain[0] = gc.size; g.grain[1] = gc.clump; g.grain[2] = gc.colour; g.grain[3] = gc.adjacency;
         }
 
         // Slides: the LUT puts scene mid grey almost at D-min (a washed-out, over-exposed
@@ -1940,6 +1953,10 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     }
     u.halW2[0] = hw[4] / hsum;
     u.diffW2[0] = dw[4] / dsum;
+    // Stage B4: developer adjacency effect. Developer diffuses ~0.1 mm on the negative, so the
+    // local exposure reference is the pyramid level of that width in output pixels.
+    u.diffW2[1] = std::clamp(std::log2(std::max(kAdjacencyMm / fmt.frameLongMm * outLong, 1.0f)), 1.0f, 5.0f);
+    u.diffW2[2] = mAdjacency.load() ? 1.0f : 0.0f;
 
     // Super 70mm IMAX bokeh: background (infinity) CoC for the current focus distance.
     const bool bokeh = (uiLens == kSuper70LensIndex) && mPortraitMode.load();
@@ -3716,6 +3733,11 @@ Java_com_s24film_camera_VulkanRenderer_nativeStackPrimeFromRing(JNIEnv* /*env*/,
 JNIEXPORT jboolean JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeGpuMergeReady(JNIEnv* /*env*/, jobject /*thiz*/) {
     return (gPipeline && gPipeline->gpuMergeReady()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetAdjacency(JNIEnv* /*env*/, jobject /*thiz*/, jboolean on) {
+    if (gPipeline) gPipeline->setAdjacency(on == JNI_TRUE);
 }
 
 JNIEXPORT jint JNICALL

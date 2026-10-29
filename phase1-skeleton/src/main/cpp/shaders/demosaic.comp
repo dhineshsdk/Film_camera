@@ -65,7 +65,7 @@ struct LookGpu {
     vec4 print0;    // xyz=printer-light logE offset per layer, w=print LUT row (< 0: no print stage)
     vec4 print1;    // xyz=print paper D-min, w=print exposure scale
     vec4 print2;    // xyz=rendered black (subtracted), w=mid-grey normalisation
-    vec4 grain;     // x=grain size multiplier, y=clump mix, z=dye-layer grain share, w=unused
+    vec4 grain;     // x=grain size multiplier, y=clump mix, z=dye-layer grain share, w=adjacency strength
 };
 
 layout(std430, binding = 5) readonly buffer LookBuffer {
@@ -88,7 +88,7 @@ layout(std140, binding = 6) uniform FrameParams {
     vec4 f_halW;     // halation weights for mip 1..4
     vec4 f_halW2;    // x=halation weight for mip 5, y=film format blur sigma (px), z=gate vignette
     vec4 f_diffW;    // diffusion weights for mip 1..4
-    vec4 f_diffW2;   // x=diffusion weight for mip 5
+    vec4 f_diffW2;   // x=diffusion weight for mip 5, y=adjacency pyramid LOD, z=adjacency on (B4)
     vec4 f_bokeh;    // x=enable, y=CoC radius at infinity (output px), z=focus u, w=focus v
     vec4 f_bokeh2;   // x=in-focus radius, y=falloff radius (fraction of height), z=push(+)/pull(-) stops, w=tap count
     vec4 f_grain;    // x=luma sharpening amount, y=grain tile texel size in output px, z=strength, w=format grain gain
@@ -911,7 +911,7 @@ vec3 printNegative(LookGpu L, vec3 Dn) {
     return max(pow(vec3(10.0), -(Dp - L.print1.xyz)) - L.print2.xyz, vec3(0.0));
 }
 
-vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, out bool printed) {
+vec3 emulsion120(int idx, vec3 scene, vec3 sceneLocal, ivec2 p, bool master, out bool encoded, out bool printed) {
     LookGpu L = u_looks[idx];
     encoded = false;
     printed = false;
@@ -926,6 +926,17 @@ vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, ou
     M_look = mat3(1.0) + clamp(f_look2.w, 0.0, 1.0) * (M_look - mat3(1.0));
     vec3 e = max(M_look * scene, vec3(1e-6));
     vec3 logE = log2(e / 0.18) * 0.30102999566 + L.misc2.w;   // misc2.w: slide exposure offset
+    // Stage B4: development adjacency effects. Developer exhausts next to heavily exposed areas
+    // and stays fresh next to light ones, so density is pushed away from its ~0.1 mm
+    // neighbourhood: a thin dark/light rim along edges (Eberhard / Mackie lines) and more
+    // local contrast in fine detail. Per layer, so colour edges also get the spatial part of
+    // the DIR inter-image effect. Capped at +-0.12 log E to keep it a rim, not a halo.
+    if (f_diffW2.z > 0.5 && L.grain.w > 0.0 && int(L.misc.y + 0.5) != 2) {
+        vec3 local = int(L.misc.x + 0.5) == 3 ? vec3(max(luminanceAP1(sceneLocal), 0.0)) : sceneLocal;
+        vec3 eL = max(M_look * local, vec3(1e-6));
+        float k = L.grain.w * max(1.0 + 0.25 * f_bokeh2.z, 0.5);
+        logE += clamp(k * log2(e / eL) * 0.30102999566, vec3(-0.12), vec3(0.12));
+    }
 
     vec3 D = sampleLookLut(L.misc.w, logE);
     int mode = int(L.misc.y + 0.5);
@@ -1450,7 +1461,8 @@ void stageFilm() {
         linearOut = spectralEmulsion(lookIdx, scene, p);
         printed = true;
     } else if (lookIdx >= 0) {
-        linearOut = emulsion120(lookIdx, scene, p, master, encoded, printed);
+        vec3 sceneLocal = f_diffW2.z > 0.5 ? textureLod(u_aces_pyramid, uv, f_diffW2.y).rgb : scene;
+        linearOut = emulsion120(lookIdx, scene, sceneLocal, p, master, encoded, printed);
     } else {
         linearOut = legacyEmulsion(scene, p);
     }

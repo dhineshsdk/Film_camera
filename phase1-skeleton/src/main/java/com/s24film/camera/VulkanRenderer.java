@@ -94,4 +94,5 @@ public class VulkanRenderer {
     public static native int nativeStackAddFromRing();
     // True when the GPU burst merge (Stage A2) initialised; bursts and HDR then run on the GPU.
     public static native boolean nativeGpuMergeReady();
+    public static native void nativeSetAdjacency(boolean on);
 }

@@ -173,3 +173,12 @@ Same branch. Grain size now follows each stock's speed and grain type: slow and 
 2. **Colour grain.** Same wall on Portra 400 and Velvia 50. Pass: Portra shows faint colour speckle in the grain; Velvia's grain is almost colourless.
 3. **Format.** Same stock (HP5) on 35 mm and 120 (6x7) formats. Pass: 120 grain looks finer than 35 mm, as before.
 4. **No pattern.** Pass: no visible tile repeat or grid in a flat sky on any of the above.
+
+## Stage B4: development edge effects
+
+Same branch. Film developer runs out next to bright areas and stays fresh next to dark ones, which draws a thin rim along strong edges and lifts fine local contrast. This is now in every film look (strongest on B&W, weaker on colour negative and cine, weakest on slides; none on digital looks). New debug command to compare: `adb shell am broadcast -a com.s24film.camera.DEBUG --es cmd adjacency --ez on false` (and `true` to turn it back on).
+
+1. **Window frame, HP5.** A dark window frame against a bright sky, HP5 Plus, phone on a table. Shoot with adjacency on, then off. Pass: with it on, the sky right next to the frame is a touch brighter and the frame edge a touch darker (a thin rim, not a glow), and fine texture like brick or foliage looks crisper.
+2. **No halos.** Same pair on Portra 400. Pass: no visible bright or dark band wider than a few pixels around edges; flat areas (sky, wall) unchanged.
+3. **Colour edges.** A red object against a green or blue background on Portra 400. Pass: the colour boundary looks slightly cleaner, with no coloured fringe.
+4. **Live view.** Pass: the viewfinder frame rate is unchanged with it on.

@@ -258,6 +258,7 @@ public:
     int stackAddFromRing();
     uint32_t ringSlots() const { return mRingSlots; }
     bool gpuMergeReady() const { return mGpuMerge.ready(); }
+    void setAdjacency(bool on) { mAdjacency.store(on); }
 
 private:
     struct StackState {
@@ -474,6 +475,7 @@ private:
     std::atomic<bool> mBurstModeEnabled{true};
     std::atomic<float> mUserEvStops{0.0f};
     std::atomic<float> mUserGrainMult{1.0f};
+    std::atomic<bool> mAdjacency{true};      // Stage B4 development edge effects
     std::atomic<float> mUserHalationMult{1.0f};
 
     // Phase 5 Cinema Parameters
