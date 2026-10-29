@@ -1205,7 +1205,7 @@ vec3 srgbEotf(vec3 v) {
     return mix(v / 12.92, pow((v + 0.055) / 1.055, vec3(2.4)), greaterThan(v, vec3(0.04045)));
 }
 
-vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
+vec3 spectralEmulsion(int idx, vec3 scene, vec3 sceneLocal, ivec2 p) {
     LookGpu L = u_looks[idx];
     int type = int(u_spec[1] + 0.5);
     bool mono = type == 2;
@@ -1215,6 +1215,15 @@ vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
     vec3 E = s * specCamera(rgb.rg / s);
     float offset = u_spec[2];
     vec3 logE = log2(max(E, vec3(1e-9)) / 0.18) * 0.30102999566 + offset;
+    // Development adjacency effects (B4), same as the curve model, on the spectral layer exposures.
+    if (f_diffW2.z > 0.5 && L.grain.w > 0.0) {
+        vec3 rl = max(sceneLocal, vec3(1e-6));
+        float sl = rl.r + rl.g + rl.b;
+        vec3 EL = sl * specCamera(rl.rg / sl);
+        if (mono) { E = vec3(dot(E, vec3(1.0 / 3.0))); EL = vec3(dot(EL, vec3(1.0 / 3.0))); }
+        float k = L.grain.w * max(1.0 + 0.25 * f_bokeh2.z, 0.5);
+        logE += clamp(k * log2(max(E, vec3(1e-9)) / max(EL, vec3(1e-9))) * 0.30102999566, vec3(-0.12), vec3(0.12));
+    }
     vec3 D = specCurves(logE);
     vec3 dMid = specCurves(vec3(offset));
     vec3 dMax = max(specVec3(4) / 1.05, vec3(0.1));
@@ -1577,18 +1586,20 @@ void stageFilm() {
     bool encoded = false;
     bool printed = false;
     vec3 linearOut;
-    if (lookIdx >= 0 && int(u_spec[0] + 0.5) == lookIdx && u_spec[0] >= 0.0) {
-        linearOut = spectralEmulsion(lookIdx, scene, p);
+    vec3 sceneLocal = (lookIdx >= 0 && f_diffW2.z > 0.5) ? textureLod(u_aces_pyramid, uv, f_diffW2.y).rgb : scene;
+    bool spectral = lookIdx >= 0 && int(u_spec[0] + 0.5) == lookIdx && u_spec[0] >= 0.0;
+    if (spectral) {
+        linearOut = spectralEmulsion(lookIdx, scene, sceneLocal, p);
         printed = true;
     } else if (lookIdx >= 0) {
-        vec3 sceneLocal = f_diffW2.z > 0.5 ? textureLod(u_aces_pyramid, uv, f_diffW2.y).rgb : scene;
         linearOut = emulsion120(lookIdx, scene, sceneLocal, p, master, encoded, printed);
     } else {
         linearOut = legacyEmulsion(scene, p);
     }
     if (lookIdx >= 0 && !encoded) {
         bool monoLook = int(u_looks[lookIdx].misc.x + 0.5) == 3;
-        if (monoLook && f_halW2.w > 0.5) linearOut = bwPaperPrint(linearOut, int(f_halW2.w + 0.5));
+        // The spectral B&W path already prints on its own paper model.
+        if (monoLook && !spectral && f_halW2.w > 0.5) linearOut = bwPaperPrint(linearOut, int(f_halW2.w + 0.5));
         if (f_lfx3.w > 0.5) linearOut = scannerRendition(linearOut, int(f_lfx3.w + 0.5), monoLook);
     }
     if (lookIdx >= 0 && !encoded) {

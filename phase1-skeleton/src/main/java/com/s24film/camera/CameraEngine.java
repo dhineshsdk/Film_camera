@@ -1347,6 +1347,7 @@ public class CameraEngine {
     private long ringMarkSeq = 0L;   // newest ring frame at the shutter press (0 = none)
     private int ringLeft = 0;        // ring frames still to fold into the burst
     private static final long RING_BUDGET_NS = 30_000_000L;   // keeps the RAW stream drained
+    private static final long SLOW_MERGE_MS = 400L;           // a merge step slower than this ends the burst
 
     public void setStackMode(int mode) { stackMode = Math.max(STACK_OFF, Math.min(STACK_TRAILS, mode)); }
     public int getStackMode() { return stackMode; }
@@ -1482,6 +1483,13 @@ public class CameraEngine {
                     return stackAbort("add failed");
                 } else {
                     stackFrames++;
+                }
+                // Each merge step holds the camera thread (and a RAW buffer). If one is far slower
+                // than planned, finish early rather than starve the HAL.
+                long stepMs = (System.nanoTime() - now) / 1_000_000L;
+                if (stepMs > SLOW_MERGE_MS && stackFrames >= 2 && stackFrames < burstTarget) {
+                    Log.w(TAG, "Burst: merge step took " + stepMs + " ms, finishing at " + stackFrames + " frames");
+                    burstTarget = stackFrames;
                 }
                 postStack("Burst " + stackFrames + "/" + burstTarget);
                 if (stackFrames >= burstTarget) return stackFinish();
