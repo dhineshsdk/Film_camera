@@ -164,3 +164,28 @@ Same branch. HDR shots now hand their real highlight values (up to about 2x the 
 2. **Sky in HDR.** Daylight HDR with a bright sky on Portra 400 and Velvia. Pass: the sky holds colour and gradation into the bright parts (no flat white patch, no grey or cyan cast near the sun).
 3. **No change in plain shots.** A normal daytime shot on Portra 400 looks the same as before B2.
 4. **Look strength slider.** The darkroom halation slider still scales the glow from none to strong.
+
+## Performance pass: startup, preview, save
+
+Build: branch `claude/project-thread-wy5gcw` (PR "Faster startup, smoother preview, quicker saves"). Measure the
+current `main` build first with the same steps so there is a before and after. Logcat:
+`adb logcat -s S24FilmVulkan S24FilmDNG S24FilmCamera S24FilmDepth`.
+
+1. **Cold start, first run.** Install, open the app once. Pass: `Startup: 6 compute pipelines in N ms (pipeline cache cold)`
+   followed by `Pipeline cache saved (N KB)`, and `Startup: Vulkan init N ms`. Note both numbers.
+2. **Warm start.** Force-stop, reopen. Pass: `pipeline cache warm` and the pipeline time well below step 1 (expect a
+   fraction of it). Note `Vulkan init` ms. Then press Home and reopen 3 times: each reopen logs `warm`.
+3. **Driver change guard.** Optional: after a One UI update the first start logs
+   `Pipeline cache on disk is for another GPU or driver; rebuilding`, then `cold` once, then `warm` again.
+4. **Preview smoothness.** Debug tab > Stats On. Hold on a detailed scene 30 s, then pan slowly. Note the fps and ms in
+   the pill against `main`. Pass: fps at least as high as before and steadier while panning (the camera thread no
+   longer runs at background priority). Repeat with the phone warm after 5 minutes of use.
+5. **Shot-to-save.** Single shot, daylight, 5 shots one after another waiting for the shutter to come back each time.
+   Pass: `Master still ... rendered + read back in N ms` and `Saved Master Film JPEG ... encode N ms, write N ms, save
+   total N ms`. Compare `save total` against the time between shutter press and `Saved` on `main` (stopwatch or log
+   timestamps). JPEGs open in Samsung Gallery, show EXIF (shutter, ISO / EI, f-number) and still show as Ultra HDR.
+6. **Portrait off memory.** Portrait Off, open the app. Pass: no `Depth model loaded` line at start. Turn Portrait On:
+   the line appears within a few seconds; a portrait shot still blurs the background. `adb shell dumpsys meminfo
+   com.s24film.camera` (TOTAL PSS) with Portrait Off should be lower than on `main`.
+7. **Stability.** 10 minutes of preview with a lens switch every minute and a shot every minute, then start and stop a
+   video once. Pass: no HAL restart or reboot, preview stays live, the next start still logs `warm`.

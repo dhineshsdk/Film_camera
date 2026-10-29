@@ -11,6 +11,8 @@ public class VulkanRenderer {
 
     // assetManager supplies assets/s24_master_120_looks.bin (256 x 120 RGBA32F LUT).
     public static native boolean nativeInit(Surface surface, AssetManager assetManager);
+    // Folder for the persistent Vulkan pipeline cache (Context.getCacheDir()); call before nativeInit.
+    public static native void nativeSetCacheDir(String dir);
     public static native void nativeDestroy();
     public static native void nativeSetFilmLook(int stockIndex, int lensIndex, boolean burstEnabled);
     // lookIndex 0..119 selects kMasterLooks120; -1 keeps the legacy GeneratedFilmDatabase stock.

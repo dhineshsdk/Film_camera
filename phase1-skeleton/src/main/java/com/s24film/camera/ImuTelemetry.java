@@ -7,6 +7,7 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.Display;
@@ -61,7 +62,8 @@ public class ImuTelemetry implements SensorEventListener {
 
     public void start() {
         seedFromDisplay();
-        sensorThread = new HandlerThread("IMU_500Hz_Thread", Thread.MAX_PRIORITY);
+        // Nice value, not a Thread priority (Thread.MAX_PRIORITY = nice +10 = background).
+        sensorThread = new HandlerThread("IMU_500Hz_Thread", Process.THREAD_PRIORITY_DISPLAY);
         sensorThread.start();
         sensorHandler = new Handler(sensorThread.getLooper());
 
