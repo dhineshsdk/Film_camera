@@ -280,3 +280,9 @@ Prefix each with `adb shell am broadcast -a com.s24film.camera.DEBUG`.
 3. **Scanners, Portra 400.** Scanner 0, 1, 2. Pass: Frontier is punchier with richer greens and slightly cool shadows; Noritsu is softer, warmer and gentler in the highlights; neither shifts mid grey noticeably.
 4. **B&W paper, HP5.** bwpaper 0, 1, 2. Pass: RC gives deeper blacks and brighter whites than the scan; FB Warmtone is slightly softer with a warm brown-black tone and a cream white. No banding in skies.
 5. **Reset.** Set all three back to 0. Pass: the image matches the earlier default look.
+
+### UI: print and scan chips (integration build only until PR #14 merges)
+25. Look tab > PRINT AND SCAN: Paper cycles Auto, Crystal Archive … Ektacolor Edge; Scan cycles Neutral, Frontier,
+    Noritsu; B&W cycles Scan, Multigrade RC, Multigrade FB Warmtone; Edge effects On/Off. Each change shows in the
+    preview within a frame or two (colour/contrast for paper and scanner, B&W stocks for B&W paper). Choices survive
+    an app restart.

@@ -127,6 +127,14 @@ public class MainActivity extends Activity implements
     private View viewShutterFlash;
     private Button btnLens, btnAnamorphic, btnGate, btnStepPrint, btnBurst, btnStack, btnWb, btnRotate;
     private Button btnTimer, btnGrid, btnSounds;
+    // Print and scan (Look tab): print paper, lab scanner, B&W paper, development edge effects
+    private Button btnPrintPaper, btnScanner, btnBwPaper, btnAdjacency;
+    private int printPaper = 0, scanner = 0, bwPaper = 0;
+    private boolean adjacency = true;
+    private static final String[] PRINT_PAPERS = {"Auto", "Crystal Archive", "Endura Premier", "Supra Endura",
+        "Portra Endura", "Ultra Endura", "Vision 2383", "Vision 2393", "Ektacolor Edge"};
+    private static final String[] SCANNERS = {"Neutral", "Frontier", "Noritsu"};
+    private static final String[] BW_PAPERS = {"Scan", "Multigrade RC", "Multigrade FB Warmtone"};
     private ViewfinderHud vfHud;
     private int timerSec = 0;          // self-timer: 0, 3 or 10 s
     private int timerLeft = 0;         // > 0 while counting down
@@ -285,6 +293,14 @@ public class MainActivity extends Activity implements
         btnGrid = findViewById(R.id.btn_grid);
         btnSounds = findViewById(R.id.btn_sounds);
         btnTimer.setOnClickListener(this);
+        btnPrintPaper = findViewById(R.id.btn_print_paper);
+        btnScanner = findViewById(R.id.btn_scanner);
+        btnBwPaper = findViewById(R.id.btn_bw_paper);
+        btnAdjacency = findViewById(R.id.btn_adjacency);
+        btnPrintPaper.setOnClickListener(this);
+        btnScanner.setOnClickListener(this);
+        btnBwPaper.setOnClickListener(this);
+        btnAdjacency.setOnClickListener(this);
         btnGrid.setOnClickListener(this);
         btnSounds.setOnClickListener(this);
 
@@ -396,6 +412,10 @@ public class MainActivity extends Activity implements
         sheetTabs[TAB_DEBUG].setVisibility(debugMenu ? View.VISIBLE : View.GONE);
         DepthBokeh.setPortrait(prefs.getBoolean("portrait", false));
         timerSec = prefs.getInt("timer", 0);
+        printPaper = Math.max(0, Math.min(PRINT_PAPERS.length - 1, prefs.getInt("print_paper", 0)));
+        scanner = Math.max(0, Math.min(SCANNERS.length - 1, prefs.getInt("scanner", 0)));
+        bwPaper = Math.max(0, Math.min(BW_PAPERS.length - 1, prefs.getInt("bw_paper", 0)));
+        adjacency = prefs.getBoolean("adjacency", true);
         gridOn = prefs.getBoolean("grid", false);
         soundsOn = prefs.getBoolean("sounds", true);
         fx.setSound(soundsOn);
@@ -467,6 +487,7 @@ public class MainActivity extends Activity implements
         VulkanRenderer.nativeSetFilmFormat(filmFormat);
         VulkanRenderer.nativeSetDarkroomSliders(userEvStops, userGrainMult, effectiveHalationMult());
         VulkanRenderer.nativeSetCinemaParams(anamorphicMode, cinemaGate, gateWeaveActive, stepPrint8fps);
+        pushPrintScan();
         refreshSelection();
         tvFilm.setText(activeLookLabel());
     }
@@ -521,7 +542,23 @@ public class MainActivity extends Activity implements
         btnGrid.setText(gridOn ? "Grid: 3×3" : "Grid: Off");
         btnSounds.setSelected(soundsOn);
         btnSounds.setText(soundsOn ? "Sounds: On" : "Sounds: Off");
+        btnPrintPaper.setText("Paper: " + PRINT_PAPERS[printPaper]);
+        btnPrintPaper.setSelected(printPaper != 0);
+        btnScanner.setText("Scan: " + SCANNERS[scanner]);
+        btnScanner.setSelected(scanner != 0);
+        btnBwPaper.setText("B&W: " + BW_PAPERS[bwPaper]);
+        btnBwPaper.setSelected(bwPaper != 0);
+        btnAdjacency.setText(adjacency ? "Edge effects: On" : "Edge effects: Off");
+        btnAdjacency.setSelected(adjacency);
         refreshQuickBar();
+    }
+
+    // The renderer keeps none of these across a restart, so they are re-sent with every look sync.
+    private void pushPrintScan() {
+        VulkanRenderer.nativeSetPrintPaper(printPaper);
+        VulkanRenderer.nativeSetScanner(scanner);
+        VulkanRenderer.nativeSetBwPaper(bwPaper);
+        VulkanRenderer.nativeSetAdjacency(adjacency);
     }
 
     // Quick bar on the top band. Video hides the still-only items (capture mode, timer, portrait).
@@ -1293,6 +1330,16 @@ public class MainActivity extends Activity implements
             cancelTimer();
             refreshQuickBar();
             showStatus(timerSec > 0 ? "Self-timer " + timerSec + " s" : "Self-timer off", false);
+        } else if (id == R.id.btn_print_paper || id == R.id.btn_scanner || id == R.id.btn_bw_paper
+                   || id == R.id.btn_adjacency) {
+            if (id == R.id.btn_print_paper) printPaper = (printPaper + 1) % PRINT_PAPERS.length;
+            else if (id == R.id.btn_scanner) scanner = (scanner + 1) % SCANNERS.length;
+            else if (id == R.id.btn_bw_paper) bwPaper = (bwPaper + 1) % BW_PAPERS.length;
+            else adjacency = !adjacency;
+            getSharedPreferences("ui", 0).edit().putInt("print_paper", printPaper).putInt("scanner", scanner)
+                .putInt("bw_paper", bwPaper).putBoolean("adjacency", adjacency).apply();
+            if (vulkanInitialized) pushPrintScan();
+            refreshSelection();
         } else if (id == R.id.btn_grid) {
             gridOn = !gridOn;
             getSharedPreferences("ui", 0).edit().putBoolean("grid", gridOn).apply();

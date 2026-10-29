@@ -511,6 +511,15 @@
                             <Button android:id="@+id/btn_lens" style="@style/Chip" android:text="Lens: Clean" />
                         </LinearLayout>
                     </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="PRINT AND SCAN" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_print_paper" style="@style/Chip" android:text="Paper: Auto" />
+                            <Button android:id="@+id/btn_scanner" style="@style/Chip" android:text="Scan: Neutral" />
+                            <Button android:id="@+id/btn_bw_paper" style="@style/Chip" android:text="B&amp;W: Scan" />
+                            <Button android:id="@+id/btn_adjacency" style="@style/Chip" android:text="Edge effects: On" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
                 </LinearLayout>
 
                 <!-- Capture: exposure model, colour and files, processing, frame, video -->
