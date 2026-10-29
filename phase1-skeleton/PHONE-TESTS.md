@@ -182,3 +182,19 @@ Same branch. Film developer runs out next to bright areas and stays fresh next t
 2. **No halos.** Same pair on Portra 400. Pass: no visible bright or dark band wider than a few pixels around edges; flat areas (sky, wall) unchanged.
 3. **Colour edges.** A red object against a green or blue background on Portra 400. Pass: the colour boundary looks slightly cleaner, with no coloured fringe.
 4. **Live view.** Pass: the viewfinder frame rate is unchanged with it on.
+
+## Stage B5: print paper, lab scanner and B&W paper
+
+Same branch. Three new choices, for now only from adb (the settings screen hookup comes with the UI work). Each takes effect on the next frame; take the same shot with each setting.
+
+- Print paper for colour negative and cine looks: `--es cmd paper --ei idx N` with 0 auto (Portra Endura for C-41, Vision 2383 for cine), 1 Fujifilm Crystal Archive (Frontier lab paper), 2 Endura Premier, 3 Supra Endura, 4 Portra Endura, 5 Ultra Endura, 6 Vision 2383, 7 Vision Premier 2393, 8 Ektacolor Edge.
+- Lab scanner: `--es cmd scanner --ei idx N` with 0 neutral (as before), 1 Frontier, 2 Noritsu.
+- B&W paper: `--es cmd bwpaper --ei idx N` with 0 scan (as before), 1 Ilford Multigrade RC (neutral, grade 3), 2 Multigrade FB Warmtone.
+
+Prefix each with `adb shell am broadcast -a com.s24film.camera.DEBUG`.
+
+1. **Papers, Portra 400.** A scene with skin, sky and foliage. Shoot paper 0, 1, 3 and 5. Pass: all keep neutral greys; Crystal Archive is a touch cooler and greener, Supra is softer and gentler on skin, Ultra is the most saturated. None turns magenta or green overall. The log line `Print paper N` appears on each change.
+2. **Cine prints, Vision3 500T.** Paper 6 vs 7. Pass: 2393 has deeper blacks and a little more contrast than 2383.
+3. **Scanners, Portra 400.** Scanner 0, 1, 2. Pass: Frontier is punchier with richer greens and slightly cool shadows; Noritsu is softer, warmer and gentler in the highlights; neither shifts mid grey noticeably.
+4. **B&W paper, HP5.** bwpaper 0, 1, 2. Pass: RC gives deeper blacks and brighter whites than the scan; FB Warmtone is slightly softer with a warm brown-black tone and a cream white. No banding in skies.
+5. **Reset.** Set all three back to 0. Pass: the image matches the earlier default look.

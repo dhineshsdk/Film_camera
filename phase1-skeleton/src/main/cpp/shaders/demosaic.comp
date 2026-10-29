@@ -86,7 +86,7 @@ layout(std140, binding = 6) uniform FrameParams {
     vec4 f_look2;    // x=LUT logE max, y=LUT rows, z=LUT cols, w=spectral crosstalk strength
     vec4 f_optics;   // x=halation threshold, y=halation strength, z=diffusion strength, w=diffusion threshold
     vec4 f_halW;     // halation weights for mip 1..4
-    vec4 f_halW2;    // x=halation weight for mip 5, y=film format blur sigma (px), z=gate vignette
+    vec4 f_halW2;    // x=halation weight for mip 5, y=film format blur sigma (px), z=gate vignette, w=B&W paper (B5)
     vec4 f_diffW;    // diffusion weights for mip 1..4
     vec4 f_diffW2;   // x=diffusion weight for mip 5, y=adjacency pyramid LOD, z=adjacency on (B4)
     vec4 f_bokeh;    // x=enable, y=CoC radius at infinity (output px), z=focus u, w=focus v
@@ -100,7 +100,7 @@ layout(std140, binding = 6) uniform FrameParams {
     vec4 f_lfx0;     // lens: x=ghosts, y=halo, z=anamorphic streak, w=streak length (uv)
     vec4 f_lfx1;     // lens: rgb=streak tint, w=veiling glare
     vec4 f_lfx2;     // lens: x=lateral CA, y=distortion k1, z=swirl, w=starburst
-    vec4 f_lfx3;     // lens: x=iris blades, y=f-number, z=anamorphic squeeze, w=unused
+    vec4 f_lfx3;     // lens: x=iris blades, y=f-number, z=anamorphic squeeze, w=scanner (B5)
     vec4 f_lfx4;     // lens: rgb=coating tint, w=flare threshold (scene-linear)
 };
 
@@ -911,6 +911,52 @@ vec3 printNegative(LookGpu L, vec3 Dn) {
     return max(pow(vec3(10.0), -(Dp - L.print1.xyz)) - L.print2.xyz, vec3(0.0));
 }
 
+// Stage B5: B&W darkroom print on Ilford Multigrade. The scan is linear in negative density,
+// so log10(lin / 0.18) is the printing exposure; the paper's characteristic curve (logistic in
+// log exposure, D-max ~2.1) gives the deep blacks and compressed highlights of a wet print.
+// 1 = MG RC neutral, grade 3; 2 = MG FB warmtone, grade 2.5 with a warm image tone.
+vec3 bwPaperPrint(vec3 lin, int paper) {
+    float y = max(dot(lin, vec3(1.0 / 3.0)), 1e-6);
+    float x = log(y / 0.18) * 0.4342945;
+    const float dBase = 0.05;
+    float dMax = paper == 2 ? 2.2 : 2.05;
+    float slope = paper == 2 ? 2.8 : 3.0;
+    float x0 = -log((dMax - dBase) / (0.745 - dBase) - 1.0) * 0.4342945 / slope;
+    float d = dBase + (dMax - dBase) / (1.0 + pow(10.0, slope * (x - x0)));
+    float r = pow(10.0, -(d - dBase)) * (0.18 / pow(10.0, -(0.745 - dBase)));
+    vec3 outc = vec3(r);
+    if (paper == 2) {
+        // Warmtone: the silver image is brown-black in the shadows and mids, paper base cream.
+        float t = clamp(1.0 - r / 0.9, 0.0, 1.0);
+        outc *= mix(vec3(1.0, 0.985, 0.955), vec3(1.0, 0.95, 0.86), t);
+    }
+    return outc;
+}
+
+// Stage B5: lab scanner renditions applied to the scanned or printed film image.
+// 1 = Fujifilm Frontier: punchier mid contrast, richer greens and cyans, slightly cool-green
+//     shadows. 2 = Noritsu: softer, warmer and more neutral, gentler highlights (skin tones).
+vec3 scannerRendition(vec3 lin, int scanner, bool mono) {
+    float y = max(dot(lin, vec3(0.2627, 0.6780, 0.0593)), 1e-6);
+    float contrast = scanner == 1 ? 1.07 : 0.95;
+    float y2 = 0.18 * pow(y / 0.18, contrast);
+    if (scanner == 2) y2 = y2 / (1.0 + 0.06 * max(y2 - 0.5, 0.0));   // softer highlight roll
+    vec3 c = lin * (y2 / y);
+    if (mono) return c;
+    float sat = scanner == 1 ? 1.08 : 0.97;
+    c = max(vec3(y2) + sat * (c - vec3(y2)), vec3(0.0));
+    if (scanner == 1) {
+        // Greens toward cyan-green, and a faint green-cyan cast in the shadows.
+        c.g *= 1.0 + 0.04 * clamp((c.g - max(c.r, c.b)) / max(c.g, 1e-4), 0.0, 1.0);
+        float sh = clamp(1.0 - y2 / 0.18, 0.0, 1.0);
+        c *= mix(vec3(1.0), vec3(0.975, 1.005, 1.01), sh);
+    } else {
+        float mid = clamp(1.0 - abs(log2(y2 / 0.18)) / 3.0, 0.0, 1.0);
+        c *= mix(vec3(1.0), vec3(1.02, 1.0, 0.975), mid);
+    }
+    return c;
+}
+
 vec3 emulsion120(int idx, vec3 scene, vec3 sceneLocal, ivec2 p, bool master, out bool encoded, out bool printed) {
     LookGpu L = u_looks[idx];
     encoded = false;
@@ -1465,6 +1511,11 @@ void stageFilm() {
         linearOut = emulsion120(lookIdx, scene, sceneLocal, p, master, encoded, printed);
     } else {
         linearOut = legacyEmulsion(scene, p);
+    }
+    if (lookIdx >= 0 && !encoded) {
+        bool monoLook = int(u_looks[lookIdx].misc.x + 0.5) == 3;
+        if (monoLook && f_halW2.w > 0.5) linearOut = bwPaperPrint(linearOut, int(f_halW2.w + 0.5));
+        if (f_lfx3.w > 0.5) linearOut = scannerRendition(linearOut, int(f_lfx3.w + 0.5), monoLook);
     }
 
     float hdrRatio = max(f_hdr.x, 1.0);

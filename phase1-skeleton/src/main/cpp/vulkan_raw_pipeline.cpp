@@ -24,6 +24,10 @@ static constexpr float kExposureScale = 2.4f;
 static constexpr float kDirMultiplier = 1.8f;      // DIR coupler inter-image saturation
 static constexpr uint32_t kPrintRowPaper = 94;     // Kodak Portra Endura
 static constexpr uint32_t kPrintRowEcn2 = 90;      // Kodak Vision 2383
+// Stage B5 print paper choices (LUT rows): 0 auto, 1 Fujifilm Crystal Archive (Frontier lab
+// paper), 2 Endura Premier, 3 Supra Endura, 4 Portra Endura, 5 Ultra Endura, 6 Vision 2383,
+// 7 Vision Premier 2393, 8 Ektacolor Edge.
+static constexpr uint32_t kPrintPaperRows[] = {0, 89, 93, 95, 94, 96, 90, 91, 92};
 static constexpr float kPrintContrast = 0.85f;     // print exposure scale (system gamma)
 static constexpr float kPrintMidDensity = 0.78f;   // mid grey print density (~16.6% reflectance)
 static constexpr float kSlideMidDensity = 1.0f;    // mid grey above D-min on a reversal film
@@ -1152,6 +1156,94 @@ GrainCharacter grainCharacter(const s24film::LookProfile120& lp, int boxIso) {
 }
 }  // namespace
 
+// Print stage for one look, from the LUT payload kept by loadLookLut. Rerun when the print
+// paper choice changes (Stage B5).
+void VulkanRawPipeline::computePrintStage(uint32_t i) {
+    const auto& lp = s24film::kMasterLooks120[i];
+    LookGpu& g = mLookParams[i];
+    const uint32_t rows = mLutRows;
+    const uint32_t cols = mLutCols;
+    const uint32_t row = static_cast<uint32_t>(g.misc[3]);
+    const bool normalized = g.misc2[0] > 0.5f;
+    const float dirBoost = g.misc[2];
+    auto sampleRow = [&](uint32_t r, float col, uint32_t ch) -> float {
+        float cc = std::clamp(col, 0.0f, static_cast<float>(cols - 1));
+        uint32_t c0 = static_cast<uint32_t>(cc);
+        uint32_t c1 = std::min(c0 + 1, cols - 1);
+        float f = cc - static_cast<float>(c0);
+        const float* rp = mLutPayload.data() + static_cast<size_t>(r) * cols * 4;
+        return rp[c0 * 4 + ch] * (1.0f - f) + rp[c1 * 4 + ch] * f;
+    };
+
+    // Print stage for colour negatives: the negative is printed onto paper (C-41, Fujifilm
+    // sims) or 2383 release print (ECN-2), which gives the S-shaped film tone scale with a
+    // soft shoulder. Printer lights put mid grey at the same print density on every layer.
+    g.print0[3] = -1.0f;
+    const bool printable = mLutReady && g.misc[1] == 0.0f &&
+        (lp.category == s24film::LookCategory::COLOR_NEGATIVE_C41 ||
+         lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2 ||
+         lp.category == s24film::LookCategory::FUJIFILM_SIMULATION);
+    if (printable) {
+        const uint32_t prow = std::min<uint32_t>(printRowFor(static_cast<int>(lp.category)), rows - 1);
+        auto colOf = [&](float logE) {
+            return (logE - kLutLogEMin) / (kLutLogEMax - kLutLogEMin) * static_cast<float>(cols - 1);
+        };
+        float x0[3], dminP[3], blk[3];
+        for (int c = 0; c < 3; ++c) {
+            dminP[c] = sampleRow(prow, 0.0f, static_cast<uint32_t>(c));
+            const float target = kPrintMidDensity + dminP[c];
+            float found = 0.0f;
+            for (uint32_t k = 1; k < cols; ++k) {
+                float d0 = sampleRow(prow, static_cast<float>(k - 1), static_cast<uint32_t>(c));
+                float d1 = sampleRow(prow, static_cast<float>(k), static_cast<uint32_t>(c));
+                if (d0 <= target && d1 >= target) {
+                    float f = (d1 > d0) ? (target - d0) / (d1 - d0) : 0.0f;
+                    found = kLutLogEMin + (static_cast<float>(k - 1) + f) / static_cast<float>(cols - 1) * (kLutLogEMax - kLutLogEMin);
+                    break;
+                }
+            }
+            x0[c] = found;
+        }
+        // Render an unexposed frame through the same chain to find the black to subtract.
+        const float logEBlack = std::log10(1e-6f / 0.18f);
+        float Dn[3];
+        for (int c = 0; c < 3; ++c) {
+            Dn[c] = sampleRow(row, colOf(logEBlack), static_cast<uint32_t>(c)) * (normalized ? lp.dMax[c] : 1.0f);
+        }
+        const float s = 1.0f + dirBoost * kDirMultiplier;
+        const float off = (1.0f - s) * 0.5f;
+        for (int c = 0; c < 3; ++c) {
+            float dd = 0.0f;
+            for (int j = 0; j < 3; ++j) dd += ((j == c) ? s : off) * (Dn[j] - g.dMid[j]);
+            float logEp = -dd / std::max(g.gamma[c], 0.2f) * 0.5f * kPrintContrast + x0[c];
+            float Dp = sampleRow(prow, colOf(logEp), static_cast<uint32_t>(c));
+            blk[c] = std::pow(10.0f, -(Dp - dminP[c]));
+        }
+        const float midLin = std::pow(10.0f, -kPrintMidDensity);
+        float greyMean = 0.0f;
+        for (int c = 0; c < 3; ++c) greyMean += (midLin - blk[c]) / 3.0f;
+        for (int c = 0; c < 3; ++c) {
+            g.print0[c] = x0[c];
+            g.print1[c] = dminP[c];
+            g.print2[c] = blk[c];
+        }
+        g.print0[3] = static_cast<float>(prow);
+        g.print1[3] = kPrintContrast;
+        g.print2[3] = midLin / std::max(greyMean, 1e-4f);
+    }
+}
+
+// Print paper row for a look category: the user's choice (Stage B5), else Portra Endura for
+// colour negatives and Vision 2383 for cine negatives.
+uint32_t VulkanRawPipeline::printRowFor(int category) const {
+    const auto cat = static_cast<s24film::LookCategory>(category);
+    const int choice = mPrintPaper.load();
+    if (choice > 0 && choice < static_cast<int>(sizeof(kPrintPaperRows) / sizeof(kPrintPaperRows[0]))) {
+        return kPrintPaperRows[choice];
+    }
+    return (cat == s24film::LookCategory::MOTION_PICTURE_ECN2) ? kPrintRowEcn2 : kPrintRowPaper;
+}
+
 bool VulkanRawPipeline::loadLookLut() {
     const uint32_t lookCount = s24film::kTotalMasterLooks;
     mLookParams.assign(lookCount, LookGpu{});
@@ -1200,6 +1292,9 @@ bool VulkanRawPipeline::loadLookLut() {
         cols = 1;
         payload.assign(4, 0.0f);
     }
+    mLutPayload = payload;
+    mLutRows = rows;
+    mLutCols = cols;
 
     const float midCol = (0.0f - kLutLogEMin) / (kLutLogEMax - kLutLogEMin) * static_cast<float>(cols - 1);
     auto sampleRow = [&](uint32_t row, float col, uint32_t ch) -> float {
@@ -1291,63 +1386,7 @@ bool VulkanRawPipeline::loadLookLut() {
             }
         }
 
-        // Print stage for colour negatives: the negative is printed onto paper (C-41, Fujifilm
-        // sims) or 2383 release print (ECN-2), which gives the S-shaped film tone scale with a
-        // soft shoulder. Printer lights put mid grey at the same print density on every layer.
-        g.print0[3] = -1.0f;
-        const bool printable = mLutReady && mode == 0.0f &&
-            (lp.category == s24film::LookCategory::COLOR_NEGATIVE_C41 ||
-             lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2 ||
-             lp.category == s24film::LookCategory::FUJIFILM_SIMULATION);
-        if (printable) {
-            const uint32_t prow = std::min<uint32_t>(
-                (lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2) ? kPrintRowEcn2 : kPrintRowPaper, rows - 1);
-            auto colOf = [&](float logE) {
-                return (logE - kLutLogEMin) / (kLutLogEMax - kLutLogEMin) * static_cast<float>(cols - 1);
-            };
-            float x0[3], dminP[3], blk[3];
-            for (int c = 0; c < 3; ++c) {
-                dminP[c] = sampleRow(prow, 0.0f, static_cast<uint32_t>(c));
-                const float target = kPrintMidDensity + dminP[c];
-                float found = 0.0f;
-                for (uint32_t k = 1; k < cols; ++k) {
-                    float d0 = sampleRow(prow, static_cast<float>(k - 1), static_cast<uint32_t>(c));
-                    float d1 = sampleRow(prow, static_cast<float>(k), static_cast<uint32_t>(c));
-                    if (d0 <= target && d1 >= target) {
-                        float f = (d1 > d0) ? (target - d0) / (d1 - d0) : 0.0f;
-                        found = kLutLogEMin + (static_cast<float>(k - 1) + f) / static_cast<float>(cols - 1) * (kLutLogEMax - kLutLogEMin);
-                        break;
-                    }
-                }
-                x0[c] = found;
-            }
-            // Render an unexposed frame through the same chain to find the black to subtract.
-            const float logEBlack = std::log10(1e-6f / 0.18f);
-            float Dn[3];
-            for (int c = 0; c < 3; ++c) {
-                Dn[c] = sampleRow(row, colOf(logEBlack), static_cast<uint32_t>(c)) * (normalized ? lp.dMax[c] : 1.0f);
-            }
-            const float s = 1.0f + dirBoost * kDirMultiplier;
-            const float off = (1.0f - s) * 0.5f;
-            for (int c = 0; c < 3; ++c) {
-                float dd = 0.0f;
-                for (int j = 0; j < 3; ++j) dd += ((j == c) ? s : off) * (Dn[j] - g.dMid[j]);
-                float logEp = -dd / std::max(g.gamma[c], 0.2f) * 0.5f * kPrintContrast + x0[c];
-                float Dp = sampleRow(prow, colOf(logEp), static_cast<uint32_t>(c));
-                blk[c] = std::pow(10.0f, -(Dp - dminP[c]));
-            }
-            const float midLin = std::pow(10.0f, -kPrintMidDensity);
-            float greyMean = 0.0f;
-            for (int c = 0; c < 3; ++c) greyMean += (midLin - blk[c]) / 3.0f;
-            for (int c = 0; c < 3; ++c) {
-                g.print0[c] = x0[c];
-                g.print1[c] = dminP[c];
-                g.print2[c] = blk[c];
-            }
-            g.print0[3] = static_cast<float>(prow);
-            g.print1[3] = kPrintContrast;
-            g.print2[3] = midLin / std::max(greyMean, 1e-4f);
-        }
+        computePrintStage(i);
     }
 
     if (mLutReady) {
@@ -1870,6 +1909,11 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     u.lsc[1] = static_cast<float>(s24film::kLscGridCols);
     u.lsc[2] = static_cast<float>(s24film::kLscGridRows);
 
+    if (mPrintDirty.exchange(false) && mLutReady) {
+        for (uint32_t i = 0; i < s24film::kTotalMasterLooks; ++i) computePrintStage(i);
+        std::memcpy(mLookMapped, mLookParams.data(), mLookParams.size() * sizeof(LookGpu));
+        LOGI("Print paper %d", mPrintPaper.load());
+    }
     const int lookIdx = mLutReady ? mActiveLookIdx.load() : -1;
     u.look[0] = static_cast<float>(lookIdx);
     u.look[1] = kDirMultiplier;
@@ -1935,6 +1979,8 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     // Resolution: Gaussian with the system cut-off period, in output pixels.
     u.halW2[1] = 0.35f * outLong / (fmt.lpPerMm * fmt.frameLongMm);
     u.halW2[2] = fmt.gateVignette;
+    u.halW2[3] = static_cast<float>(mBwPaper.load());
+    u.lfx3[3] = static_cast<float>(mScanner.load());
     const float ringLod = std::log2(std::max(ringPx, 1.0f));
     float hw[5];
     float dw[5];
@@ -3733,6 +3779,21 @@ Java_com_s24film_camera_VulkanRenderer_nativeStackPrimeFromRing(JNIEnv* /*env*/,
 JNIEXPORT jboolean JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeGpuMergeReady(JNIEnv* /*env*/, jobject /*thiz*/) {
     return (gPipeline && gPipeline->gpuMergeReady()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetPrintPaper(JNIEnv* /*env*/, jobject /*thiz*/, jint idx) {
+    if (gPipeline) gPipeline->setPrintPaper(idx);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetScanner(JNIEnv* /*env*/, jobject /*thiz*/, jint idx) {
+    if (gPipeline) gPipeline->setScanner(idx);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetBwPaper(JNIEnv* /*env*/, jobject /*thiz*/, jint idx) {
+    if (gPipeline) gPipeline->setBwPaper(idx);
 }
 
 JNIEXPORT void JNICALL

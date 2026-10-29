@@ -123,6 +123,15 @@ final class DebugControl extends BroadcastReceiver {
             case "slowstill":   // Stage A4: long still frames when the live shutter runs out (--ez on true|false)
                 engine.setSlowStill(intent.getBooleanExtra("on", true));
                 break;
+            case "paper":       // Stage B5: print paper 0 auto .. 8 (--ei idx N)
+                VulkanRenderer.nativeSetPrintPaper(intent.getIntExtra("idx", 0));
+                break;
+            case "scanner":     // Stage B5: 0 neutral, 1 Frontier, 2 Noritsu (--ei idx N)
+                VulkanRenderer.nativeSetScanner(intent.getIntExtra("idx", 0));
+                break;
+            case "bwpaper":     // Stage B5: 0 scan, 1 Multigrade RC, 2 Multigrade FB warmtone (--ei idx N)
+                VulkanRenderer.nativeSetBwPaper(intent.getIntExtra("idx", 0));
+                break;
             case "adjacency":   // Stage B4: development edge effects (--ez on true|false)
                 VulkanRenderer.nativeSetAdjacency(intent.getBooleanExtra("on", true));
                 break;
