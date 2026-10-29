@@ -65,6 +65,7 @@ struct LookGpu {
     vec4 print0;    // xyz=printer-light logE offset per layer, w=print LUT row (< 0: no print stage)
     vec4 print1;    // xyz=print paper D-min, w=print exposure scale
     vec4 print2;    // xyz=rendered black (subtracted), w=mid-grey normalisation
+    vec4 grain;     // x=grain size multiplier, y=clump mix, z=dye-layer grain share, w=adjacency strength
 };
 
 layout(std430, binding = 5) readonly buffer LookBuffer {
@@ -85,9 +86,9 @@ layout(std140, binding = 6) uniform FrameParams {
     vec4 f_look2;    // x=LUT logE max, y=LUT rows, z=LUT cols, w=spectral crosstalk strength
     vec4 f_optics;   // x=halation threshold, y=halation strength, z=diffusion strength, w=diffusion threshold
     vec4 f_halW;     // halation weights for mip 1..4
-    vec4 f_halW2;    // x=halation weight for mip 5, y=film format blur sigma (px), z=gate vignette
+    vec4 f_halW2;    // x=halation weight for mip 5, y=film format blur sigma (px), z=gate vignette, w=B&W paper (B5)
     vec4 f_diffW;    // diffusion weights for mip 1..4
-    vec4 f_diffW2;   // x=diffusion weight for mip 5
+    vec4 f_diffW2;   // x=diffusion weight for mip 5, y=adjacency pyramid LOD, z=adjacency on (B4)
     vec4 f_bokeh;    // x=enable, y=CoC radius at infinity (output px), z=focus u, w=focus v
     vec4 f_bokeh2;   // x=in-focus radius, y=falloff radius (fraction of height), z=push(+)/pull(-) stops, w=tap count
     vec4 f_grain;    // x=luma sharpening amount, y=grain tile texel size in output px, z=strength, w=format grain gain
@@ -99,7 +100,7 @@ layout(std140, binding = 6) uniform FrameParams {
     vec4 f_lfx0;     // lens: x=ghosts, y=halo, z=anamorphic streak, w=streak length (uv)
     vec4 f_lfx1;     // lens: rgb=streak tint, w=veiling glare
     vec4 f_lfx2;     // lens: x=lateral CA, y=distortion k1, z=swirl, w=starburst
-    vec4 f_lfx3;     // lens: x=iris blades, y=f-number, z=anamorphic squeeze, w=unused
+    vec4 f_lfx3;     // lens: x=iris blades, y=f-number, z=anamorphic squeeze, w=scanner (B5)
     vec4 f_lfx4;     // lens: rgb=coating tint, w=flare threshold (scene-linear)
 };
 
@@ -850,11 +851,18 @@ vec3 applyDensityGrain(vec2 coord, vec3 D, vec3 dMax, float strength) {
 // Film grain from the tileable noise texture (unit variance per channel). R is shared across
 // the dye layers (luminance grain), G/B/A add a smaller independent part per layer. Amplitude
 // is in density units and peaks in the mid-tones, like real emulsion granularity.
-vec3 filmGrain(vec2 coord, vec3 D, vec3 dMax, float strength, bool mono) {
+vec3 filmGrain(vec2 coord, vec3 D, vec3 dMax, float strength, bool mono, vec4 gc) {
     if (strength <= 0.001) return D;
     vec2 jitter = hash3f(uvec3(u_frame_seed, 911u, 3571u)).xy * 512.0;
-    vec4 n = textureLod(u_grain_tile, (coord / max(f_grain.y, 1.0) + jitter) / 512.0, 0.0);
-    vec3 g = mono ? vec3(n.r) : (0.88 * vec3(n.r) + 0.47 * n.gba);
+    // Stage B3: per-stock grain size, plus a coarser second scale (clumps) mixed in by gc.y.
+    float texel = max(f_grain.y * max(gc.x, 0.5), 1.0);
+    vec4 n = textureLod(u_grain_tile, (coord / texel + jitter) / 512.0, 0.0);
+    if (gc.y > 0.01) {
+        vec4 nc = textureLod(u_grain_tile, (coord / (texel * 2.3) + jitter.yx + 173.0) / 512.0, 0.0);
+        n = (n + gc.y * 0.8 * nc) * inversesqrt(1.0 + 0.64 * gc.y * gc.y);
+    }
+    float share = gc.z > 0.0 ? gc.z : 0.47;
+    vec3 g = mono ? vec3(n.r) : (sqrt(1.0 - share * share) * vec3(n.r) + share * n.gba);
     vec3 normD = clamp(D / max(dMax, vec3(0.1)), 0.0, 1.0);
     vec3 env = 0.35 + 2.6 * normD * (1.0 - normD);
     return D + g * env * (strength * 0.045 * max(f_grain.w, 0.1));
@@ -903,7 +911,53 @@ vec3 printNegative(LookGpu L, vec3 Dn) {
     return max(pow(vec3(10.0), -(Dp - L.print1.xyz)) - L.print2.xyz, vec3(0.0));
 }
 
-vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, out bool printed) {
+// Stage B5: B&W darkroom print on Ilford Multigrade. The scan is linear in negative density,
+// so log10(lin / 0.18) is the printing exposure; the paper's characteristic curve (logistic in
+// log exposure, D-max ~2.1) gives the deep blacks and compressed highlights of a wet print.
+// 1 = MG RC neutral, grade 3; 2 = MG FB warmtone, grade 2.5 with a warm image tone.
+vec3 bwPaperPrint(vec3 lin, int paper) {
+    float y = max(dot(lin, vec3(1.0 / 3.0)), 1e-6);
+    float x = log(y / 0.18) * 0.4342945;
+    const float dBase = 0.05;
+    float dMax = paper == 2 ? 2.2 : 2.05;
+    float slope = paper == 2 ? 2.8 : 3.0;
+    float x0 = -log((dMax - dBase) / (0.745 - dBase) - 1.0) * 0.4342945 / slope;
+    float d = dBase + (dMax - dBase) / (1.0 + pow(10.0, slope * (x - x0)));
+    float r = pow(10.0, -(d - dBase)) * (0.18 / pow(10.0, -(0.745 - dBase)));
+    vec3 outc = vec3(r);
+    if (paper == 2) {
+        // Warmtone: the silver image is brown-black in the shadows and mids, paper base cream.
+        float t = clamp(1.0 - r / 0.9, 0.0, 1.0);
+        outc *= mix(vec3(1.0, 0.985, 0.955), vec3(1.0, 0.95, 0.86), t);
+    }
+    return outc;
+}
+
+// Stage B5: lab scanner renditions applied to the scanned or printed film image.
+// 1 = Fujifilm Frontier: punchier mid contrast, richer greens and cyans, slightly cool-green
+//     shadows. 2 = Noritsu: softer, warmer and more neutral, gentler highlights (skin tones).
+vec3 scannerRendition(vec3 lin, int scanner, bool mono) {
+    float y = max(dot(lin, vec3(0.2627, 0.6780, 0.0593)), 1e-6);
+    float contrast = scanner == 1 ? 1.07 : 0.95;
+    float y2 = 0.18 * pow(y / 0.18, contrast);
+    if (scanner == 2) y2 = y2 / (1.0 + 0.06 * max(y2 - 0.5, 0.0));   // softer highlight roll
+    vec3 c = lin * (y2 / y);
+    if (mono) return c;
+    float sat = scanner == 1 ? 1.08 : 0.97;
+    c = max(vec3(y2) + sat * (c - vec3(y2)), vec3(0.0));
+    if (scanner == 1) {
+        // Greens toward cyan-green, and a faint green-cyan cast in the shadows.
+        c.g *= 1.0 + 0.04 * clamp((c.g - max(c.r, c.b)) / max(c.g, 1e-4), 0.0, 1.0);
+        float sh = clamp(1.0 - y2 / 0.18, 0.0, 1.0);
+        c *= mix(vec3(1.0), vec3(0.975, 1.005, 1.01), sh);
+    } else {
+        float mid = clamp(1.0 - abs(log2(y2 / 0.18)) / 3.0, 0.0, 1.0);
+        c *= mix(vec3(1.0), vec3(1.02, 1.0, 0.975), mid);
+    }
+    return c;
+}
+
+vec3 emulsion120(int idx, vec3 scene, vec3 sceneLocal, ivec2 p, bool master, out bool encoded, out bool printed) {
     LookGpu L = u_looks[idx];
     encoded = false;
     printed = false;
@@ -918,6 +972,17 @@ vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, ou
     M_look = mat3(1.0) + clamp(f_look2.w, 0.0, 1.0) * (M_look - mat3(1.0));
     vec3 e = max(M_look * scene, vec3(1e-6));
     vec3 logE = log2(e / 0.18) * 0.30102999566 + L.misc2.w;   // misc2.w: slide exposure offset
+    // Stage B4: development adjacency effects. Developer exhausts next to heavily exposed areas
+    // and stays fresh next to light ones, so density is pushed away from its ~0.1 mm
+    // neighbourhood: a thin dark/light rim along edges (Eberhard / Mackie lines) and more
+    // local contrast in fine detail. Per layer, so colour edges also get the spatial part of
+    // the DIR inter-image effect. Capped at +-0.12 log E to keep it a rim, not a halo.
+    if (f_diffW2.z > 0.5 && L.grain.w > 0.0 && int(L.misc.y + 0.5) != 2) {
+        vec3 local = int(L.misc.x + 0.5) == 3 ? vec3(max(luminanceAP1(sceneLocal), 0.0)) : sceneLocal;
+        vec3 eL = max(M_look * local, vec3(1e-6));
+        float k = L.grain.w * max(1.0 + 0.25 * f_bokeh2.z, 0.5);
+        logE += clamp(k * log2(e / eL) * 0.30102999566, vec3(-0.12), vec3(0.12));
+    }
 
     vec3 D = sampleLookLut(L.misc.w, logE);
     int mode = int(L.misc.y + 0.5);
@@ -951,7 +1016,7 @@ vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, ou
     float devContrast = 1.0 + 0.12 * push;
     D = dMid + (D - dMid) * devContrast;
     float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
-    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono, L.grain);
 
     if (mode == 0 && !mono && L.print0.w >= 0.0) {
         vec3 lin = printNegative(L, D);
@@ -1085,7 +1150,7 @@ vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
     float push = f_bokeh2.z;
     D = dMid + (D - dMid) * (1.0 + 0.12 * push);
     float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
-    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono, L.grain);
     D = max(D, vec3(0.0));
 
     if (mono) return vec3(specBwPrint(D.g));
@@ -1442,9 +1507,15 @@ void stageFilm() {
         linearOut = spectralEmulsion(lookIdx, scene, p);
         printed = true;
     } else if (lookIdx >= 0) {
-        linearOut = emulsion120(lookIdx, scene, p, master, encoded, printed);
+        vec3 sceneLocal = f_diffW2.z > 0.5 ? textureLod(u_aces_pyramid, uv, f_diffW2.y).rgb : scene;
+        linearOut = emulsion120(lookIdx, scene, sceneLocal, p, master, encoded, printed);
     } else {
         linearOut = legacyEmulsion(scene, p);
+    }
+    if (lookIdx >= 0 && !encoded) {
+        bool monoLook = int(u_looks[lookIdx].misc.x + 0.5) == 3;
+        if (monoLook && f_halW2.w > 0.5) linearOut = bwPaperPrint(linearOut, int(f_halW2.w + 0.5));
+        if (f_lfx3.w > 0.5) linearOut = scannerRendition(linearOut, int(f_lfx3.w + 0.5), monoLook);
     }
 
     float hdrRatio = max(f_hdr.x, 1.0);

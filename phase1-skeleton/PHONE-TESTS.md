@@ -246,3 +246,37 @@ Film themes and performance
 23. Take 10 shots quickly: the shutter button and the readout do not stutter right after each shot (the gallery
     thumbnail now decodes off the UI thread), and the thumbnail pops in with a small scale animation.
 24. Landscape both ways: zoom pills, shutter, gallery, flip, flash, timer and portrait icons turn upright.
+
+## Stage B3: grain size per film stock
+
+Same branch. Grain size now follows each stock's speed and grain type: slow and tabular-grain stocks (Pan F, T-Max 100, Delta 100, Portra 160, Ektar, Velvia, Vision3) are finer, fast and classic stocks (Tri-X, HP5, Fomapan 400, Neopan 1600, Superia 1600) are coarser, and the 3200 stocks (Delta 3200, T-Max P3200) add a clumpy second grain scale. Slides and cine stocks have less colour grain than consumer C-41. Amounts are best guesses; tell me which ones look wrong.
+
+1. **Fine vs coarse, same scene.** A plain mid-grey wall or sky, grain slider at its default. Shoot Pan F Plus, HP5 Plus and Delta 3200 and zoom each to 100% in Gallery. Pass: Pan F grain is barely visible and tight, HP5 is clearly coarser, Delta 3200 shows larger soft clumps, not just stronger pixel noise.
+2. **Colour grain.** Same wall on Portra 400 and Velvia 50. Pass: Portra shows faint colour speckle in the grain; Velvia's grain is almost colourless.
+3. **Format.** Same stock (HP5) on 35 mm and 120 (6x7) formats. Pass: 120 grain looks finer than 35 mm, as before.
+4. **No pattern.** Pass: no visible tile repeat or grid in a flat sky on any of the above.
+
+## Stage B4: development edge effects
+
+Same branch. Film developer runs out next to bright areas and stays fresh next to dark ones, which draws a thin rim along strong edges and lifts fine local contrast. This is now in every film look (strongest on B&W, weaker on colour negative and cine, weakest on slides; none on digital looks). New debug command to compare: `adb shell am broadcast -a com.s24film.camera.DEBUG --es cmd adjacency --ez on false` (and `true` to turn it back on).
+
+1. **Window frame, HP5.** A dark window frame against a bright sky, HP5 Plus, phone on a table. Shoot with adjacency on, then off. Pass: with it on, the sky right next to the frame is a touch brighter and the frame edge a touch darker (a thin rim, not a glow), and fine texture like brick or foliage looks crisper.
+2. **No halos.** Same pair on Portra 400. Pass: no visible bright or dark band wider than a few pixels around edges; flat areas (sky, wall) unchanged.
+3. **Colour edges.** A red object against a green or blue background on Portra 400. Pass: the colour boundary looks slightly cleaner, with no coloured fringe.
+4. **Live view.** Pass: the viewfinder frame rate is unchanged with it on.
+
+## Stage B5: print paper, lab scanner and B&W paper
+
+Same branch. Three new choices, for now only from adb (the settings screen hookup comes with the UI work). Each takes effect on the next frame; take the same shot with each setting.
+
+- Print paper for colour negative and cine looks: `--es cmd paper --ei idx N` with 0 auto (Portra Endura for C-41, Vision 2383 for cine), 1 Fujifilm Crystal Archive (Frontier lab paper), 2 Endura Premier, 3 Supra Endura, 4 Portra Endura, 5 Ultra Endura, 6 Vision 2383, 7 Vision Premier 2393, 8 Ektacolor Edge.
+- Lab scanner: `--es cmd scanner --ei idx N` with 0 neutral (as before), 1 Frontier, 2 Noritsu.
+- B&W paper: `--es cmd bwpaper --ei idx N` with 0 scan (as before), 1 Ilford Multigrade RC (neutral, grade 3), 2 Multigrade FB Warmtone.
+
+Prefix each with `adb shell am broadcast -a com.s24film.camera.DEBUG`.
+
+1. **Papers, Portra 400.** A scene with skin, sky and foliage. Shoot paper 0, 1, 3 and 5. Pass: all keep neutral greys; Crystal Archive is a touch cooler and greener, Supra is softer and gentler on skin, Ultra is the most saturated. None turns magenta or green overall. The log line `Print paper N` appears on each change.
+2. **Cine prints, Vision3 500T.** Paper 6 vs 7. Pass: 2393 has deeper blacks and a little more contrast than 2383.
+3. **Scanners, Portra 400.** Scanner 0, 1, 2. Pass: Frontier is punchier with richer greens and slightly cool shadows; Noritsu is softer, warmer and gentler in the highlights; neither shifts mid grey noticeably.
+4. **B&W paper, HP5.** bwpaper 0, 1, 2. Pass: RC gives deeper blacks and brighter whites than the scan; FB Warmtone is slightly softer with a warm brown-black tone and a cream white. No banding in skies.
+5. **Reset.** Set all three back to 0. Pass: the image matches the earlier default look.

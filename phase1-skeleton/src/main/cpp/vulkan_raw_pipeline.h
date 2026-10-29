@@ -110,8 +110,9 @@ struct LookGpu {
     float print0[4]; // printer-light logE offset per layer, w = print LUT row (< 0: no print stage)
     float print1[4]; // print paper D-min per layer, w = print exposure scale
     float print2[4]; // rendered black per layer (subtracted), w = mid-grey normalisation
+    float grain[4];  // grain size multiplier, clump mix, dye-layer (colour) grain share, unused
 };
-static_assert(sizeof(LookGpu) == 176, "LookGpu layout mismatch");
+static_assert(sizeof(LookGpu) == 192, "LookGpu layout mismatch");
 
 // std140 mirror of DepthParams in demosaic.comp (binding 23).
 struct DepthParamsUbo {
@@ -263,6 +264,12 @@ public:
     int stackAddFromRing();
     uint32_t ringSlots() const { return mRingSlots; }
     bool gpuMergeReady() const { return mGpuMerge.ready(); }
+    void setAdjacency(bool on) { mAdjacency.store(on); }
+    // Stage B5: print paper (0 auto .. 8, see kPrintPaperRows), scanner rendition (0 neutral,
+    // 1 Frontier, 2 Noritsu) and B&W paper (0 scan, 1 Multigrade RC neutral, 2 Multigrade FB warmtone).
+    void setPrintPaper(int idx) { mPrintPaper.store(idx); mPrintDirty.store(true); }
+    void setScanner(int idx) { mScanner.store(idx); }
+    void setBwPaper(int idx) { mBwPaper.store(idx); }
 
 private:
     struct StackState {
@@ -325,6 +332,8 @@ private:
     bool splitMasterReadback(const MasterSink& sink, int w, int h);
     bool createSharedResources();
     bool loadLookLut();
+    void computePrintStage(uint32_t lookIdx);
+    uint32_t printRowFor(int category) const;   // s24film::LookCategory
     bool createGrainTile();
     bool createTargets(FrameTargets& t, VkExtent2D extent, bool master);
     void destroyTargets(FrameTargets& t);
@@ -485,6 +494,13 @@ private:
     std::atomic<bool> mBurstModeEnabled{true};
     std::atomic<float> mUserEvStops{0.0f};
     std::atomic<float> mUserGrainMult{1.0f};
+    std::atomic<bool> mAdjacency{true};      // Stage B4 development edge effects
+    std::atomic<int> mPrintPaper{0};
+    std::atomic<bool> mPrintDirty{false};
+    std::atomic<int> mScanner{0};
+    std::atomic<int> mBwPaper{0};
+    std::vector<float> mLutPayload;          // look LUT kept for print stage recomputes
+    uint32_t mLutRows = 1, mLutCols = 1;
     std::atomic<float> mUserHalationMult{1.0f};
 
     // Phase 5 Cinema Parameters
