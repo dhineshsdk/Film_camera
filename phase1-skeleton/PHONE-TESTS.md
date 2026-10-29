@@ -209,3 +209,10 @@ Same branch. adb only for now (prefix `adb shell am broadcast -a com.s24film.cam
 2. **Expired film.** Portra 400 at ageing 0, 0.5, 1. Pass: blacks lift with a faint magenta-brown fog, contrast drops, grain rises; at 1 it still reads as a photo. Velvia at 1 drifts cool; HP5 at 1 stays neutral grey.
 3. **Light leaks.** leak 0.6, take five photos. Pass: each has a different red-orange glow entering from an edge (sometimes two); the glow has a yellow core and fades into the frame; B&W looks get a grey leak, not a coloured one.
 4. **Off means off.** Set all three to 0. Pass: no border, no fog, no leak.
+
+## Stage B1: spectral film model level with B3 to B6
+
+Same branch. Stocks with datasheet spectral data already render through the spectral model by default (the log shows `Spectral tables for look N: built`); stocks without it use the curve model. The spectral model now also gets the B4 edge effects; the B3 grain, B5 scanner and B6 ageing/leaks/borders already applied to both. The B5 print paper choice only changes curve-model stocks (the spectral model has its own print), and the B&W paper choice is skipped on spectral B&W stocks for the same reason.
+
+1. **Which model.** Pick Portra 400, HP5 and Velvia 50 one after another. Pass: note which of them log `built` and which log `none (curve model)`, and send me the list.
+2. **Edge effects on spectral stocks.** On a stock that logged `built`, repeat the B4 window-frame test with `adjacency` on and off. Pass: same thin rim as on the curve-model stocks, no halo.
