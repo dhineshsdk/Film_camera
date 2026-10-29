@@ -109,8 +109,9 @@ struct LookGpu {
     float print0[4]; // printer-light logE offset per layer, w = print LUT row (< 0: no print stage)
     float print1[4]; // print paper D-min per layer, w = print exposure scale
     float print2[4]; // rendered black per layer (subtracted), w = mid-grey normalisation
+    float grain[4];  // grain size multiplier, clump mix, dye-layer (colour) grain share, unused
 };
-static_assert(sizeof(LookGpu) == 176, "LookGpu layout mismatch");
+static_assert(sizeof(LookGpu) == 192, "LookGpu layout mismatch");
 
 // std140 mirror of DepthParams in demosaic.comp (binding 23).
 struct DepthParamsUbo {

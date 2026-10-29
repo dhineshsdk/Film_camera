@@ -65,6 +65,7 @@ struct LookGpu {
     vec4 print0;    // xyz=printer-light logE offset per layer, w=print LUT row (< 0: no print stage)
     vec4 print1;    // xyz=print paper D-min, w=print exposure scale
     vec4 print2;    // xyz=rendered black (subtracted), w=mid-grey normalisation
+    vec4 grain;     // x=grain size multiplier, y=clump mix, z=dye-layer grain share, w=unused
 };
 
 layout(std430, binding = 5) readonly buffer LookBuffer {
@@ -850,11 +851,18 @@ vec3 applyDensityGrain(vec2 coord, vec3 D, vec3 dMax, float strength) {
 // Film grain from the tileable noise texture (unit variance per channel). R is shared across
 // the dye layers (luminance grain), G/B/A add a smaller independent part per layer. Amplitude
 // is in density units and peaks in the mid-tones, like real emulsion granularity.
-vec3 filmGrain(vec2 coord, vec3 D, vec3 dMax, float strength, bool mono) {
+vec3 filmGrain(vec2 coord, vec3 D, vec3 dMax, float strength, bool mono, vec4 gc) {
     if (strength <= 0.001) return D;
     vec2 jitter = hash3f(uvec3(u_frame_seed, 911u, 3571u)).xy * 512.0;
-    vec4 n = textureLod(u_grain_tile, (coord / max(f_grain.y, 1.0) + jitter) / 512.0, 0.0);
-    vec3 g = mono ? vec3(n.r) : (0.88 * vec3(n.r) + 0.47 * n.gba);
+    // Stage B3: per-stock grain size, plus a coarser second scale (clumps) mixed in by gc.y.
+    float texel = max(f_grain.y * max(gc.x, 0.5), 1.0);
+    vec4 n = textureLod(u_grain_tile, (coord / texel + jitter) / 512.0, 0.0);
+    if (gc.y > 0.01) {
+        vec4 nc = textureLod(u_grain_tile, (coord / (texel * 2.3) + jitter.yx + 173.0) / 512.0, 0.0);
+        n = (n + gc.y * 0.8 * nc) * inversesqrt(1.0 + 0.64 * gc.y * gc.y);
+    }
+    float share = gc.z > 0.0 ? gc.z : 0.47;
+    vec3 g = mono ? vec3(n.r) : (sqrt(1.0 - share * share) * vec3(n.r) + share * n.gba);
     vec3 normD = clamp(D / max(dMax, vec3(0.1)), 0.0, 1.0);
     vec3 env = 0.35 + 2.6 * normD * (1.0 - normD);
     return D + g * env * (strength * 0.045 * max(f_grain.w, 0.1));
@@ -951,7 +959,7 @@ vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, ou
     float devContrast = 1.0 + 0.12 * push;
     D = dMid + (D - dMid) * devContrast;
     float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
-    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono, L.grain);
 
     if (mode == 0 && !mono && L.print0.w >= 0.0) {
         vec3 lin = printNegative(L, D);
@@ -1085,7 +1093,7 @@ vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
     float push = f_bokeh2.z;
     D = dMid + (D - dMid) * (1.0 + 0.12 * push);
     float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
-    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono, L.grain);
     D = max(D, vec3(0.0));
 
     if (mono) return vec3(specBwPrint(D.g));

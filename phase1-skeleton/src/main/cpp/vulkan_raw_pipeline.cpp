@@ -1106,6 +1106,39 @@ bool VulkanRawPipeline::createDescriptorLayoutAndPipelines() {
 // =============================================================================
 // 120-look 2D LUT (assets/s24_master_120_looks.bin) + look parameter buffer
 // =============================================================================
+namespace {
+// Stage B3: grain character per stock. Size grows with box speed (bigger silver crystals in
+// faster emulsions); tabular-grain stocks (T-Max, Delta, Portra, Vision3...) render finer
+// than their speed, classic cubic-grain stocks (Tri-X, HP5, Fomapan...) coarser. Clump mixes
+// in a second, larger grain scale so fast films look clumpy rather than just noisy. Best-guess
+// values, to be tuned against real scans.
+struct GrainCharacter { float size, clump, colour; };
+
+GrainCharacter grainCharacter(const s24film::LookProfile120& lp, int boxIso) {
+    const std::string id = lp.lookId ? lp.lookId : "";
+    auto has = [&](const char* s) { return id.find(s) != std::string::npos; };
+    float iso = boxIso > 0 ? static_cast<float>(boxIso) : 200.0f;
+    float size = std::clamp(std::pow(iso / 100.0f, 0.3f), 0.75f, 2.2f);
+    if (has("tmax") || has("delta") || has("acros") || has("portra") || has("ektar") ||
+        has("vision3") || has("eterna") || has("xp2") || has("reala") || has("velvia") ||
+        has("provia") || has("astia") || has("ektachrome") || has("kodachrome") || has("panf")) {
+        size *= 0.85f;
+    } else if (has("trix") || has("hp5") || has("fomapan") || has("double_x") || has("apx") ||
+               has("plus_x") || has("neopan_1600") || has("un54") || has("superia_1600") ||
+               has("natura") || has("vista_800")) {
+        size *= 1.15f;
+    }
+    if (has("push")) size *= 1.15f;
+    float clump = std::clamp((size - 1.05f) / 0.9f, 0.0f, 1.0f);
+    if (has("delta3200") || has("p3200")) clump = std::max(clump, 0.85f);
+    // Slides and cine negative show less visible dye-cloud colour grain than consumer C-41.
+    float colour = 0.47f;
+    if (lp.category == s24film::LookCategory::COLOR_REVERSAL_SLIDE) colour = 0.32f;
+    else if (lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2) colour = 0.38f;
+    return {size, clump, colour};
+}
+}  // namespace
+
 bool VulkanRawPipeline::loadLookLut() {
     const uint32_t lookCount = s24film::kTotalMasterLooks;
     mLookParams.assign(lookCount, LookGpu{});
@@ -1218,6 +1251,10 @@ bool VulkanRawPipeline::loadLookLut() {
         g.misc2[1] = lp.halationStrength;
         g.misc2[2] = lp.grainStrength;
         g.misc2[3] = 0.0f;
+        {
+            const GrainCharacter gc = grainCharacter(lp, i < s24film::kTotalMasterLooks ? s24film::kMasterLookBoxIso[i] : 0);
+            g.grain[0] = gc.size; g.grain[1] = gc.clump; g.grain[2] = gc.colour; g.grain[3] = 0.0f;
+        }
 
         // Slides: the LUT puts scene mid grey almost at D-min (a washed-out, over-exposed
         // transparency). Shift exposure so mid grey lands at D-min + 1.0 on the green layer,

@@ -164,3 +164,12 @@ Same branch. HDR shots now hand their real highlight values (up to about 2x the 
 2. **Sky in HDR.** Daylight HDR with a bright sky on Portra 400 and Velvia. Pass: the sky holds colour and gradation into the bright parts (no flat white patch, no grey or cyan cast near the sun).
 3. **No change in plain shots.** A normal daytime shot on Portra 400 looks the same as before B2.
 4. **Look strength slider.** The darkroom halation slider still scales the glow from none to strong.
+
+## Stage B3: grain size per film stock
+
+Same branch. Grain size now follows each stock's speed and grain type: slow and tabular-grain stocks (Pan F, T-Max 100, Delta 100, Portra 160, Ektar, Velvia, Vision3) are finer, fast and classic stocks (Tri-X, HP5, Fomapan 400, Neopan 1600, Superia 1600) are coarser, and the 3200 stocks (Delta 3200, T-Max P3200) add a clumpy second grain scale. Slides and cine stocks have less colour grain than consumer C-41. Amounts are best guesses; tell me which ones look wrong.
+
+1. **Fine vs coarse, same scene.** A plain mid-grey wall or sky, grain slider at its default. Shoot Pan F Plus, HP5 Plus and Delta 3200 and zoom each to 100% in Gallery. Pass: Pan F grain is barely visible and tight, HP5 is clearly coarser, Delta 3200 shows larger soft clumps, not just stronger pixel noise.
+2. **Colour grain.** Same wall on Portra 400 and Velvia 50. Pass: Portra shows faint colour speckle in the grain; Velvia's grain is almost colourless.
+3. **Format.** Same stock (HP5) on 35 mm and 120 (6x7) formats. Pass: 120 grain looks finer than 35 mm, as before.
+4. **No pattern.** Pass: no visible tile repeat or grid in a flat sky on any of the above.
