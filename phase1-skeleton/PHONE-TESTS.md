@@ -198,3 +198,14 @@ Prefix each with `adb shell am broadcast -a com.s24film.camera.DEBUG`.
 3. **Scanners, Portra 400.** Scanner 0, 1, 2. Pass: Frontier is punchier with richer greens and slightly cool shadows; Noritsu is softer, warmer and gentler in the highlights; neither shifts mid grey noticeably.
 4. **B&W paper, HP5.** bwpaper 0, 1, 2. Pass: RC gives deeper blacks and brighter whites than the scan; FB Warmtone is slightly softer with a warm brown-black tone and a cream white. No banding in skies.
 5. **Reset.** Set all three back to 0. Pass: the image matches the earlier default look.
+
+## Stage B6: frame edges, expired film and light leaks
+
+Same branch. adb only for now (prefix `adb shell am broadcast -a com.s24film.camera.DEBUG`):
+`--es cmd border --ei idx N` (0 none, 1 filed negative carrier, 2 35 mm film edge with perforations),
+`--es cmd ageing --ef amount X` (0 to 1, expired film), `--es cmd leak --ef amount X` (0 to 1, light leaks; every photo gets a new leak, and the viewfinder shows the one the next photo will get). The film format choice (35 mm, 16 mm, Super 8, 6x7) is unchanged.
+
+1. **Borders.** Any look, border 1 then 2, in portrait and landscape grip. Pass: border 1 is a thin black frame with a slightly rough edge on all four sides; border 2 shows a black film edge with light rounded perforations along the two long sides of the photo, in both grips. The saved JPEG matches the viewfinder.
+2. **Expired film.** Portra 400 at ageing 0, 0.5, 1. Pass: blacks lift with a faint magenta-brown fog, contrast drops, grain rises; at 1 it still reads as a photo. Velvia at 1 drifts cool; HP5 at 1 stays neutral grey.
+3. **Light leaks.** leak 0.6, take five photos. Pass: each has a different red-orange glow entering from an edge (sometimes two); the glow has a yellow core and fades into the frame; B&W looks get a grey leak, not a coloured one.
+4. **Off means off.** Set all three to 0. Pass: no border, no fog, no leak.

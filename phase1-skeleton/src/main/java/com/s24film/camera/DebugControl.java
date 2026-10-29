@@ -132,6 +132,15 @@ final class DebugControl extends BroadcastReceiver {
             case "bwpaper":     // Stage B5: 0 scan, 1 Multigrade RC, 2 Multigrade FB warmtone (--ei idx N)
                 VulkanRenderer.nativeSetBwPaper(intent.getIntExtra("idx", 0));
                 break;
+            case "border":      // Stage B6: 0 none, 1 filed carrier, 2 35mm rebate (--ei idx N)
+                VulkanRenderer.nativeSetFrameBorder(intent.getIntExtra("idx", 0));
+                break;
+            case "ageing":      // Stage B6: expired film 0..1 (--ef amount X)
+                VulkanRenderer.nativeSetAgeing(intent.getFloatExtra("amount", 0f));
+                break;
+            case "leak":        // Stage B6: light leaks 0..1 (--ef amount X)
+                VulkanRenderer.nativeSetLightLeak(intent.getFloatExtra("amount", 0f));
+                break;
             case "adjacency":   // Stage B4: development edge effects (--ez on true|false)
                 VulkanRenderer.nativeSetAdjacency(intent.getBooleanExtra("on", true));
                 break;

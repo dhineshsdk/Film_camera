@@ -93,8 +93,9 @@ struct FrameParamsUbo {
     float lfx2[4];
     float lfx3[4];
     float lfx4[4];
+    float entropy[4];   // Stage B6: frame border style, ageing, light leak amount, leak seed
 };
-static_assert(sizeof(FrameParamsUbo) == 352, "FrameParamsUbo layout mismatch");
+static_assert(sizeof(FrameParamsUbo) == 368, "FrameParamsUbo layout mismatch");
 
 // std430 mirror of LookGpu in demosaic.comp (binding 5).
 struct LookGpu {
@@ -264,6 +265,11 @@ public:
     void setPrintPaper(int idx) { mPrintPaper.store(idx); mPrintDirty.store(true); }
     void setScanner(int idx) { mScanner.store(idx); }
     void setBwPaper(int idx) { mBwPaper.store(idx); }
+    // Stage B6: frame border (0 none, 1 filed carrier, 2 35mm rebate with perforations),
+    // ageing / expiry 0..1, light leaks 0..1 (a new leak pattern for every photo).
+    void setFrameBorder(int style) { mFrameBorder.store(style); }
+    void setAgeing(float amount) { mAgeing.store(amount); }
+    void setLightLeak(float amount) { mLightLeak.store(amount); }
 
 private:
     struct StackState {
@@ -487,6 +493,10 @@ private:
     std::atomic<bool> mPrintDirty{false};
     std::atomic<int> mScanner{0};
     std::atomic<int> mBwPaper{0};
+    std::atomic<int> mFrameBorder{0};
+    std::atomic<float> mAgeing{0.0f};
+    std::atomic<float> mLightLeak{0.0f};
+    std::atomic<uint32_t> mLeakSeed{1u};
     std::vector<float> mLutPayload;          // look LUT kept for print stage recomputes
     uint32_t mLutRows = 1, mLutCols = 1;
     std::atomic<float> mUserHalationMult{1.0f};
