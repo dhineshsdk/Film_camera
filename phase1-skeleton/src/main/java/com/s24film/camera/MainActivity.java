@@ -134,7 +134,7 @@ public class MainActivity extends Activity implements
     // Border (off / film rebate / print border), expired-film ageing and light-leak strength steps
     private Button btnBorder, btnAgeing, btnLeak;
     private int border = 0, ageingStep = 0, leakStep = 0;
-    private static final String[] BORDERS = {"Off", "Film rebate", "Print"};
+    private static final String[] BORDERS = {"Off", "Negative carrier", "35mm edge"};
     private static final float[] AMOUNTS = {0f, 0.33f, 0.66f, 1f};
     private static final String[] AMOUNT_LABELS = {"Off", "Light", "Medium", "Strong"};
     private static final String[] PRINT_PAPERS = {"Auto", "Crystal Archive", "Endura Premier", "Supra Endura",
