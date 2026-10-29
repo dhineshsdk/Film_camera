@@ -520,6 +520,14 @@
                             <Button android:id="@+id/btn_adjacency" style="@style/Chip" android:text="Edge effects: On" />
                         </LinearLayout>
                     </HorizontalScrollView>
+                    <TextView style="@style/RowLabel" android:text="BORDER, AGE AND LEAKS" />
+                    <HorizontalScrollView style="@style/ChipRow">
+                        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <Button android:id="@+id/btn_border" style="@style/Chip" android:text="Border: Off" />
+                            <Button android:id="@+id/btn_ageing" style="@style/Chip" android:text="Expired: Off" />
+                            <Button android:id="@+id/btn_leak" style="@style/Chip" android:text="Light leak: Off" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
                 </LinearLayout>
 
                 <!-- Capture: exposure model, colour and files, processing, frame, video -->

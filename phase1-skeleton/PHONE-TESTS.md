@@ -297,3 +297,5 @@ Same branch. adb only for now (prefix `adb shell am broadcast -a com.s24film.cam
 2. **Expired film.** Portra 400 at ageing 0, 0.5, 1. Pass: blacks lift with a faint magenta-brown fog, contrast drops, grain rises; at 1 it still reads as a photo. Velvia at 1 drifts cool; HP5 at 1 stays neutral grey.
 3. **Light leaks.** leak 0.6, take five photos. Pass: each has a different red-orange glow entering from an edge (sometimes two); the glow has a yellow core and fades into the frame; B&W looks get a grey leak, not a coloured one.
 4. **Off means off.** Set all three to 0. Pass: no border, no fog, no leak.
+26. Look tab > BORDER, AGE AND LEAKS: Border cycles Off, Film rebate, Print; Expired and Light leak cycle Off, Light,
+    Medium, Strong. Each shows in the preview and the saved JPEG, and survives an app restart.

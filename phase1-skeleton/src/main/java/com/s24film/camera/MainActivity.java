@@ -131,6 +131,12 @@ public class MainActivity extends Activity implements
     private Button btnPrintPaper, btnScanner, btnBwPaper, btnAdjacency;
     private int printPaper = 0, scanner = 0, bwPaper = 0;
     private boolean adjacency = true;
+    // Border (off / film rebate / print border), expired-film ageing and light-leak strength steps
+    private Button btnBorder, btnAgeing, btnLeak;
+    private int border = 0, ageingStep = 0, leakStep = 0;
+    private static final String[] BORDERS = {"Off", "Film rebate", "Print"};
+    private static final float[] AMOUNTS = {0f, 0.33f, 0.66f, 1f};
+    private static final String[] AMOUNT_LABELS = {"Off", "Light", "Medium", "Strong"};
     private static final String[] PRINT_PAPERS = {"Auto", "Crystal Archive", "Endura Premier", "Supra Endura",
         "Portra Endura", "Ultra Endura", "Vision 2383", "Vision 2393", "Ektacolor Edge"};
     private static final String[] SCANNERS = {"Neutral", "Frontier", "Noritsu"};
@@ -301,6 +307,12 @@ public class MainActivity extends Activity implements
         btnScanner.setOnClickListener(this);
         btnBwPaper.setOnClickListener(this);
         btnAdjacency.setOnClickListener(this);
+        btnBorder = findViewById(R.id.btn_border);
+        btnAgeing = findViewById(R.id.btn_ageing);
+        btnLeak = findViewById(R.id.btn_leak);
+        btnBorder.setOnClickListener(this);
+        btnAgeing.setOnClickListener(this);
+        btnLeak.setOnClickListener(this);
         btnGrid.setOnClickListener(this);
         btnSounds.setOnClickListener(this);
 
@@ -416,6 +428,9 @@ public class MainActivity extends Activity implements
         scanner = Math.max(0, Math.min(SCANNERS.length - 1, prefs.getInt("scanner", 0)));
         bwPaper = Math.max(0, Math.min(BW_PAPERS.length - 1, prefs.getInt("bw_paper", 0)));
         adjacency = prefs.getBoolean("adjacency", true);
+        border = Math.max(0, Math.min(BORDERS.length - 1, prefs.getInt("border", 0)));
+        ageingStep = Math.max(0, Math.min(AMOUNTS.length - 1, prefs.getInt("ageing", 0)));
+        leakStep = Math.max(0, Math.min(AMOUNTS.length - 1, prefs.getInt("leak", 0)));
         gridOn = prefs.getBoolean("grid", false);
         soundsOn = prefs.getBoolean("sounds", true);
         fx.setSound(soundsOn);
@@ -550,6 +565,12 @@ public class MainActivity extends Activity implements
         btnBwPaper.setSelected(bwPaper != 0);
         btnAdjacency.setText(adjacency ? "Edge effects: On" : "Edge effects: Off");
         btnAdjacency.setSelected(adjacency);
+        btnBorder.setText("Border: " + BORDERS[border]);
+        btnBorder.setSelected(border != 0);
+        btnAgeing.setText("Expired: " + AMOUNT_LABELS[ageingStep]);
+        btnAgeing.setSelected(ageingStep != 0);
+        btnLeak.setText("Light leak: " + AMOUNT_LABELS[leakStep]);
+        btnLeak.setSelected(leakStep != 0);
         refreshQuickBar();
     }
 
@@ -559,6 +580,9 @@ public class MainActivity extends Activity implements
         VulkanRenderer.nativeSetScanner(scanner);
         VulkanRenderer.nativeSetBwPaper(bwPaper);
         VulkanRenderer.nativeSetAdjacency(adjacency);
+        VulkanRenderer.nativeSetFrameBorder(border);
+        VulkanRenderer.nativeSetAgeing(AMOUNTS[ageingStep]);
+        VulkanRenderer.nativeSetLightLeak(AMOUNTS[leakStep]);
     }
 
     // Quick bar on the top band. Video hides the still-only items (capture mode, timer, portrait).
@@ -1331,13 +1355,17 @@ public class MainActivity extends Activity implements
             refreshQuickBar();
             showStatus(timerSec > 0 ? "Self-timer " + timerSec + " s" : "Self-timer off", false);
         } else if (id == R.id.btn_print_paper || id == R.id.btn_scanner || id == R.id.btn_bw_paper
-                   || id == R.id.btn_adjacency) {
-            if (id == R.id.btn_print_paper) printPaper = (printPaper + 1) % PRINT_PAPERS.length;
+                   || id == R.id.btn_adjacency || id == R.id.btn_border || id == R.id.btn_ageing || id == R.id.btn_leak) {
+            if (id == R.id.btn_border) border = (border + 1) % BORDERS.length;
+            else if (id == R.id.btn_ageing) ageingStep = (ageingStep + 1) % AMOUNTS.length;
+            else if (id == R.id.btn_leak) leakStep = (leakStep + 1) % AMOUNTS.length;
+            else if (id == R.id.btn_print_paper) printPaper = (printPaper + 1) % PRINT_PAPERS.length;
             else if (id == R.id.btn_scanner) scanner = (scanner + 1) % SCANNERS.length;
             else if (id == R.id.btn_bw_paper) bwPaper = (bwPaper + 1) % BW_PAPERS.length;
             else adjacency = !adjacency;
             getSharedPreferences("ui", 0).edit().putInt("print_paper", printPaper).putInt("scanner", scanner)
-                .putInt("bw_paper", bwPaper).putBoolean("adjacency", adjacency).apply();
+                .putInt("bw_paper", bwPaper).putBoolean("adjacency", adjacency)
+                .putInt("border", border).putInt("ageing", ageingStep).putInt("leak", leakStep).apply();
             if (vulkanInitialized) pushPrintScan();
             refreshSelection();
         } else if (id == R.id.btn_grid) {
