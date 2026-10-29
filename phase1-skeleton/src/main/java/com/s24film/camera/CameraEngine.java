@@ -3,6 +3,7 @@ package com.s24film.camera;
 import android.content.Context;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
+import android.hardware.camera2.CameraMetadata;
 import android.graphics.SurfaceTexture;
 import android.hardware.HardwareBuffer;
 import android.hardware.camera2.CameraCaptureSession;
@@ -144,6 +145,14 @@ public class CameraEngine {
     private long currentExposureNs = 10_000_000L;
     private volatile int resultIso = 100;
     private volatile long resultExposureNs = 10_000_000L;
+    // Exposure of recent frames by sensor timestamp, so each RAW frame in the zero-lag ring is
+    // tagged with its own ISO and shutter (results can land after their image).
+    private static final int META_SLOTS = 16;
+    private final long[] metaTs = new long[META_SLOTS];
+    private final int[] metaIso = new int[META_SLOTS];
+    private final long[] metaExp = new long[META_SLOTS];
+    private int metaNext = 0;
+    private final Object metaLock = new Object();   // not the engine lock: the camera thread takes it every frame
     private volatile boolean aeConverged = false;
     private int[] isoLadder = new int[0];
     private int[] subSweetLadder = new int[0];
@@ -369,6 +378,7 @@ public class CameraEngine {
 
             String openDeviceId = requestedId;
             physicalSubId = null;
+            VulkanRenderer.nativeRingReset();
 
             if ("6".equals(requestedId) || "21".equals(requestedId)) {
                 openDeviceId = "0";
@@ -469,7 +479,7 @@ public class CameraEngine {
 
     // Centre-weighted 5x5 matrix: the whole frame counts (a bright sky pulls exposure down), the middle
     // counts most, and a clipped-pixel fraction above 1% lowers the exposure further so highlights keep detail.
-    private final float[] zoneBuf = new float[26];
+    private final float[] zoneBuf = new float[27];
     private static final float[] ZONE_W = {
         1, 1, 1, 1, 1,
         1, 2, 2, 2, 1,
@@ -485,7 +495,52 @@ public class CameraEngine {
         if (m <= 1e-5f) return centreMean;
         float clip = zoneBuf[25];
         if (clip > 0.01f) m *= 1f + Math.min(2.0f, 8f * (clip - 0.01f));   // up to ~1.6 stops lower
+        // Stage A6. Shadow protection: with every photo merged (A3) the shadows can take a third of
+        // a stop more light when most of the frame is deep shadow and nothing clips.
+        int dark = 0;
+        for (int i = 0; i < 25; i++) if (zoneBuf[i] < 0.02f) dark++;
+        if (autoMerge && dark >= 8 && clip < 0.005f) m *= 0.8f;
+        // Face priority: a face the HAL found lands about 0.4 stop over mid-grey (skin), weighted
+        // 65 / 35 against the matrix, so a backlit person is not a silhouette and a face in the dark
+        // is not blown out.
+        float face = zoneBuf[26];
+        if (faceMetering && face > 1e-4f && System.nanoTime() - faceSeenNs < FACE_HOLD_NS) {
+            m = 0.35f * m + 0.65f * (face / FACE_OVER_GREY);
+        }
         return m;
+    }
+
+    // Stage A6 face-priority metering, from the HAL's own face detector (no extra model).
+    private volatile boolean faceMetering = true;
+    public void setFaceMetering(boolean on) { faceMetering = on; if (!on) VulkanRenderer.nativeSetFaceRect(0f, 0f, 0f, 0f); }
+    private static final float FACE_OVER_GREY = 1.32f;            // +0.4 EV
+    private static final long FACE_HOLD_NS = 600_000_000L;        // keep the last face this long
+    private volatile long faceSeenNs = 0L;
+    private Rect faceArray = null;                                // coordinate space of the face rects
+
+    private void onFaces(android.hardware.camera2.params.Face[] faces) {
+        Rect a = faceArray;
+        if (!faceMetering || a == null || a.width() <= 0 || a.height() <= 0) return;
+        android.hardware.camera2.params.Face best = null;
+        long bestArea = 0;
+        if (faces != null) {
+            for (android.hardware.camera2.params.Face f : faces) {
+                Rect r = f.getBounds();
+                long area = (long) r.width() * r.height();
+                if (f.getScore() >= 30 && area > bestArea) { best = f; bestArea = area; }
+            }
+        }
+        if (best == null) {
+            if (System.nanoTime() - faceSeenNs > FACE_HOLD_NS) VulkanRenderer.nativeSetFaceRect(0f, 0f, 0f, 0f);
+            return;
+        }
+        Rect r = best.getBounds();
+        // Inner 60% of the box: skin, not hair or background.
+        float cx = r.exactCenterX() - a.left, cy = r.exactCenterY() - a.top;
+        float hw = r.width() * 0.3f, hh = r.height() * 0.3f;
+        VulkanRenderer.nativeSetFaceRect((cx - hw) / a.width(), (cy - hh) / a.height(),
+            (cx + hw) / a.width(), (cy + hh) / a.height());
+        faceSeenNs = System.nanoTime();
     }
 
     /** ISO x seconds (exposure index x shutter) that renders the reference brightness, or -1 if not ready. */
@@ -664,6 +719,16 @@ public class CameraEngine {
         }
         currentIso = iso;
         currentExposureNs = Math.max(minShutterNs, Math.min(maxShutterNs, t));
+    }
+
+    private void enableFaceDetect(CaptureRequest.Builder builder) {
+        faceArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+        int[] modes = characteristics.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES);
+        boolean simple = false;
+        if (modes != null) for (int m : modes) if (m == CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE) simple = true;
+        if (simple && faceMetering) builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE);
+        VulkanRenderer.nativeSetFaceRect(0f, 0f, 0f, 0f);
+        Log.i(TAG, "Face metering: " + (!faceMetering ? "off" : simple ? "HAL face detect on" : "no HAL face detect"));
     }
 
     private void applyManualExposure() {
@@ -1109,6 +1174,45 @@ public class CameraEngine {
         }
     }
 
+    // Logs the state if a shot has not saved 6 s after the press (diagnostics for stalls).
+    private volatile long framesSeen = 0L;
+    private volatile int shotSeq = 0;
+    private volatile int shotSaved = 0;
+    private final Handler watchdogHandler = new Handler(android.os.Looper.getMainLooper());
+
+    private void armShotWatchdog() {
+        final int seq = ++shotSeq;
+        final long frames0 = framesSeen;
+        watchdogHandler.postDelayed(() -> {
+            if (shotSaved >= seq) return;
+            Log.w(TAG, "Shot " + seq + " not saved after 6 s: frames since press " + (framesSeen - frames0)
+                + ", stack mode " + stackMode + " active " + stackActive + " begun " + stackBegun
+                + " phase " + stackPhase + " frames " + stackFrames + " wait " + stackWait
+                + " capture pending " + captureRequested.get() + " slow " + slowGot + "/" + slowFrames);
+        }, 6000L);
+    }
+
+    private void recordFrameMeta(long ts, int iso, long exp) {
+        synchronized (metaLock) {
+            metaTs[metaNext] = ts;
+            metaIso[metaNext] = iso;
+            metaExp[metaNext] = exp;
+            metaNext = (metaNext + 1) % META_SLOTS;
+        }
+    }
+
+    /** Tags the next ring frame with its exposure; falls back to the latest result. */
+    private void tagRingFrame(long ts) {
+        int iso = resultIso;
+        long exp = resultExposureNs;
+        synchronized (metaLock) {
+            for (int i = 0; i < META_SLOTS; i++) {
+                if (metaTs[i] == ts) { iso = metaIso[i]; exp = metaExp[i]; break; }
+            }
+        }
+        VulkanRenderer.nativeSetFrameMeta(ts, iso, exp);
+    }
+
     public synchronized void triggerCapture(String stockShortName, DngSaver.Callback callback) {
         boolean front = (camMatrixIdx == 1);
         boolean wantFlash = !videoMode && !stackActive && manualAeActive && (hasFlash() || (front && screenFlash != null))
@@ -1134,16 +1238,40 @@ public class CameraEngine {
         this.pendingDngCallback = callback;
         // Lock the grip now: the shutter tap itself can jolt the phone before the next frame lands.
         this.lockedCaptureOrient = currentActiveOrient();
-        if (stackMode == STACK_OFF && nightAuto && !videoMode && !stackActive && manualAeActive
+        if (stackMode == STACK_OFF && slowStill && nightAuto && !videoMode && !stackActive && manualAeActive
+                && manualShutterNs == 0 && underexposureEv > 0.3f && captureSession != null && previewBuilder != null) {
+            // Stage A4: still too dark at the slowest live shutter (ISO 100 stocks at night). Take
+            // a few separate long frames instead; the live stream itself never runs slower.
+            long cap = Math.min(deviceMaxShutterNs, hasOis ? SLOW_MAX_OIS_NS : SLOW_MAX_NS);
+            slowExposureNs = Math.max(currentExposureNs,
+                Math.min(cap, (long) (currentExposureNs * Math.pow(2.0, underexposureEv))));
+            slowFrames = (int) Math.max(3, Math.min(6, Math.round(SLOW_TOTAL_NS / (double) slowExposureNs)));
+            stackMode = STACK_SLOW;
+            nightRestore = true;
+        } else if (stackMode == STACK_OFF && nightAuto && !videoMode && !stackActive && manualAeActive
                 && (autoPushStops > 0.5f || underexposureEv > 0.3f || (filmKey.isEmpty() && currentIso >= 1000))) {
             stackMode = STACK_BURST;
             nightRestore = true;
             burstTarget = (autoPushStops >= 3f) ? 12 : BURST_FRAMES;
         } else if (stackMode == STACK_BURST) {
             burstTarget = BURST_FRAMES;
+        } else if (stackMode == STACK_OFF && autoMerge && !videoMode && !stackActive && gpuMerge()) {
+            // Stage A3: every photo is a merge of the frames already captured, sized to the light.
+            stackMode = STACK_BURST;
+            nightRestore = true;
+            int iso = resultIso;
+            burstTarget = (iso <= 200) ? 4 : (iso <= 800) ? 6 : BURST_FRAMES;
         }
+        if (stackMode == STACK_HDR) burstTarget = HDR_BASE_FRAMES;
+        Log.i(TAG, "Shot: stack " + stackMode + " target " + burstTarget + " active " + stackActive
+            + " ISO " + resultIso + " " + (resultExposureNs / 1000) + " us, " + String.format(java.util.Locale.US, "%.1f", underexposureEv) + " EV under");
+        armShotWatchdog();
         if (stackMode != STACK_OFF && !stackActive && (stackMode != STACK_HDR || manualAeActive)) {
             // Multi-frame shot: the frame listener collects the frames, then takes the normal capture path.
+            // A burst (and a GPU HDR's base burst) starts from the frames already in the ring, up to
+            // the one on screen now.
+            boolean fromRing = stackMode == STACK_BURST || (stackMode == STACK_HDR && gpuMerge());
+            this.ringMarkSeq = fromRing ? VulkanRenderer.nativeRingMark() : 0L;
             this.stackBegun = false;
             this.stackActive = true;
             return;
@@ -1161,7 +1289,24 @@ public class CameraEngine {
     public static final int STACK_LONG = 3;     // long exposure, mean of frames (water, crowds)
     public static final int STACK_TRAILS = 4;   // long exposure, brightest value per pixel (stars, lights)
 
+    public static final int STACK_SLOW = 5;     // separate long-exposure still requests, merged (A4; set by shootNow)
+
     private static final int BURST_FRAMES = 8;
+    // Stage A4 slow still: longest single frame by hand (OIS lenses hold a stop more), and the
+    // total time the frames should span.
+    private static final long SLOW_MAX_NS = 125_000_000L;       // 1/8 s
+    private static final long SLOW_MAX_OIS_NS = 250_000_000L;   // 1/4 s
+    private static final long SLOW_TOTAL_NS = 800_000_000L;
+    private static final String SLOW_TAG = "a4-slow";
+    private volatile boolean slowStill = true;
+    public void setSlowStill(boolean on) { slowStill = on; }
+    private long slowExposureNs = 0L;
+    private int slowFrames = 0;
+    private int slowGot = 0;
+    private final long[] slowTs = new long[8];   // sensor timestamps of the long frames, from onCaptureStarted
+    private int slowTsNext = 0;
+    private volatile long lastImageTs = 0L;
+    private int lastStabState = -1;
     private volatile int burstTarget = BURST_FRAMES;   // 12 when the night push is 3 or more stops
     private static final int MAX_STACK_FRAMES = 600;
     private static final int STACK_SETTLE_FRAMES = 5;
@@ -1169,6 +1314,8 @@ public class CameraEngine {
     private static final long HDR_MAX_SHUTTER_NS = 33_333_333L;    // 1/30 s: no long frame to blur by hand; ISO and the aligned merge make up the rest
     private static final float HDR_STEP_UNDER = 0.25f;
     private static final float HDR_STEP_OVER = 4.0f;
+    private static final int HDR_BASE_FRAMES = 6;    // GPU HDR: zero-lag base burst
+    private static final int HDR_SHORT_FRAMES = 2;   // GPU HDR: -2 EV highlight frames
 
     public interface StackStatus {
         void onStackStatus(String text);
@@ -1191,6 +1338,10 @@ public class CameraEngine {
     private double stackBaseProd = 1.0;
     private int stackTargetIso = 100;
     private long stackTargetExpNs = 10_000_000L;
+    private long ringMarkSeq = 0L;   // newest ring frame at the shutter press (0 = none)
+    private int ringLeft = 0;        // ring frames still to fold into the burst
+    private static final long RING_BUDGET_NS = 30_000_000L;   // keeps the RAW stream drained
+    private static final long SLOW_MERGE_MS = 400L;           // a merge step slower than this ends the burst
 
     public void setStackMode(int mode) { stackMode = Math.max(STACK_OFF, Math.min(STACK_TRAILS, mode)); }
     public int getStackMode() { return stackMode; }
@@ -1211,9 +1362,20 @@ public class CameraEngine {
         postStack(text);
     }
 
-    private static int nativeStackMode(int mode) {
+    // Merge every photo (Stage A3): a single shot becomes a 4 to 8 frame zero-lag burst when the
+    // GPU merge is there. Off = the old single frame.
+    private volatile boolean autoMerge = true;
+    public void setAutoMerge(boolean on) { autoMerge = on; }
+    public boolean isAutoMerge() { return autoMerge; }
+    private Boolean gpuMergeReady = null;
+    private boolean gpuMerge() {
+        if (gpuMergeReady == null || !gpuMergeReady) gpuMergeReady = VulkanRenderer.nativeGpuMergeReady();
+        return gpuMergeReady;
+    }
+
+    private int nativeStackMode(int mode) {
         switch (mode) {
-            case STACK_HDR: return 1;
+            case STACK_HDR: return gpuMerge() ? 4 : 1;   // 4: GPU burst plus short highlight frames
             case STACK_LONG: return 2;
             case STACK_TRAILS: return 3;
             default: return 0;
@@ -1291,14 +1453,38 @@ public class CameraEngine {
             stackBaseExpNs = currentExposureNs;
             stackBaseProd = (double) resultIso * (double) resultExposureNs;
             if (stackBaseProd <= 0.0) stackBaseProd = (double) currentIso * currentExposureNs;
+            if (stackMode == STACK_SLOW && !requestSlowFrames()) return stackAbort("slow request failed");
+            ringLeft = ((stackMode == STACK_BURST || stackMode == STACK_HDR) && ringMarkSeq > 0L)
+                ? VulkanRenderer.nativeStackPrimeFromRing(ringMarkSeq, burstTarget) : 0;
+            if (stackMode == STACK_BURST) Log.i(TAG, "Burst: " + ringLeft + " of " + burstTarget + " frames from before the press (ring " + VulkanRenderer.nativeRingSlots() + ")");
         }
         stackWait++;
         if (stackWait > MAX_STACK_FRAMES + STACK_TIMEOUT_FRAMES) return stackAbort("timeout");
 
         switch (stackMode) {
             case STACK_BURST:
-                if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
-                stackFrames++;
+                if (ringLeft > 0) {
+                    // Zero lag: pre-press frames, as many as fit in RING_BUDGET_NS per camera frame
+                    // (one at a time with the CPU merge, several with the GPU merge).
+                    long t0 = System.nanoTime();
+                    do {
+                        int left = VulkanRenderer.nativeStackAddFromRing();
+                        if (left < 0) return stackAbort("ring add failed");
+                        ringLeft = left;
+                        stackFrames++;
+                    } while (ringLeft > 0 && stackFrames < burstTarget && System.nanoTime() - t0 < RING_BUDGET_NS);
+                } else if (!VulkanRenderer.nativeStackAdd(1.0f)) {
+                    return stackAbort("add failed");
+                } else {
+                    stackFrames++;
+                }
+                // Each merge step holds the camera thread (and a RAW buffer). If one is far slower
+                // than planned, finish early rather than starve the HAL.
+                long stepMs = (System.nanoTime() - now) / 1_000_000L;
+                if (stepMs > SLOW_MERGE_MS && stackFrames >= 2 && stackFrames < burstTarget) {
+                    Log.w(TAG, "Burst: merge step took " + stepMs + " ms, finishing at " + stackFrames + " frames");
+                    burstTarget = stackFrames;
+                }
                 postStack("Burst " + stackFrames + "/" + burstTarget);
                 if (stackFrames >= burstTarget) return stackFinish();
                 return false;
@@ -1315,11 +1501,117 @@ public class CameraEngine {
             }
 
             case STACK_HDR:
-                return hdrStep();
+                return gpuMerge() ? hdrGpuStep() : hdrStep();   // matches nativeStackMode
+
+            case STACK_SLOW:
+                return slowStep();
 
             default:
                 return stackAbort("bad mode");
         }
+    }
+
+    // GPU HDR (Stage A3), HDR+ style: the base is a zero-lag burst at the metered exposure, so
+    // people in it are as sharp as in a normal shot; then two short frames at -2 EV are added only
+    // where the burst clips. Phases: 0 base burst, 1 short frames, then merge.
+    private boolean hdrGpuStep() {
+        if (stackPhase == 0) {
+            long t0 = System.nanoTime();
+            if (ringLeft > 0) {
+                do {
+                    int left = VulkanRenderer.nativeStackAddFromRing();
+                    if (left < 0) return stackAbort("ring add failed");
+                    ringLeft = left;
+                    stackFrames++;
+                } while (ringLeft > 0 && System.nanoTime() - t0 < RING_BUDGET_NS);
+                if (ringLeft > 0) return false;
+            } else if (stackFrames == 0) {
+                if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
+                stackFrames++;
+            }
+            postStack("HDR highlights");
+            planBracket(HDR_STEP_UNDER);
+            stackPhase = 1;
+            stackSettle = 0;
+            stackWait = 0;
+            currentIso = stackTargetIso;
+            currentExposureNs = stackTargetExpNs;
+            applyManualExposure();
+            return false;
+        }
+        // The burst alone is a good photo: if the short exposure never lands, keep it.
+        if (stackWait > STACK_TIMEOUT_FRAMES) return stackFinish();
+        stackSettle = resultMatches(stackTargetIso, stackTargetExpNs) ? stackSettle + 1 : 0;
+        if (stackSettle < STACK_SETTLE_FRAMES) return false;
+        float rel = (float) ((double) resultIso * (double) resultExposureNs / stackBaseProd);
+        if (!VulkanRenderer.nativeStackAdd(rel)) return stackAbort("add failed");
+        stackFrames++;
+        Log.i(TAG, "HDR short frame at " + String.format(java.util.Locale.US, "%+.2f EV", Math.log(rel) / Math.log(2.0)));
+        if (++stackPhase > HDR_SHORT_FRAMES) return stackFinish();
+        return false;
+    }
+
+    /** Queues slowFrames long still requests (same targets and settings as the live request). */
+    private boolean requestSlowFrames() {
+        CameraCaptureSession session = captureSession;
+        CaptureRequest.Builder b = previewBuilder;
+        if (session == null || b == null) return false;
+        synchronized (slowTs) {
+            java.util.Arrays.fill(slowTs, 0L);
+            slowTsNext = 0;
+        }
+        slowGot = 0;
+        try {
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, slowExposureNs);
+            b.set(CaptureRequest.SENSOR_FRAME_DURATION, slowExposureNs);
+            b.setTag(SLOW_TAG);
+            java.util.List<CaptureRequest> list = new java.util.ArrayList<>();
+            for (int i = 0; i < slowFrames; i++) list.add(b.build());
+            session.captureBurst(list, new CaptureCallback(this), cameraHandler);
+            Log.i(TAG, "Slow still: " + slowFrames + " x " + (slowExposureNs / 1000) + " us at ISO " + currentIso
+                + " (live " + (currentExposureNs / 1000) + " us, " + String.format(java.util.Locale.US, "%.1f", underexposureEv) + " EV under)");
+            postStack("Hold still");
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Slow still request failed: " + e.getMessage(), e);
+            return false;
+        } finally {
+            // The builder is the live request: put its exposure back and drop the tag.
+            b.setTag(null);
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentExposureNs);
+            b.set(CaptureRequest.SENSOR_FRAME_DURATION, Math.max(currentExposureNs, MAX_SHUTTER_NS));
+        }
+    }
+
+    private void noteSlowFrameStarted(long ts) {
+        synchronized (slowTs) {
+            slowTs[slowTsNext] = ts;
+            slowTsNext = (slowTsNext + 1) % slowTs.length;
+        }
+    }
+
+    private boolean isSlowFrame(long ts) {
+        synchronized (slowTs) {
+            for (long t : slowTs) if (t == ts && t != 0L) return true;
+        }
+        return false;
+    }
+
+    // Live frames go by untouched; each long frame is folded in as it lands. The first is the reference.
+    private boolean slowStep() {
+        if (isSlowFrame(lastImageTs)) {
+            if (!VulkanRenderer.nativeStackAdd(1.0f)) return stackAbort("add failed");
+            stackFrames++;
+            slowGot++;
+            postStack("Exposing " + slowGot + "/" + slowFrames);
+            if (slowGot >= slowFrames) return stackFinish();
+        }
+        // Slow frames plus the live ones queued between them; give up waiting after that.
+        long waitedNs = (long) stackWait * Math.max(currentExposureNs, MAX_SHUTTER_NS);
+        if (waitedNs > (long) slowFrames * slowExposureNs * 2 + 2_000_000_000L) {
+            return (slowGot > 0) ? stackFinish() : stackAbort("slow frames never arrived");
+        }
+        return false;
     }
 
     // Phases: 0 base frame, 1 under (-2 EV), 2 over (+2 EV), 3 back to base, then merge.
@@ -1491,6 +1783,7 @@ public class CameraEngine {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                 engine.applyStabilization(builder);
+                engine.enableFaceDetect(builder);
 
                 engine.previewBuilder = builder;
                 if (engine.manualFocusDiopters >= 0f) {
@@ -1522,6 +1815,11 @@ public class CameraEngine {
         }
 
         @Override
+        public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request, long timestamp, long frameNumber) {
+            if (SLOW_TAG.equals(request.getTag())) engine.noteSlowFrameStarted(timestamp);
+        }
+
+        @Override
         public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, android.hardware.camera2.CaptureFailure failure) {
             Log.w(TAG, "Capture failed frame " + failure.getFrameNumber() + " reason " + failure.getReason()
                 + " at " + (engine.currentExposureNs / 1000) + " us");
@@ -1533,8 +1831,12 @@ public class CameraEngine {
             if (engine.frameCount == 1) {
                 Integer oisState = result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE);
                 Integer vsState = result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE);
-                Log.i(TAG, "HAL active stabilization: OIS=" + (oisState != null && oisState == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON)
-                    + ", VideoEIS=" + (vsState != null && vsState == CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON));
+                int stab = ((oisState != null && oisState == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON) ? 1 : 0)
+                    | ((vsState != null && vsState == CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON) ? 2 : 0);
+                if (stab != engine.lastStabState) {   // log changes only, not once a second
+                    engine.lastStabState = stab;
+                    Log.i(TAG, "HAL active stabilization: OIS=" + ((stab & 1) != 0) + ", VideoEIS=" + ((stab & 2) != 0));
+                }
             }
 
             Integer aeState = result.get(CaptureResult.CONTROL_AE_STATE);
@@ -1546,6 +1848,9 @@ public class CameraEngine {
             Long exp = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
             if (iso != null) engine.resultIso = iso;
             if (exp != null) engine.resultExposureNs = exp;
+            engine.onFaces(result.get(CaptureResult.STATISTICS_FACES));
+            Long ts = result.get(CaptureResult.SENSOR_TIMESTAMP);
+            if (ts != null && iso != null && exp != null) engine.recordFrameMeta(ts, iso, exp);
             Float focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE);
 
             float noiseS = 0.0f;
@@ -1649,6 +1954,7 @@ public class CameraEngine {
 
             long now = System.nanoTime();
             engine.frameCount++;
+            engine.framesSeen++;
             if (now - engine.fpsStartTimeNs >= 1_000_000_000L) {
                 engine.currentCameraFps = (engine.frameCount * 1_000_000_000.0) / (now - engine.fpsStartTimeNs);
                 engine.frameCount = 0;
@@ -1680,6 +1986,8 @@ public class CameraEngine {
             if (engine.camMatrixIdx == 1) renderOrient = (renderOrient + 180) % 360;
 
             float vulkanMs = 0.0f;
+            engine.lastImageTs = image.getTimestamp();
+            engine.tagRingFrame(engine.lastImageTs);
             HardwareBuffer hb = image.getHardwareBuffer();
             if (hb != null) {
                 try {
@@ -1710,6 +2018,7 @@ public class CameraEngine {
             engine.updateAutoIso();
 
             if (capture) {
+                engine.shotSaved = engine.shotSeq;
                 Log.i(TAG, "Capture grip " + activeOrient + " (render " + renderOrient + ", ROT +" + engine.manualRotationOffset + ")");
                 // Depth bokeh: the first half of the master render runs here, the depth network and the
                 // second half on a worker, which also hands the Image to the saver.

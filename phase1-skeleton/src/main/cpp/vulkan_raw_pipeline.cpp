@@ -4,6 +4,7 @@
 #include "S24HardwareCalibrationMaster.h"
 #include "shaders/demosaic_spv.h"
 #include "shaders/encode_hlg_spv.h"
+#include "shaders/merge_spv.h"
 
 #include <cstring>
 #include <algorithm>
@@ -23,6 +24,10 @@ static constexpr float kExposureScale = 2.4f;
 static constexpr float kDirMultiplier = 1.8f;      // DIR coupler inter-image saturation
 static constexpr uint32_t kPrintRowPaper = 94;     // Kodak Portra Endura
 static constexpr uint32_t kPrintRowEcn2 = 90;      // Kodak Vision 2383
+// Stage B5 print paper choices (LUT rows): 0 auto, 1 Fujifilm Crystal Archive (Frontier lab
+// paper), 2 Endura Premier, 3 Supra Endura, 4 Portra Endura, 5 Ultra Endura, 6 Vision 2383,
+// 7 Vision Premier 2393, 8 Ektacolor Edge.
+static constexpr uint32_t kPrintPaperRows[] = {0, 89, 93, 95, 94, 96, 90, 91, 92};
 static constexpr float kPrintContrast = 0.85f;     // print exposure scale (system gamma)
 static constexpr float kPrintMidDensity = 0.78f;   // mid grey print density (~16.6% reflectance)
 static constexpr float kSlideMidDensity = 1.0f;    // mid grey above D-min on a reversal film
@@ -49,7 +54,8 @@ static constexpr FilmFormat kFilmFormats[4] = {
     {5.79f, 1.90f, 60.0f, 0.35f},   // Super 8
     {69.5f, 0.70f, 70.0f, 0.00f},   // 6x7 medium format
 };
-static constexpr float kGrainClumpMm = 0.0105f;    // visible silver/dye clump scale
+static constexpr float kGrainClumpMm = 0.0105f;
+static constexpr float kAdjacencyMm = 0.1f;        // developer diffusion width (edge effects, B4)    // visible silver/dye clump scale
 static constexpr float kSuper70FocalMm = 80.0f;     // Super 70mm IMAX archetype: 80 mm f/2.0
 static constexpr float kSuper70FNumber = 2.0f;
 static constexpr float kSuper70GateLongMm = 52.5f;  // 52.5 x 23 mm gate
@@ -1105,6 +1111,139 @@ bool VulkanRawPipeline::createDescriptorLayoutAndPipelines() {
 // =============================================================================
 // 120-look 2D LUT (assets/s24_master_120_looks.bin) + look parameter buffer
 // =============================================================================
+namespace {
+// Stage B3: grain character per stock. Size grows with box speed (bigger silver crystals in
+// faster emulsions); tabular-grain stocks (T-Max, Delta, Portra, Vision3...) render finer
+// than their speed, classic cubic-grain stocks (Tri-X, HP5, Fomapan...) coarser. Clump mixes
+// in a second, larger grain scale so fast films look clumpy rather than just noisy. Best-guess
+// values, to be tuned against real scans.
+struct GrainCharacter { float size, clump, colour, adjacency; };
+
+GrainCharacter grainCharacter(const s24film::LookProfile120& lp, int boxIso) {
+    const std::string id = lp.lookId ? lp.lookId : "";
+    auto has = [&](const char* s) { return id.find(s) != std::string::npos; };
+    float iso = boxIso > 0 ? static_cast<float>(boxIso) : 200.0f;
+    float size = std::clamp(std::pow(iso / 100.0f, 0.3f), 0.75f, 2.2f);
+    if (has("tmax") || has("delta") || has("acros") || has("portra") || has("ektar") ||
+        has("vision3") || has("eterna") || has("xp2") || has("reala") || has("velvia") ||
+        has("provia") || has("astia") || has("ektachrome") || has("kodachrome") || has("panf")) {
+        size *= 0.85f;
+    } else if (has("trix") || has("hp5") || has("fomapan") || has("double_x") || has("apx") ||
+               has("plus_x") || has("neopan_1600") || has("un54") || has("superia_1600") ||
+               has("natura") || has("vista_800")) {
+        size *= 1.15f;
+    }
+    if (has("push")) size *= 1.15f;
+    float clump = std::clamp((size - 1.05f) / 0.9f, 0.0f, 1.0f);
+    if (has("delta3200") || has("p3200")) clump = std::max(clump, 0.85f);
+    // Slides and cine negative show less visible dye-cloud colour grain than consumer C-41.
+    float colour = 0.47f;
+    if (lp.category == s24film::LookCategory::COLOR_REVERSAL_SLIDE) colour = 0.32f;
+    else if (lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2) colour = 0.38f;
+    // Stage B4: development adjacency (edge) effect strength. Strongest in B&W (acutance
+    // developers), moderate in colour negative and cine, weak in slides; none for digital looks.
+    float adj = 0.0f;
+    switch (lp.category) {
+        case s24film::LookCategory::BLACK_AND_WHITE:          adj = has("xp2") ? 0.18f : 0.32f; break;
+        case s24film::LookCategory::COLOR_NEGATIVE_C41:       adj = 0.18f; break;
+        case s24film::LookCategory::MOTION_PICTURE_ECN2:      adj = 0.20f; break;
+        case s24film::LookCategory::COLOR_REVERSAL_SLIDE:     adj = 0.12f; break;
+        case s24film::LookCategory::FUJIFILM_SIMULATION:      adj = 0.10f; break;
+        case s24film::LookCategory::CREATIVE_INSTANT_EXPIRED: adj = 0.10f; break;
+        default: break;
+    }
+    return {size, clump, colour, adj};
+}
+}  // namespace
+
+// Print stage for one look, from the LUT payload kept by loadLookLut. Rerun when the print
+// paper choice changes (Stage B5).
+void VulkanRawPipeline::computePrintStage(uint32_t i) {
+    const auto& lp = s24film::kMasterLooks120[i];
+    LookGpu& g = mLookParams[i];
+    const uint32_t rows = mLutRows;
+    const uint32_t cols = mLutCols;
+    const uint32_t row = static_cast<uint32_t>(g.misc[3]);
+    const bool normalized = g.misc2[0] > 0.5f;
+    const float dirBoost = g.misc[2];
+    auto sampleRow = [&](uint32_t r, float col, uint32_t ch) -> float {
+        float cc = std::clamp(col, 0.0f, static_cast<float>(cols - 1));
+        uint32_t c0 = static_cast<uint32_t>(cc);
+        uint32_t c1 = std::min(c0 + 1, cols - 1);
+        float f = cc - static_cast<float>(c0);
+        const float* rp = mLutPayload.data() + static_cast<size_t>(r) * cols * 4;
+        return rp[c0 * 4 + ch] * (1.0f - f) + rp[c1 * 4 + ch] * f;
+    };
+
+    // Print stage for colour negatives: the negative is printed onto paper (C-41, Fujifilm
+    // sims) or 2383 release print (ECN-2), which gives the S-shaped film tone scale with a
+    // soft shoulder. Printer lights put mid grey at the same print density on every layer.
+    g.print0[3] = -1.0f;
+    const bool printable = mLutReady && g.misc[1] == 0.0f &&
+        (lp.category == s24film::LookCategory::COLOR_NEGATIVE_C41 ||
+         lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2 ||
+         lp.category == s24film::LookCategory::FUJIFILM_SIMULATION);
+    if (printable) {
+        const uint32_t prow = std::min<uint32_t>(printRowFor(static_cast<int>(lp.category)), rows - 1);
+        auto colOf = [&](float logE) {
+            return (logE - kLutLogEMin) / (kLutLogEMax - kLutLogEMin) * static_cast<float>(cols - 1);
+        };
+        float x0[3], dminP[3], blk[3];
+        for (int c = 0; c < 3; ++c) {
+            dminP[c] = sampleRow(prow, 0.0f, static_cast<uint32_t>(c));
+            const float target = kPrintMidDensity + dminP[c];
+            float found = 0.0f;
+            for (uint32_t k = 1; k < cols; ++k) {
+                float d0 = sampleRow(prow, static_cast<float>(k - 1), static_cast<uint32_t>(c));
+                float d1 = sampleRow(prow, static_cast<float>(k), static_cast<uint32_t>(c));
+                if (d0 <= target && d1 >= target) {
+                    float f = (d1 > d0) ? (target - d0) / (d1 - d0) : 0.0f;
+                    found = kLutLogEMin + (static_cast<float>(k - 1) + f) / static_cast<float>(cols - 1) * (kLutLogEMax - kLutLogEMin);
+                    break;
+                }
+            }
+            x0[c] = found;
+        }
+        // Render an unexposed frame through the same chain to find the black to subtract.
+        const float logEBlack = std::log10(1e-6f / 0.18f);
+        float Dn[3];
+        for (int c = 0; c < 3; ++c) {
+            Dn[c] = sampleRow(row, colOf(logEBlack), static_cast<uint32_t>(c)) * (normalized ? lp.dMax[c] : 1.0f);
+        }
+        const float s = 1.0f + dirBoost * kDirMultiplier;
+        const float off = (1.0f - s) * 0.5f;
+        for (int c = 0; c < 3; ++c) {
+            float dd = 0.0f;
+            for (int j = 0; j < 3; ++j) dd += ((j == c) ? s : off) * (Dn[j] - g.dMid[j]);
+            float logEp = -dd / std::max(g.gamma[c], 0.2f) * 0.5f * kPrintContrast + x0[c];
+            float Dp = sampleRow(prow, colOf(logEp), static_cast<uint32_t>(c));
+            blk[c] = std::pow(10.0f, -(Dp - dminP[c]));
+        }
+        const float midLin = std::pow(10.0f, -kPrintMidDensity);
+        float greyMean = 0.0f;
+        for (int c = 0; c < 3; ++c) greyMean += (midLin - blk[c]) / 3.0f;
+        for (int c = 0; c < 3; ++c) {
+            g.print0[c] = x0[c];
+            g.print1[c] = dminP[c];
+            g.print2[c] = blk[c];
+        }
+        g.print0[3] = static_cast<float>(prow);
+        g.print1[3] = kPrintContrast;
+        g.print2[3] = midLin / std::max(greyMean, 1e-4f);
+    }
+}
+
+// Print paper row for a look category: the user's choice (Stage B5), else Portra Endura for
+// colour negatives and Vision 2383 for cine negatives.
+uint32_t VulkanRawPipeline::printRowFor(int category) const {
+    const auto cat = static_cast<s24film::LookCategory>(category);
+    const int choice = mPrintPaper.load();
+    if (choice > 0 && choice < static_cast<int>(sizeof(kPrintPaperRows) / sizeof(kPrintPaperRows[0]))) {
+        return kPrintPaperRows[choice];
+    }
+    return (cat == s24film::LookCategory::MOTION_PICTURE_ECN2) ? kPrintRowEcn2 : kPrintRowPaper;
+}
+
 bool VulkanRawPipeline::loadLookLut() {
     const uint32_t lookCount = s24film::kTotalMasterLooks;
     mLookParams.assign(lookCount, LookGpu{});
@@ -1153,6 +1292,9 @@ bool VulkanRawPipeline::loadLookLut() {
         cols = 1;
         payload.assign(4, 0.0f);
     }
+    mLutPayload = payload;
+    mLutRows = rows;
+    mLutCols = cols;
 
     const float midCol = (0.0f - kLutLogEMin) / (kLutLogEMax - kLutLogEMin) * static_cast<float>(cols - 1);
     auto sampleRow = [&](uint32_t row, float col, uint32_t ch) -> float {
@@ -1217,6 +1359,10 @@ bool VulkanRawPipeline::loadLookLut() {
         g.misc2[1] = lp.halationStrength;
         g.misc2[2] = lp.grainStrength;
         g.misc2[3] = 0.0f;
+        {
+            const GrainCharacter gc = grainCharacter(lp, i < s24film::kTotalMasterLooks ? s24film::kMasterLookBoxIso[i] : 0);
+            g.grain[0] = gc.size; g.grain[1] = gc.clump; g.grain[2] = gc.colour; g.grain[3] = gc.adjacency;
+        }
 
         // Slides: the LUT puts scene mid grey almost at D-min (a washed-out, over-exposed
         // transparency). Shift exposure so mid grey lands at D-min + 1.0 on the green layer,
@@ -1240,63 +1386,7 @@ bool VulkanRawPipeline::loadLookLut() {
             }
         }
 
-        // Print stage for colour negatives: the negative is printed onto paper (C-41, Fujifilm
-        // sims) or 2383 release print (ECN-2), which gives the S-shaped film tone scale with a
-        // soft shoulder. Printer lights put mid grey at the same print density on every layer.
-        g.print0[3] = -1.0f;
-        const bool printable = mLutReady && mode == 0.0f &&
-            (lp.category == s24film::LookCategory::COLOR_NEGATIVE_C41 ||
-             lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2 ||
-             lp.category == s24film::LookCategory::FUJIFILM_SIMULATION);
-        if (printable) {
-            const uint32_t prow = std::min<uint32_t>(
-                (lp.category == s24film::LookCategory::MOTION_PICTURE_ECN2) ? kPrintRowEcn2 : kPrintRowPaper, rows - 1);
-            auto colOf = [&](float logE) {
-                return (logE - kLutLogEMin) / (kLutLogEMax - kLutLogEMin) * static_cast<float>(cols - 1);
-            };
-            float x0[3], dminP[3], blk[3];
-            for (int c = 0; c < 3; ++c) {
-                dminP[c] = sampleRow(prow, 0.0f, static_cast<uint32_t>(c));
-                const float target = kPrintMidDensity + dminP[c];
-                float found = 0.0f;
-                for (uint32_t k = 1; k < cols; ++k) {
-                    float d0 = sampleRow(prow, static_cast<float>(k - 1), static_cast<uint32_t>(c));
-                    float d1 = sampleRow(prow, static_cast<float>(k), static_cast<uint32_t>(c));
-                    if (d0 <= target && d1 >= target) {
-                        float f = (d1 > d0) ? (target - d0) / (d1 - d0) : 0.0f;
-                        found = kLutLogEMin + (static_cast<float>(k - 1) + f) / static_cast<float>(cols - 1) * (kLutLogEMax - kLutLogEMin);
-                        break;
-                    }
-                }
-                x0[c] = found;
-            }
-            // Render an unexposed frame through the same chain to find the black to subtract.
-            const float logEBlack = std::log10(1e-6f / 0.18f);
-            float Dn[3];
-            for (int c = 0; c < 3; ++c) {
-                Dn[c] = sampleRow(row, colOf(logEBlack), static_cast<uint32_t>(c)) * (normalized ? lp.dMax[c] : 1.0f);
-            }
-            const float s = 1.0f + dirBoost * kDirMultiplier;
-            const float off = (1.0f - s) * 0.5f;
-            for (int c = 0; c < 3; ++c) {
-                float dd = 0.0f;
-                for (int j = 0; j < 3; ++j) dd += ((j == c) ? s : off) * (Dn[j] - g.dMid[j]);
-                float logEp = -dd / std::max(g.gamma[c], 0.2f) * 0.5f * kPrintContrast + x0[c];
-                float Dp = sampleRow(prow, colOf(logEp), static_cast<uint32_t>(c));
-                blk[c] = std::pow(10.0f, -(Dp - dminP[c]));
-            }
-            const float midLin = std::pow(10.0f, -kPrintMidDensity);
-            float greyMean = 0.0f;
-            for (int c = 0; c < 3; ++c) greyMean += (midLin - blk[c]) / 3.0f;
-            for (int c = 0; c < 3; ++c) {
-                g.print0[c] = x0[c];
-                g.print1[c] = dminP[c];
-                g.print2[c] = blk[c];
-            }
-            g.print0[3] = static_cast<float>(prow);
-            g.print1[3] = kPrintContrast;
-            g.print2[3] = midLin / std::max(greyMean, 1e-4f);
-        }
+        computePrintStage(i);
     }
 
     if (mLutReady) {
@@ -1390,10 +1480,30 @@ bool VulkanRawPipeline::createGrainTile() {
 bool VulkanRawPipeline::createSharedResources() {
     const VkMemoryPropertyFlags hostFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-    // 4-slot RAW ring (4 x 4080 x 3060 x 2 bytes fits in 104 MB).
-    mRawStorageBufferSize = 104ull * 1024ull * 1024ull;
-    if (!createBuffer(mRawStorageBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
-                      mRawStorageBuffer, mRawStorageBufferMemory, &mMappedRawBuffer)) return false;
+    // RAW ring, 26 MB per slot (one 4080 x 3060 x 2 byte frame). Zero-lag merges want 10 slots
+    // (260 MB); fall back to fewer if the driver will not give that much host-visible memory.
+    mRingSlotBytes = 26ull * 1024ull * 1024ull;
+    // The shader binds the whole ring as one storage buffer, so it must also fit the range limit.
+    VkPhysicalDeviceProperties devProps = {};
+    vkGetPhysicalDeviceProperties(mPhysicalDevice, &devProps);
+    const VkDeviceSize maxRange = devProps.limits.maxStorageBufferRange;
+    mRawStorageBuffer = VK_NULL_HANDLE;
+    for (uint32_t slots : {kMaxRingSlots, 6u, 4u}) {
+        mRawStorageBufferSize = mRingSlotBytes * slots;
+        if (mRawStorageBufferSize > maxRange && slots > 4u) {
+            LOGW("RAW ring of %u slots exceeds maxStorageBufferRange %llu", slots, (unsigned long long) maxRange);
+            continue;
+        }
+        if (createBuffer(mRawStorageBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, hostFlags,
+                         mRawStorageBuffer, mRawStorageBufferMemory, &mMappedRawBuffer)) {
+            mRingSlots = slots;
+            break;
+        }
+        destroyBuffer(mRawStorageBuffer, mRawStorageBufferMemory, &mMappedRawBuffer);
+        LOGW("RAW ring of %u slots not available, trying fewer", slots);
+    }
+    if (mRawStorageBuffer == VK_NULL_HANDLE) return false;
+    LOGI("RAW ring: %u slots (%.0f MB)", mRingSlots, mRawStorageBufferSize / 1048576.0);
 
     // Clean Bayer plane (float) written by PREP, read by ISP.
     mCleanBayerSize = 4096ull * 4096ull * sizeof(float);
@@ -1622,6 +1732,10 @@ bool VulkanRawPipeline::createComputeResources() {
     if (!createSharedResources()) { LOGE("createSharedResources failed"); return false; }
     if (!createDescriptorLayoutAndPipelines()) { LOGE("createDescriptorLayoutAndPipelines failed"); return false; }
     if (!createTargets(mLiveTargets, mSwapchainExtent, false)) { LOGE("live targets failed"); return false; }
+    // GPU burst merge (Stage A2); without it bursts fall back to the CPU merge.
+    if (!mGpuMerge.init(mPhysicalDevice, mDevice, mQueue, mQueueFamilyIndex, merge_spv, merge_spv_size)) {
+        LOGW("GPU merge unavailable, bursts use the CPU merge");
+    }
 
     // Live RGBA16F readback for the fallback capture path.
     mReadbackBufferSize = static_cast<VkDeviceSize>(mLiveTargets.extent.width) * mLiveTargets.extent.height * 8;
@@ -1705,6 +1819,7 @@ void VulkanRawPipeline::destroy() {
     std::lock_guard<std::mutex> lock(mRenderMutex);
     if (mDevice != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(mDevice);
+        mGpuMerge.destroy();
         destroyComputeResources();
         destroySwapchain();
         vkDestroyDevice(mDevice, nullptr);
@@ -1794,6 +1909,11 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     u.lsc[1] = static_cast<float>(s24film::kLscGridCols);
     u.lsc[2] = static_cast<float>(s24film::kLscGridRows);
 
+    if (mPrintDirty.exchange(false) && mLutReady) {
+        for (uint32_t i = 0; i < s24film::kTotalMasterLooks; ++i) computePrintStage(i);
+        std::memcpy(mLookMapped, mLookParams.data(), mLookParams.size() * sizeof(LookGpu));
+        LOGI("Print paper %d", mPrintPaper.load());
+    }
     const int lookIdx = mLutReady ? mActiveLookIdx.load() : -1;
     u.look[0] = static_cast<float>(lookIdx);
     u.look[1] = kDirMultiplier;
@@ -1853,10 +1973,14 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     // Halation: TIR ring radius in output pixels -> Gaussian weights over mips 1..5 (log2 space).
     const float outLong = static_cast<float>(std::max(t.extent.width, t.extent.height));
     const FilmFormat& fmt = kFilmFormats[std::clamp(mFilmFormat.load(), 0, 3)];
-    const float ringPx = kHalationRingMm / fmt.frameLongMm * outLong;
+    // Stage B2: stocks without an anti-halation backing (CineStill, strength 0.3 and up) spread
+    // their red ring wider as well as brighter; ordinary stocks keep the TIR ring.
+    const float ringPx = kHalationRingMm / fmt.frameLongMm * outLong * (1.0f + 2.0f * std::max(baseHal - 0.2f, 0.0f));
     // Resolution: Gaussian with the system cut-off period, in output pixels.
     u.halW2[1] = 0.35f * outLong / (fmt.lpPerMm * fmt.frameLongMm);
     u.halW2[2] = fmt.gateVignette;
+    u.halW2[3] = static_cast<float>(mBwPaper.load());
+    u.lfx3[3] = static_cast<float>(mScanner.load());
     const float ringLod = std::log2(std::max(ringPx, 1.0f));
     float hw[5];
     float dw[5];
@@ -1875,6 +1999,10 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     }
     u.halW2[0] = hw[4] / hsum;
     u.diffW2[0] = dw[4] / dsum;
+    // Stage B4: developer adjacency effect. Developer diffuses ~0.1 mm on the negative, so the
+    // local exposure reference is the pyramid level of that width in output pixels.
+    u.diffW2[1] = std::clamp(std::log2(std::max(kAdjacencyMm / fmt.frameLongMm * outLong, 1.0f)), 1.0f, 5.0f);
+    u.diffW2[2] = mAdjacency.load() ? 1.0f : 0.0f;
 
     // Super 70mm IMAX bokeh: background (infinity) CoC for the current focus distance.
     const bool bokeh = (uiLens == kSuper70LensIndex) && mPortraitMode.load();
@@ -1902,7 +2030,15 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     // Grain tile texel size in output pixels: same grain-to-frame ratio in preview and master.
     u.grain[1] = std::max(1.0f, outLong / fmt.frameLongMm * kGrainClumpMm);
     u.grain[3] = fmt.grainAmp;
-    u.grain[2] = grainMult;
+    // Stage B6: expired film is grainier; light leaks change on every photo (the preview shows
+    // the pattern the next photo will get).
+    const float ageing = std::clamp(mAgeing.load(), 0.0f, 1.0f);
+    u.grain[2] = grainMult * (1.0f + 1.2f * ageing);
+    u.entropy[0] = static_cast<float>(mFrameBorder.load());
+    u.entropy[1] = ageing;
+    u.entropy[2] = std::clamp(mLightLeak.load(), 0.0f, 1.0f);
+    u.entropy[3] = static_cast<float>(mLeakSeed.load() % 4096u);
+    if (t.master && u.entropy[2] > 0.0f) mLeakSeed.fetch_add(1u);
 
     u.hdr[0] = kHdrSdrRatio;
     u.hdr[1] = t.master ? 1.0f : 0.0f;
@@ -1973,12 +2109,14 @@ void VulkanRawPipeline::fillPushConstants(PushConstants& pc, const LastFrameStat
     uint32_t gateBits = static_cast<uint32_t>(mCinemaGate.load() & 3);
     const int format = mFilmFormat.load();
     uint32_t weaveBit = (mGateWeave.load() || format == 1 || format == 2) ? 1u : 0u;   // small-gauge gate weave
-    pc.packedRingInfo = (slot & 3u)
+    pc.packedRingInfo = (slot & 0xFu)
+                      | ((st.ringSlots & 0xFu) << 4u)
                       | ((burstCnt & 0xFFu) << 8u)
                       | (mirrorBit << 16u)
                       | (anamorphicBits << 17u)
                       | (gateBits << 19u)
-                      | (weaveBit << 21u);
+                      | (weaveBit << 21u)
+                      | ((st.hdrShoulder ? 1u : 0u) << 22u);
 }
 
 void VulkanRawPipeline::computeBarrier(VkCommandBuffer cmd) {
@@ -2087,6 +2225,7 @@ float VulkanRawPipeline::renderRawFrame(
         mLastHeight = height;
         mValidRingFrames = 0;
         mRingSlot = 0;
+        mRingEpoch++;
     }
 
     if (static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * sizeof(float) > mCleanBayerSize) {
@@ -2096,18 +2235,38 @@ float VulkanRawPipeline::renderRawFrame(
 
     mFrameCounter++;
     bool stepPrintHold = !mStackActive.load() && mStepPrint8fps.load() && (mValidRingFrames > 0) && ((mFrameCounter % 3u) != 0u);
-    uint32_t currentSlot = mRingSlot & 3u;
+    uint32_t currentSlot = mLastFrame.slot;
 
     if (!stepPrintHold) {
         void* rawAddress = nullptr;
         int lockResult = AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, nullptr, &rawAddress);
         if (lockResult == 0 && rawAddress != nullptr && mMappedRawBuffer != nullptr) {
             size_t frameBytes = static_cast<size_t>(height) * static_cast<size_t>(stride) * 2;
-            if (frameBytes * 4 <= mRawStorageBufferSize) {
+            // Next free slot; slots held by a zero-lag merge are stepped over. A skip breaks the
+            // run of consecutive frames the live temporal merge reads.
+            uint32_t slot = mRingSlot % mRingSlots;
+            for (uint32_t tries = 0; tries < mRingSlots && (mRingLockMask & (1u << slot)); ++tries) {
+                slot = (slot + 1u) % mRingSlots;
+                mValidRingFrames = 0;
+            }
+            if (frameBytes <= mRingSlotBytes && !(mRingLockMask & (1u << slot))) {
+                // Slots are packed at the frame size (the shader's pitch is stride x height).
                 uint8_t* basePtr = static_cast<uint8_t*>(mMappedRawBuffer);
-                std::memcpy(basePtr + currentSlot * frameBytes, rawAddress, frameBytes);
-                mRingSlot++;
-                if (mValidRingFrames < 4u) mValidRingFrames++;
+                std::memcpy(basePtr + static_cast<size_t>(slot) * frameBytes, rawAddress, frameBytes);
+                currentSlot = slot;
+                mRingSlot = slot + 1u;
+                if (mValidRingFrames < kLiveMergeFrames) mValidRingFrames++;
+                RingMeta& m = mRingMeta[slot];
+                m.seq = ++mRingSeq;
+                m.epoch = mRingEpoch;
+                m.timestampNs = mPendingTimestampNs.load();
+                m.iso = mPendingIso.load();
+                m.exposureNs = mPendingExposureNs.load();
+                m.camMatrixIdx = camMatrixIdx;
+                m.width = width;
+                m.height = height;
+                m.stride = stride;
+                mRingNewestSeq.store(m.seq);
 
                 // Central 50% RAW mean (every 16th pixel) for the Java DCG auto-ISO loop.
                 const uint16_t* px = static_cast<const uint16_t*>(rawAddress);
@@ -2148,14 +2307,32 @@ float VulkanRawPipeline::renderRawFrame(
                     }
                     mMeterZones[25].store(total ? static_cast<float>(clipped) / static_cast<float>(total) : 0.0f);
                 }
+                // Face mean (Stage A6) over the largest face the HAL found, in normalized sensor
+                // coordinates; -1 when there is none.
+                {
+                    float f[4] = {mFaceRect[0].load(), mFaceRect[1].load(), mFaceRect[2].load(), mFaceRect[3].load()};
+                    float faceMean = -1.0f;
+                    if (f[2] > f[0] && f[3] > f[1]) {
+                        const int x0 = std::clamp(static_cast<int>(f[0] * width), 0, width - 1);
+                        const int x1 = std::clamp(static_cast<int>(f[2] * width), x0 + 1, width);
+                        const int y0 = std::clamp(static_cast<int>(f[1] * height), 0, height - 1);
+                        const int y1 = std::clamp(static_cast<int>(f[3] * height), y0 + 1, height);
+                        const int step = std::max(2, ((x1 - x0) / 48) & ~1);
+                        double fs = 0.0; uint32_t fn = 0;
+                        for (int y = y0; y < y1; y += step) {
+                            const uint16_t* row = px + static_cast<size_t>(y) * static_cast<size_t>(stride);
+                            for (int x = x0; x < x1; x += step) { fs += row[x]; fn++; }
+                        }
+                        float blk = std::max(mBlackLevel.load(), 0.0f);
+                        if (fn > 0) faceMean = std::max((static_cast<float>(fs / fn) - blk) / std::max(whiteLevel - blk, 1.0f), 0.0f);
+                    }
+                    mMeterZones[26].store(faceMean);
+                }
             }
             AHardwareBuffer_unlock(ahb, nullptr);
         } else {
             return 0.0f;
         }
-        currentSlot = (mRingSlot - 1u) & 3u;
-    } else {
-        currentSlot = (mRingSlot - 1u) & 3u;
     }
 
     mLastFrame.valid = true;
@@ -2171,6 +2348,8 @@ float VulkanRawPipeline::renderRawFrame(
     mLastFrame.camMatrixIdx = camMatrixIdx;
     mLastFrame.slot = currentSlot;
     mLastFrame.burstCount = (mBurstModeEnabled.load() && !mForceSingleFrame.load()) ? std::max(mValidRingFrames, 1u) : 1u;
+    mLastFrame.ringSlots = mRingSlots;
+    mLastFrame.hdrShoulder = false;
 
     vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
     vkResetFences(mDevice, 1, &mInFlightFence);
@@ -2951,7 +3130,8 @@ static void estimateShift(const std::vector<float>& refSmall, const std::vector<
 
 bool VulkanRawPipeline::stackBegin(int mode) {
     std::lock_guard<std::mutex> lock(mRenderMutex);
-    if (!mDevice || !mLastFrame.valid || mode < 0 || mode > 3) return false;
+    if (!mDevice || !mLastFrame.valid || mode < 0 || mode > 4) return false;
+    if (mode == 4 && !mGpuMerge.ready()) return false;
     StackState s;
     s.mode = mode;
     s.width = mLastFrame.width & ~1;
@@ -2960,7 +3140,17 @@ bool VulkanRawPipeline::stackBegin(int mode) {
     s.black = std::max(mBlackLevel.load(), 0.0f);
     s.white = mLastFrame.whiteLevel;
     size_t px = static_cast<size_t>(s.width) * static_cast<size_t>(s.height);
-    if (mode == 3) {
+    // Burst: tile-aligned merge on the GPU when it is there; the CPU accumulators are then unused.
+    // Mode 4 (GPU HDR) is the same merge with short highlight frames on top.
+    // The GPU pass addresses ring slots by width x height, so it needs the frame's own even size.
+    s.gpu = (mode == 0 || mode == 4) && mGpuMerge.ready()
+        && s.width == mLastFrame.width && s.height == mLastFrame.height
+        && mGpuMerge.begin(mRawStorageBuffer, s.width, s.height, s.stride, s.black, s.white,
+                           mNoiseS.load(), mNoiseO.load(), mode == 4);
+    if (mode == 4 && !s.gpu) return false;
+    if (s.gpu) {
+        // nothing to allocate here
+    } else if (mode == 3) {
         s.peak.assign(px, 0);
     } else {
         s.num.assign(px, 0.0f);
@@ -2970,21 +3160,36 @@ bool VulkanRawPipeline::stackBegin(int mode) {
     mStack = std::move(s);
     mStackActive.store(true);
     mForceSingleFrame.store(false);
-    LOGI("Stack begin mode %d %dx%d black %.1f white %.1f", mode, mStack.width, mStack.height, mStack.black, mStack.white);
+    LOGI("Stack begin mode %d %dx%d black %.1f white %.1f%s", mode, mStack.width, mStack.height, mStack.black, mStack.white,
+         mStack.gpu ? " (GPU)" : "");
     return true;
 }
 
 bool VulkanRawPipeline::stackAdd(float relExposure) {
     std::lock_guard<std::mutex> lock(mRenderMutex);
-    StackState& s = mStack;
-    if (!mStackActive.load() || s.mode < 0 || !mMappedRawBuffer || !mLastFrame.valid) return false;
-    if (mLastFrame.width < s.width || mLastFrame.height < s.height || mLastFrame.stride != s.stride) return false;
-    const size_t frameBytes = static_cast<size_t>(mLastFrame.height) * static_cast<size_t>(s.stride) * 2;
-    if (frameBytes * 4 > mRawStorageBufferSize) return false;
-    const uint16_t* src = reinterpret_cast<const uint16_t*>(
-        static_cast<const uint8_t*>(mMappedRawBuffer) + static_cast<size_t>(mLastFrame.slot) * frameBytes);
+    if (!mLastFrame.valid) return false;
+    return stackAddSlot(mLastFrame.slot, mLastFrame.width, mLastFrame.height, mLastFrame.stride, relExposure);
+}
 
-    const int W = s.width, H = s.height, stride = s.stride;
+// Caller holds mRenderMutex.
+bool VulkanRawPipeline::stackAddSlot(uint32_t slot, int width, int height, int stride, float relExposure) {
+    StackState& s = mStack;
+    if (!mStackActive.load() || s.mode < 0 || !mMappedRawBuffer || slot >= mRingSlots) return false;
+    if (width < s.width || height < s.height || stride != s.stride) return false;
+    const size_t frameBytes = static_cast<size_t>(height) * static_cast<size_t>(s.stride) * 2;
+    if (frameBytes * mRingSlots > mRawStorageBufferSize) return false;
+    const uint16_t* src = reinterpret_cast<const uint16_t*>(
+        static_cast<const uint8_t*>(mMappedRawBuffer) + static_cast<size_t>(slot) * frameBytes);
+    if (s.gpu) {
+        GpuBurstMerge::AddStats st;
+        if (!mGpuMerge.add(slot, relExposure, &st)) return false;
+        LOGI("GPU merge frame %d (slot %u, x%.2f): %.1f ms, median shift %d,%d px", s.frames, slot, relExposure,
+             st.ms, 2 * st.medianDx, 2 * st.medianDy);
+        s.frames++;
+        return true;
+    }
+
+    const int W = s.width, H = s.height;
     const float black = s.black;
     const float range = std::max(s.white - s.black, 1.0f);
     const float e = std::max(relExposure, 1e-3f);
@@ -3092,6 +3297,13 @@ bool VulkanRawPipeline::stackFinish() {
     if (!mStackActive.load() || s.mode < 0 || s.frames < 1 || !mMappedRawBuffer || !mLastFrame.valid) return false;
     // The live render of the newest slot may still be reading it.
     vkWaitForFences(mDevice, 1, &mInFlightFence, VK_TRUE, UINT64_MAX);
+    if (s.gpu) {
+        if (!mGpuMerge.resolve(mLastFrame.slot)) return false;
+        mForceSingleFrame.store(true);
+        mLastFrame.hdrShoulder = (s.mode == 4);
+        LOGI("Stack finish mode %d, %d frames merged on the GPU into slot %u", s.mode, s.frames, mLastFrame.slot);
+        return true;
+    }
 
     const size_t frameBytes = static_cast<size_t>(mLastFrame.height) * static_cast<size_t>(s.stride) * 2;
     uint16_t* dst = reinterpret_cast<uint16_t*>(
@@ -3137,6 +3349,7 @@ bool VulkanRawPipeline::stackFinish() {
         }
     });
     mForceSingleFrame.store(true);
+    mLastFrame.hdrShoulder = (s.mode == 1);
     LOGI("Stack finish mode %d, %d frames merged into slot %u", s.mode, s.frames, mLastFrame.slot);
     return true;
 }
@@ -3146,6 +3359,78 @@ void VulkanRawPipeline::stackEnd() {
     mStackActive.store(false);
     mForceSingleFrame.store(false);
     mStack = StackState();
+    mRingLockMask = 0;
+}
+
+void VulkanRawPipeline::setFrameMeta(int64_t timestampNs, int iso, int64_t exposureNs) {
+    mPendingTimestampNs.store(timestampNs);
+    mPendingIso.store(iso);
+    mPendingExposureNs.store(exposureNs);
+}
+
+void VulkanRawPipeline::ringReset() {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    mRingEpoch++;
+    mValidRingFrames = 0;
+}
+
+int VulkanRawPipeline::stackPrimeFromRing(uint64_t markSeq, int maxFrames) {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    StackState& s = mStack;
+    if (!mStackActive.load() || (s.mode != 0 && s.mode != 4) || s.frames != 0 || !mLastFrame.valid || markSeq == 0) return 0;
+    // Keep two slots free so live frames still have somewhere to land while the merge runs.
+    const int cap = std::min(maxFrames, static_cast<int>(mRingSlots) - 2);
+    if (cap < 2) return 0;
+
+    // Newest frame at or before the mark is the reference: the one on screen at the press.
+    uint32_t order[kMaxRingSlots];
+    int n = 0;
+    for (uint32_t i = 0; i < mRingSlots; ++i) {
+        const RingMeta& m = mRingMeta[i];
+        if (m.seq == 0 || m.seq > markSeq || m.epoch != mRingEpoch) continue;
+        if (m.camMatrixIdx != mLastFrame.camMatrixIdx || m.stride != s.stride
+            || m.width < s.width || m.height < s.height) continue;
+        order[n++] = i;
+    }
+    std::sort(order, order + n, [&](uint32_t a, uint32_t b) { return mRingMeta[a].seq > mRingMeta[b].seq; });
+    if (n == 0) return 0;
+
+    const RingMeta& ref = mRingMeta[order[0]];
+    const double refProd = static_cast<double>(ref.iso) * static_cast<double>(ref.exposureNs);
+    s.ringQueue.clear();
+    s.ringQueue.push_back(order[0]);
+    for (int k = 1; k < n && static_cast<int>(s.ringQueue.size()) < cap; ++k) {
+        const RingMeta& m = mRingMeta[order[k]];
+        if (ref.timestampNs > 0 && m.timestampNs > 0 && ref.timestampNs - m.timestampNs > 1'000'000'000LL) break;
+        const double prod = static_cast<double>(m.iso) * static_cast<double>(m.exposureNs);
+        // Burst merge has no exposure scaling: a frame more than 0.2 stop off would read as a ghost.
+        if (refProd > 0.0 && prod > 0.0 && std::fabs(std::log2(prod / refProd)) > 0.2) continue;
+        s.ringQueue.push_back(order[k]);
+    }
+    s.refProd = refProd;
+    for (uint32_t slot : s.ringQueue) mRingLockMask |= (1u << slot);
+    LOGI("Zero-lag: %zu ring frames from seq %llu (newest %llu), ISO %d, %lld us",
+         s.ringQueue.size(), (unsigned long long) ref.seq, (unsigned long long) mRingSeq,
+         ref.iso, (long long) (ref.exposureNs / 1000));
+    return static_cast<int>(s.ringQueue.size());
+}
+
+int VulkanRawPipeline::stackAddFromRing() {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    StackState& s = mStack;
+    if (!mStackActive.load() || s.ringQueue.empty()) return -1;
+    const uint32_t slot = s.ringQueue.front();
+    s.ringQueue.erase(s.ringQueue.begin());
+    const RingMeta& m = mRingMeta[slot];
+    bool ok = (m.epoch == mRingEpoch)
+        && stackAddSlot(slot, m.width, m.height, m.stride, 1.0f);
+    mRingLockMask &= ~(1u << slot);   // folded (or unusable): live frames may have it back
+    if (!ok) {
+        // The reference failing leaves nothing to merge against; a later frame failing just drops it.
+        if (s.frames == 0) return -1;
+        LOGW("Zero-lag: ring slot %u skipped", slot);
+    }
+    return static_cast<int>(s.ringQueue.size());
 }
 
 // =============================================================================
@@ -3308,9 +3593,15 @@ Java_com_s24film_camera_VulkanRenderer_nativeGetLastRawMean(JNIEnv* /*env*/, job
 JNIEXPORT void JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeGetMeterZones(JNIEnv* env, jobject /*thiz*/, jfloatArray out) {
     if (!gPipeline || !out || env->GetArrayLength(out) < 26) return;
-    float z[26];
+    float z[VulkanRawPipeline::kMeterValues];
     gPipeline->meterZones(z);
-    env->SetFloatArrayRegion(out, 0, 26, z);
+    env->SetFloatArrayRegion(out, 0, std::min<jsize>(env->GetArrayLength(out), VulkanRawPipeline::kMeterValues), z);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetFaceRect(JNIEnv* /*env*/, jobject /*thiz*/,
+    jfloat x0, jfloat y0, jfloat x1, jfloat y1) {
+    if (gPipeline) gPipeline->setFaceRect(x0, y0, x1, y1);
 }
 
 JNIEXPORT jboolean JNICALL
@@ -3464,6 +3755,78 @@ Java_com_s24film_camera_VulkanRenderer_nativeStackFinish(JNIEnv* /*env*/, jobjec
 JNIEXPORT void JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeStackEnd(JNIEnv* /*env*/, jobject /*thiz*/) {
     if (gPipeline) gPipeline->stackEnd();
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetFrameMeta(JNIEnv* /*env*/, jobject /*thiz*/,
+    jlong timestampNs, jint iso, jlong exposureNs) {
+    if (gPipeline) gPipeline->setFrameMeta(timestampNs, iso, exposureNs);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeRingMark(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return gPipeline ? static_cast<jlong>(gPipeline->ringMark()) : 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeRingReset(JNIEnv* /*env*/, jobject /*thiz*/) {
+    if (gPipeline) gPipeline->ringReset();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeRingSlots(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return gPipeline ? static_cast<jint>(gPipeline->ringSlots()) : 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeStackPrimeFromRing(JNIEnv* /*env*/, jobject /*thiz*/,
+    jlong markSeq, jint maxFrames) {
+    return gPipeline ? gPipeline->stackPrimeFromRing(static_cast<uint64_t>(markSeq), maxFrames) : 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeGpuMergeReady(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return (gPipeline && gPipeline->gpuMergeReady()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetPrintPaper(JNIEnv* /*env*/, jobject /*thiz*/, jint idx) {
+    if (gPipeline) gPipeline->setPrintPaper(idx);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetScanner(JNIEnv* /*env*/, jobject /*thiz*/, jint idx) {
+    if (gPipeline) gPipeline->setScanner(idx);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetBwPaper(JNIEnv* /*env*/, jobject /*thiz*/, jint idx) {
+    if (gPipeline) gPipeline->setBwPaper(idx);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetFrameBorder(JNIEnv* /*env*/, jobject /*thiz*/, jint style) {
+    if (gPipeline) gPipeline->setFrameBorder(style);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetAgeing(JNIEnv* /*env*/, jobject /*thiz*/, jfloat amount) {
+    if (gPipeline) gPipeline->setAgeing(amount);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetLightLeak(JNIEnv* /*env*/, jobject /*thiz*/, jfloat amount) {
+    if (gPipeline) gPipeline->setLightLeak(amount);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetAdjacency(JNIEnv* /*env*/, jobject /*thiz*/, jboolean on) {
+    if (gPipeline) gPipeline->setAdjacency(on == JNI_TRUE);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeStackAddFromRing(JNIEnv* /*env*/, jobject /*thiz*/) {
+    return gPipeline ? gPipeline->stackAddFromRing() : -1;
 }
 
 } // extern "C"

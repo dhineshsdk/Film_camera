@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include "SpectralFilm.h"
+#include "gpu_merge.h"
 
 #define LOG_TAG "S24FilmVulkan"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -92,8 +93,9 @@ struct FrameParamsUbo {
     float lfx2[4];
     float lfx3[4];
     float lfx4[4];
+    float entropy[4];   // Stage B6: frame border style, ageing, light leak amount, leak seed
 };
-static_assert(sizeof(FrameParamsUbo) == 352, "FrameParamsUbo layout mismatch");
+static_assert(sizeof(FrameParamsUbo) == 368, "FrameParamsUbo layout mismatch");
 
 // std430 mirror of LookGpu in demosaic.comp (binding 5).
 struct LookGpu {
@@ -108,8 +110,9 @@ struct LookGpu {
     float print0[4]; // printer-light logE offset per layer, w = print LUT row (< 0: no print stage)
     float print1[4]; // print paper D-min per layer, w = print exposure scale
     float print2[4]; // rendered black per layer (subtracted), w = mid-grey normalisation
+    float grain[4];  // grain size multiplier, clump mix, dye-layer (colour) grain share, unused
 };
-static_assert(sizeof(LookGpu) == 176, "LookGpu layout mismatch");
+static_assert(sizeof(LookGpu) == 192, "LookGpu layout mismatch");
 
 // std140 mirror of DepthParams in demosaic.comp (binding 23).
 struct DepthParamsUbo {
@@ -164,6 +167,8 @@ struct LastFrameState {
     int camMatrixIdx = 0;
     uint32_t slot = 0;
     uint32_t burstCount = 1;
+    uint32_t ringSlots = 4;
+    bool hdrShoulder = false;   // slot holds an HDR merge with the RAW shoulder (PREP undoes it)
 };
 
 class VulkanRawPipeline {
@@ -200,7 +205,13 @@ public:
     void setPortraitMode(bool on) { mPortraitMode.store(on); }
     void setVirtualAperture(float fNumber) { mVirtualFNumber.store(std::clamp(fNumber, 0.95f, 22.0f)); }
     float lastRawMean() const { return mLastRawMean.load(); }
-    void meterZones(float* out26) const { for (int i = 0; i < 26; ++i) out26[i] = mMeterZones[i].load(); }
+    // 25 zone means, the clipped fraction, then the face mean (-1 = no face).
+    static constexpr int kMeterValues = 27;
+    void meterZones(float* out) const { for (int i = 0; i < kMeterValues; ++i) out[i] = mMeterZones[i].load(); }
+    // Largest face, normalized sensor coordinates; x1 <= x0 clears it.
+    void setFaceRect(float x0, float y0, float x1, float y1) {
+        mFaceRect[0].store(x0); mFaceRect[1].store(y0); mFaceRect[2].store(x1); mFaceRect[3].store(y1);
+    }
     bool setEncoderWindow(ANativeWindow* encoderWindow);
     // Applies to the next setEncoderWindow: true = BT.2020 HLG (10-bit when the surface allows it).
     void setEncoderHlg(bool hlg) { mEncoderHlgRequested.store(hlg); }
@@ -225,11 +236,40 @@ public:
     // (relExposure = this frame's ISO x shutter over the reference frame's, 1 for equal frames);
     // Finish writes the merged mosaic back over the newest ring slot so the master render uses it
     // alone; End clears the flag. Modes: 0 burst average with ghost rejection, 1 HDR bracket,
-    // 2 long exposure average, 3 long exposure lighten.
+    // 2 long exposure average, 3 long exposure lighten, 4 GPU HDR (burst plus short highlight
+    // frames; fails without the GPU merge).
     bool stackBegin(int mode);
     bool stackAdd(float relExposure);
     bool stackFinish();
     void stackEnd();
+
+    // Zero-lag ring (Stage A1). The RAW ring keeps the last kMaxRingSlots frames, each tagged
+    // with its lens, exposure and sensor time. setFrameMeta tags the next frame renderRawFrame
+    // copies in. ringMark returns the sequence number of the newest frame (read at shutter
+    // press). stackPrimeFromRing, after stackBegin, queues the frames at or before that mark
+    // (same lens and size, exposure within 0.2 stop of the newest, at most 1 s older) and locks
+    // their slots so live frames go around them; stackAddFromRing folds one queued frame per call
+    // and frees its slot, returning how many are left (-1 on failure). stackEnd frees the rest.
+    static constexpr uint32_t kMaxRingSlots = 10;
+    static constexpr uint32_t kLiveMergeFrames = 4;   // frames the live PREP temporal merge reads
+    void setFrameMeta(int64_t timestampNs, int iso, int64_t exposureNs);
+    uint64_t ringMark() const { return mRingNewestSeq.load(); }
+    void ringReset();
+    int stackPrimeFromRing(uint64_t markSeq, int maxFrames);
+    int stackAddFromRing();
+    uint32_t ringSlots() const { return mRingSlots; }
+    bool gpuMergeReady() const { return mGpuMerge.ready(); }
+    void setAdjacency(bool on) { mAdjacency.store(on); }
+    // Stage B5: print paper (0 auto .. 8, see kPrintPaperRows), scanner rendition (0 neutral,
+    // 1 Frontier, 2 Noritsu) and B&W paper (0 scan, 1 Multigrade RC neutral, 2 Multigrade FB warmtone).
+    void setPrintPaper(int idx) { mPrintPaper.store(idx); mPrintDirty.store(true); }
+    void setScanner(int idx) { mScanner.store(idx); }
+    void setBwPaper(int idx) { mBwPaper.store(idx); }
+    // Stage B6: frame border (0 none, 1 filed carrier, 2 35mm rebate with perforations),
+    // ageing / expiry 0..1, light leaks 0..1 (a new leak pattern for every photo).
+    void setFrameBorder(int style) { mFrameBorder.store(style); }
+    void setAgeing(float amount) { mAgeing.store(amount); }
+    void setLightLeak(float amount) { mLightLeak.store(amount); }
 
 private:
     struct StackState {
@@ -243,8 +283,22 @@ private:
         std::vector<uint16_t> peak;
         std::vector<float> refSmall;   // reference frame boxed down 8x (burst alignment)
         int smallW = 0, smallH = 0;
+        bool gpu = false;                  // burst merged by mGpuMerge
+        std::vector<uint32_t> ringQueue;   // ring slots still to fold, newest first
+        double refProd = 0.0;              // ISO x shutter of the first ring frame
     };
+    struct RingMeta {
+        uint64_t seq = 0;              // 0 = empty
+        uint32_t epoch = 0;
+        int64_t timestampNs = 0;
+        int iso = 0;
+        int64_t exposureNs = 0;
+        int camMatrixIdx = -1;
+        int width = 0, height = 0, stride = 0;
+    };
+    bool stackAddSlot(uint32_t slot, int width, int height, int stride, float relExposure);
     StackState mStack;
+    GpuBurstMerge mGpuMerge;
     std::atomic<bool> mStackActive{false};
     std::atomic<bool> mForceSingleFrame{false};
 
@@ -275,6 +329,8 @@ private:
     bool createDescriptorLayoutAndPipelines();
     bool createSharedResources();
     bool loadLookLut();
+    void computePrintStage(uint32_t lookIdx);
+    uint32_t printRowFor(int category) const;   // s24film::LookCategory
     bool createGrainTile();
     bool createTargets(FrameTargets& t, VkExtent2D extent, bool master);
     void destroyTargets(FrameTargets& t);
@@ -432,6 +488,17 @@ private:
     std::atomic<bool> mBurstModeEnabled{true};
     std::atomic<float> mUserEvStops{0.0f};
     std::atomic<float> mUserGrainMult{1.0f};
+    std::atomic<bool> mAdjacency{true};      // Stage B4 development edge effects
+    std::atomic<int> mPrintPaper{0};
+    std::atomic<bool> mPrintDirty{false};
+    std::atomic<int> mScanner{0};
+    std::atomic<int> mBwPaper{0};
+    std::atomic<int> mFrameBorder{0};
+    std::atomic<float> mAgeing{0.0f};
+    std::atomic<float> mLightLeak{0.0f};
+    std::atomic<uint32_t> mLeakSeed{1u};
+    std::vector<float> mLutPayload;          // look LUT kept for print stage recomputes
+    uint32_t mLutRows = 1, mLutCols = 1;
     std::atomic<float> mUserHalationMult{1.0f};
 
     // Phase 5 Cinema Parameters
@@ -454,7 +521,8 @@ private:
     std::atomic<float> mNoiseO{0.0f};
     std::atomic<float> mBlackLevel{0.0f};
     std::atomic<float> mLastRawMean{0.0f};
-    std::atomic<float> mMeterZones[26];   // 5x5 zone means (0..1 of range) + clipped-pixel fraction
+    std::atomic<float> mMeterZones[27];   // 5x5 zone means (0..1 of range), clipped-pixel fraction, face mean
+    std::atomic<float> mFaceRect[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     // CCT-interpolated ForwardMatrix from CameraCharacteristics (Java), row-major.
     std::mutex mFmMutex;
@@ -463,9 +531,19 @@ private:
 
     LastFrameState mLastFrame;
     uint32_t mFrameCounter = 0;
-    uint32_t mRingSlot = 0;
+    uint32_t mRingSlot = 0;            // next slot to write (skips locked slots)
+    uint32_t mRingSlots = 4;           // slots allocated in mRawStorageBuffer
+    size_t mRingSlotBytes = 0;         // bytes per slot
+    uint32_t mRingLockMask = 0;        // slots held by a zero-lag merge
+    uint32_t mRingEpoch = 1;           // bumped on lens change; older frames never merge
+    uint64_t mRingSeq = 0;
+    std::atomic<uint64_t> mRingNewestSeq{0};
+    RingMeta mRingMeta[kMaxRingSlots];
+    std::atomic<int64_t> mPendingTimestampNs{0};
+    std::atomic<int> mPendingIso{0};
+    std::atomic<int64_t> mPendingExposureNs{0};
     int mLastWidth = 0;
     int mLastHeight = 0;
-    uint32_t mValidRingFrames = 0;
+    uint32_t mValidRingFrames = 0;     // contiguous newest frames, for the live temporal merge
     bool mLiveQueriesPending = false;
 };

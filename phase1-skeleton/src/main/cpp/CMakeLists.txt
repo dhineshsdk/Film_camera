@@ -13,6 +13,7 @@ find_library(mediandk-lib mediandk)
 
 add_library(s24film_vulkan SHARED
     vulkan_raw_pipeline.cpp
+    gpu_merge.cpp
 )
 
 target_include_directories(s24film_vulkan PRIVATE

@@ -89,3 +89,130 @@ Use a tripod or rest the phone on something for 2 to 6.
 6. **Trails 8s.** Night, car lights or a torch swung around. Pass: bright paths accumulate; the dark background stays dark.
 7. **Stability.** Run each mode 5 times in a row, then switch lens (0.6 / 1 / 3 / front) in the middle of a Long 8s. Pass: no HAL restart or phone reboot, shutter button re-enables (`Stack cancelled` if the lens switch cut a shot).
 8. **Film looks.** Repeat 2, 3 and 5 on Portra 400 and on a B&W stock. Pass: same look as Single, exposure and grain consistent.
+
+## Stage A1: zero-lag RAW ring
+
+Build: branch `claude/project-thread-4h4og3` (PR "Stage A1: zero-lag RAW ring"). Logcat tags: native `RAW ring: N slots`, `Zero-lag: ...`, Java `Burst: n of m frames from before the press (ring N)`. The GPU RAW ring grows from 4 to 10 slots (6 or 4 if the memory is not there); the camera's own RAW buffer stays at 4 and every frame is still released at once. Burst and night merges now start from the frames already on screen at the press instead of the frames after it.
+
+1. **Ring size.** Open the app. Pass: `RAW ring: 10 slots (260 MB)` in logcat (6 or 4 is a soft fail: note it, the merge still works with fewer pre-press frames).
+2. **Daylight single shot is unchanged.** Chip on Single, daylight, 10 shots in a row. Pass: shutter feels as before, no `Zero-lag` lines, no extra wait.
+3. **Burst 8 is zero lag.** Chip on Burst 8, dim room. Aim at something with text, press, and straight away swing the phone to the floor. Pass: the photo shows the scene you were aiming at when you pressed, sharp; log shows `Burst: 8 of 8 frames from before the press`.
+4. **Night auto (12 frames).** Dark room with night auto on so it pushes 3 stops. Pass: `Burst: 8 of 12` (the other 4 come after the press), `Merged 12 frames`, no ghosts on a still scene.
+5. **Exposure change right before the press.** Point at a lamp, then quickly at a dark corner and press at once. Pass: fewer than 8 ring frames are used (frames from the other exposure are skipped), no dark or bright blotches.
+6. **Lens switch.** Switch .6 / 1 / 3 / front and shoot a Burst 8 right after each switch. Pass: no frames from the previous lens (no double image), log ring count may be low on the first shot.
+7. **Soak.** 10 minutes of live view with a lens switch every minute and a Burst 8 shot every minute. Pass: no HAL restart or phone reboot, preview stays live, no `ring slot ... skipped` lines.
+8. **A0 bursts.** `rawburst` still saves N consecutive frames as before.
+
+## Stage A2: GPU tile merge
+
+Same branch as A1. Logcat: `GPU merge ready` (tag `S24FilmMerge`) at start, `Stack begin mode 0 ... (GPU)`, one `GPU merge frame n (slot s): x ms, median shift dx,dy px` per frame, `Stack finish mode 0, n frames merged on the GPU`. Bursts now align every 32 x 32 RAW-pixel tile separately (hand shake and some subject motion), on the GPU; HDR and long exposures still use the CPU merge. Desktop check that already passed: `tools/gpu_merge_test.sh` (synthetic burst with hand shake and a moving square: 2.7x less noise of an ideal 2.8x, no ghost).
+
+1. **GPU path is on.** Burst 8 in a dim room. Pass: `(GPU)` on the Stack begin line, 8 `GPU merge frame` lines, each under 40 ms; `Merged 8 frames` comes much sooner than with A1 alone.
+2. **Handheld night.** Burst 8 handheld (no table) on text or a brick wall. Pass: sharp, no double edges; median shifts in the log are a few to tens of pixels.
+3. **Walking people.** Burst 8 of people walking past. Pass: no ghosts or half-transparent copies; walkers look like one frame (a little noisier than the static background is fine).
+4. **Rotation.** Twist the phone slightly while the burst runs. Pass: corners as sharp as the centre (tiles follow the rotation).
+5. **Fallback.** If `GPU merge unavailable` appears instead, bursts must still work as in A1 (CPU merge). Note it.
+6. **Golden set (A0).** Run `tools/ab_compare.py` on the walking-people and handheld-night bursts, A1 vs A2. Pass: lower noise, no ghost in the side-by-side.
+
+## Stage A3: merge on every photo, HDR+ style
+
+Same branch. Every normal shot is now a zero-lag GPU burst sized to the light: 4 frames at ISO 200 or less, 6 up to ISO 800, 8 above (the night push still goes to 8 or 12). Turn it off with `adb shell am broadcast -a com.s24film.camera.DEBUG --es cmd automerge --ez on false`. HDR is now the HDR+ style: a 6-frame zero-lag burst at the metered exposure, then two -2 EV frames that are used only where the burst clips (the old base / -2 / +2 bracket is only used if the GPU merge is unavailable). Desktop check that passed: `tools/gpu_merge_test.sh` HDR case recovers clipped highlights to within 0.017 of the true values (the clipped frame was off by 0.36).
+
+1. **Every shot merges, without waiting.** Single on, daylight, 10 shots in a row. Pass: log shows `Burst: 4 of 4 frames from before the press` and `GPU merge frame` lines; the shutter feels the same as before A1; no `Stack failed`.
+2. **Noise.** Indoor evening light (ISO 400 to 1600), the same scene with automerge on and off. Pass: visibly cleaner shadows with it on; A0 compare on the golden indoor scenes shows shadow noise down by about half.
+3. **Moving subject.** A person walking across at ISO 800. Pass: no ghost or double edge.
+4. **HDR with people.** HDR on, a person moving in front of a bright window. Pass: the person is as sharp as a normal shot (no bracket blur), the window shows detail instead of white; log shows the base `GPU merge frame` lines, then two `HDR short frame at -2.00 EV` lines; preview exposure returns to normal afterwards.
+5. **HDR timeout.** HDR aimed at a scene where the exposure cannot drop 2 stops (already at the shortest shutter and lowest ISO). Pass: still saves a photo (the base burst) within about 3 s.
+6. **Off switch.** `automerge --ez on false`: shots are single frames again, exactly like main.
+
+## Stage A4: slow still shutter
+
+Same branch. When a shot would still be underexposed at the slowest live shutter (ISO 100 to 200 stocks at night), the app now sends 3 to 6 separate long still requests (up to 1/8 s, or 1/4 s on the OIS lenses, about 0.8 s in total) while the live stream keeps its normal shutter, and merges them on the GPU. Logcat: `Slow still: N x T us at ISO ...`, status `Hold still`, `Exposing n/N`, then the usual `GPU merge frame` and `Stack finish` lines. Off switch: `--es cmd slowstill --ez on false`.
+
+1. **Ektar 100 at night.** Dark street or a room lit by one lamp, Ektar 100, Auto, hand held. Pass: the photo is correctly exposed (not dark like issue 17), sharp at 100 percent, and the log shows the slow still lines with 1/8 or 1/4 s frames.
+2. **No wedge.** Repeat 20 times in a row, then switch lens and repeat 5 more. Pass: no HAL restart, phone reboot or frozen preview; every shot saves.
+3. **Live view during the shot.** Pass: the preview keeps moving during `Hold still` (it may flicker brighter for a moment); the shutter re-enables afterwards.
+4. **Not triggered in normal light.** Daylight and indoor shots never log `Slow still`.
+5. **Off switch.** With `slowstill` off, the same Ektar shot falls back to the A3 night burst (darker), proving the switch works.
+
+## Stage A6: metering v3 (faces and shadows)
+
+Same branch. Metering now uses the camera's own face detector: the largest face is metered to land about 0.4 stop over mid-grey and counts 65 percent against the matrix. With automerge on, scenes that are mostly deep shadow with nothing clipped get a third of a stop more light. The highlight guard and the slow, steady loop are unchanged. Logcat at camera open: `Face metering: HAL face detect on` (or `no HAL face detect`). Off switch: `--es cmd facemeter --ez on false`.
+
+1. **Backlit portrait.** A person in front of a bright window, rear wide lens, no exposure compensation. Pass: the face is properly exposed (not a silhouette) with facemeter on; with it off, the face is clearly darker.
+2. **Face in the dark.** A face lit by a phone screen in a dark room. Pass: the face is not blown out.
+3. **Selfie.** Front camera, outdoors with sky behind. Pass: the face is exposed correctly.
+4. **No face.** Landscape and street scenes look the same as before (within a third of a stop).
+5. **Window interior (golden scene).** A room with a bright window and no people. Pass: the room is lighter than before A6 if it is mostly dark and the window does not clip more than before.
+6. **Stability.** The exposure does not pump when a face enters or leaves the frame (changes settle within about a second).
+
+## Stage A5: noise and shading calibration (shots only; the app change comes after the numbers)
+
+Same branch. New debug command `--es cmd iso --ei iso 800` (0 = auto) fixes the sensor ISO. Two scripts:
+`tools/a5_shoot.ps1` shoots and pulls the calibration bursts, `tools/a5_calibrate.py calib` fits them
+(`--selftest` passes here on synthetic DNGs).
+
+1. **Grey card, per lens.** Grey card (or matte grey cardboard) filling the frame, slightly out of focus, even daylight, phone resting. For each lens: `.\tools\a5_shoot.ps1 -Kind grey -Lens 0` (then 2, 6, 1). About 30 s per lens.
+2. **White wall, per lens.** A plain white wall or paper, even light, filling the frame: `.\tools\a5_shoot.ps1 -Kind white -Lens 0` (then 2, 6, 1).
+3. **Fit.** `python tools\a5_calibrate.py calib`. Pass: it prints S and O per ISO and lens and the corner colour error per lens; send me `calib\a5_calibration.json` (or leave the `calib` folder in the Camera-App folder). The front camera should show the largest corner colour error (the magenta corners).
+
+## Stage B2: highlights and halation per stock
+
+Same branch. HDR shots now hand their real highlight values (up to about 2x the sensor clip) to the film stage instead of the rolled-off RAW, so the film shoulder shapes them; a soft cap keeps halation from exploding on lamps. Stocks without an anti-halation layer (CineStill 50D, 400D, 800T, 850D, BwXX; strength 0.3 and up) now spread their ring wider (800T about 1.7x), not only brighter. Normal (non-HDR) shots only see the wider CineStill ring.
+
+1. **Street lamps, CineStill 800T vs Portra 400.** Night street with lamps, HDR on. Pass: 800T shows a wide red-orange glow around each lamp; Portra shows almost none; neither shows a hard white disc with a cut-off edge.
+2. **Sky in HDR.** Daylight HDR with a bright sky on Portra 400 and Velvia. Pass: the sky holds colour and gradation into the bright parts (no flat white patch, no grey or cyan cast near the sun).
+3. **No change in plain shots.** A normal daytime shot on Portra 400 looks the same as before B2.
+4. **Look strength slider.** The darkroom halation slider still scales the glow from none to strong.
+
+## Stage B3: grain size per film stock
+
+Same branch. Grain size now follows each stock's speed and grain type: slow and tabular-grain stocks (Pan F, T-Max 100, Delta 100, Portra 160, Ektar, Velvia, Vision3) are finer, fast and classic stocks (Tri-X, HP5, Fomapan 400, Neopan 1600, Superia 1600) are coarser, and the 3200 stocks (Delta 3200, T-Max P3200) add a clumpy second grain scale. Slides and cine stocks have less colour grain than consumer C-41. Amounts are best guesses; tell me which ones look wrong.
+
+1. **Fine vs coarse, same scene.** A plain mid-grey wall or sky, grain slider at its default. Shoot Pan F Plus, HP5 Plus and Delta 3200 and zoom each to 100% in Gallery. Pass: Pan F grain is barely visible and tight, HP5 is clearly coarser, Delta 3200 shows larger soft clumps, not just stronger pixel noise.
+2. **Colour grain.** Same wall on Portra 400 and Velvia 50. Pass: Portra shows faint colour speckle in the grain; Velvia's grain is almost colourless.
+3. **Format.** Same stock (HP5) on 35 mm and 120 (6x7) formats. Pass: 120 grain looks finer than 35 mm, as before.
+4. **No pattern.** Pass: no visible tile repeat or grid in a flat sky on any of the above.
+
+## Stage B4: development edge effects
+
+Same branch. Film developer runs out next to bright areas and stays fresh next to dark ones, which draws a thin rim along strong edges and lifts fine local contrast. This is now in every film look (strongest on B&W, weaker on colour negative and cine, weakest on slides; none on digital looks). New debug command to compare: `adb shell am broadcast -a com.s24film.camera.DEBUG --es cmd adjacency --ez on false` (and `true` to turn it back on).
+
+1. **Window frame, HP5.** A dark window frame against a bright sky, HP5 Plus, phone on a table. Shoot with adjacency on, then off. Pass: with it on, the sky right next to the frame is a touch brighter and the frame edge a touch darker (a thin rim, not a glow), and fine texture like brick or foliage looks crisper.
+2. **No halos.** Same pair on Portra 400. Pass: no visible bright or dark band wider than a few pixels around edges; flat areas (sky, wall) unchanged.
+3. **Colour edges.** A red object against a green or blue background on Portra 400. Pass: the colour boundary looks slightly cleaner, with no coloured fringe.
+4. **Live view.** Pass: the viewfinder frame rate is unchanged with it on.
+
+## Stage B5: print paper, lab scanner and B&W paper
+
+Same branch. Three new choices, for now only from adb (the settings screen hookup comes with the UI work). Each takes effect on the next frame; take the same shot with each setting.
+
+- Print paper for colour negative and cine looks: `--es cmd paper --ei idx N` with 0 auto (Portra Endura for C-41, Vision 2383 for cine), 1 Fujifilm Crystal Archive (Frontier lab paper), 2 Endura Premier, 3 Supra Endura, 4 Portra Endura, 5 Ultra Endura, 6 Vision 2383, 7 Vision Premier 2393, 8 Ektacolor Edge.
+- Lab scanner: `--es cmd scanner --ei idx N` with 0 neutral (as before), 1 Frontier, 2 Noritsu.
+- B&W paper: `--es cmd bwpaper --ei idx N` with 0 scan (as before), 1 Ilford Multigrade RC (neutral, grade 3), 2 Multigrade FB Warmtone.
+
+Prefix each with `adb shell am broadcast -a com.s24film.camera.DEBUG`.
+
+1. **Papers, Portra 400.** A scene with skin, sky and foliage. Shoot paper 0, 1, 3 and 5. Pass: all keep neutral greys; Crystal Archive is a touch cooler and greener, Supra is softer and gentler on skin, Ultra is the most saturated. None turns magenta or green overall. The log line `Print paper N` appears on each change.
+2. **Cine prints, Vision3 500T.** Paper 6 vs 7. Pass: 2393 has deeper blacks and a little more contrast than 2383.
+3. **Scanners, Portra 400.** Scanner 0, 1, 2. Pass: Frontier is punchier with richer greens and slightly cool shadows; Noritsu is softer, warmer and gentler in the highlights; neither shifts mid grey noticeably.
+4. **B&W paper, HP5.** bwpaper 0, 1, 2. Pass: RC gives deeper blacks and brighter whites than the scan; FB Warmtone is slightly softer with a warm brown-black tone and a cream white. No banding in skies.
+5. **Reset.** Set all three back to 0. Pass: the image matches the earlier default look.
+
+## Stage B6: frame edges, expired film and light leaks
+
+Same branch. adb only for now (prefix `adb shell am broadcast -a com.s24film.camera.DEBUG`):
+`--es cmd border --ei idx N` (0 none, 1 filed negative carrier, 2 35 mm film edge with perforations),
+`--es cmd ageing --ef amount X` (0 to 1, expired film), `--es cmd leak --ef amount X` (0 to 1, light leaks; every photo gets a new leak, and the viewfinder shows the one the next photo will get). The film format choice (35 mm, 16 mm, Super 8, 6x7) is unchanged.
+
+1. **Borders.** Any look, border 1 then 2, in portrait and landscape grip. Pass: border 1 is a thin black frame with a slightly rough edge on all four sides; border 2 shows a black film edge with light rounded perforations along the two long sides of the photo, in both grips. The saved JPEG matches the viewfinder.
+2. **Expired film.** Portra 400 at ageing 0, 0.5, 1. Pass: blacks lift with a faint magenta-brown fog, contrast drops, grain rises; at 1 it still reads as a photo. Velvia at 1 drifts cool; HP5 at 1 stays neutral grey.
+3. **Light leaks.** leak 0.6, take five photos. Pass: each has a different red-orange glow entering from an edge (sometimes two); the glow has a yellow core and fades into the frame; B&W looks get a grey leak, not a coloured one.
+4. **Off means off.** Set all three to 0. Pass: no border, no fog, no leak.
+
+## Stage B1: spectral film model level with B3 to B6
+
+Same branch. Stocks with datasheet spectral data already render through the spectral model by default (the log shows `Spectral tables for look N: built`); stocks without it use the curve model. The spectral model now also gets the B4 edge effects; the B3 grain, B5 scanner and B6 ageing/leaks/borders already applied to both. The B5 print paper choice only changes curve-model stocks (the spectral model has its own print), and the B&W paper choice is skipped on spectral B&W stocks for the same reason.
+
+1. **Which model.** Pick Portra 400, HP5 and Velvia 50 one after another. Pass: note which of them log `built` and which log `none (curve model)`, and send me the list.
+2. **Edge effects on spectral stocks.** On a stock that logged `built`, repeat the B4 window-frame test with `adjacency` on and off. Pass: same thin rim as on the curve-model stocks, no halo.

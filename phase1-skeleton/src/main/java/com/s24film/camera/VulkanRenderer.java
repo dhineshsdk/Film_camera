@@ -40,6 +40,9 @@ public class VulkanRenderer {
     public static native float nativeGetLastRawMean();
     /** 25 zone means (5x5, row-major, 0..1 of range) then the clipped-pixel fraction. */
     public static native void nativeGetMeterZones(float[] out26);
+    // Stage A6: largest face in normalized sensor coordinates (x1 <= x0 clears); its mean is out26[26]
+    // when the array has 27 entries (-1 = no face).
+    public static native void nativeSetFaceRect(float x0, float y0, float x1, float y1);
     public static native boolean nativeSetEncoderSurface(Surface encoderSurface);
     // Call before nativeSetEncoderSurface: true = encoder gets BT.2020 HLG (10-bit when the surface allows).
     public static native void nativeSetEncoderHlg(boolean hlg);
@@ -77,4 +80,25 @@ public class VulkanRenderer {
     public static native boolean nativeStackAdd(float relExposure);
     public static native boolean nativeStackFinish();
     public static native void nativeStackEnd();
+    // Zero-lag ring (Stage A1). SetFrameMeta tags the next frame nativeRenderRaw copies into the ring
+    // (sensor time, ISO, shutter). RingMark is the newest frame's sequence number, read at the shutter
+    // press. After StackBegin(0), StackPrimeFromRing queues and locks the frames at or before the mark
+    // (same lens, exposure within 0.2 stop, at most 1 s older; newest first) and returns how many;
+    // each StackAddFromRing folds one and returns how many are left, or -1 on failure. RingReset
+    // keeps frames from the previous lens out of the next merge.
+    public static native void nativeSetFrameMeta(long timestampNs, int iso, long exposureNs);
+    public static native long nativeRingMark();
+    public static native void nativeRingReset();
+    public static native int nativeRingSlots();
+    public static native int nativeStackPrimeFromRing(long markSeq, int maxFrames);
+    public static native int nativeStackAddFromRing();
+    // True when the GPU burst merge (Stage A2) initialised; bursts and HDR then run on the GPU.
+    public static native boolean nativeGpuMergeReady();
+    public static native void nativeSetAdjacency(boolean on);
+    public static native void nativeSetPrintPaper(int idx);
+    public static native void nativeSetScanner(int idx);
+    public static native void nativeSetBwPaper(int idx);
+    public static native void nativeSetFrameBorder(int style);
+    public static native void nativeSetAgeing(float amount);
+    public static native void nativeSetLightLeak(float amount);
 }

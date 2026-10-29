@@ -108,6 +108,9 @@ final class DebugControl extends BroadcastReceiver {
             case "lensfx":
                 VulkanRenderer.nativeSetLensFxEnabled(intent.getBooleanExtra("on", false));
                 break;
+            case "iso":   // manual sensor ISO, 0 = auto (Stage A5 calibration shots)
+                engine.setManualIso(intent.getIntExtra("iso", 0));
+                break;
             case "shutter":
                 engine.setManualShutterNs(intent.getLongExtra("ns", 0L));
                 break;
@@ -116,6 +119,36 @@ final class DebugControl extends BroadcastReceiver {
                 break;
             case "flash":   // 0 off, 1 auto, 2 on
                 engine.setFlashMode(intent.getIntExtra("mode", 1));
+                break;
+            case "slowstill":   // Stage A4: long still frames when the live shutter runs out (--ez on true|false)
+                engine.setSlowStill(intent.getBooleanExtra("on", true));
+                break;
+            case "paper":       // Stage B5: print paper 0 auto .. 8 (--ei idx N)
+                VulkanRenderer.nativeSetPrintPaper(intent.getIntExtra("idx", 0));
+                break;
+            case "scanner":     // Stage B5: 0 neutral, 1 Frontier, 2 Noritsu (--ei idx N)
+                VulkanRenderer.nativeSetScanner(intent.getIntExtra("idx", 0));
+                break;
+            case "bwpaper":     // Stage B5: 0 scan, 1 Multigrade RC, 2 Multigrade FB warmtone (--ei idx N)
+                VulkanRenderer.nativeSetBwPaper(intent.getIntExtra("idx", 0));
+                break;
+            case "border":      // Stage B6: 0 none, 1 filed carrier, 2 35mm rebate (--ei idx N)
+                VulkanRenderer.nativeSetFrameBorder(intent.getIntExtra("idx", 0));
+                break;
+            case "ageing":      // Stage B6: expired film 0..1 (--ef amount X)
+                VulkanRenderer.nativeSetAgeing(intent.getFloatExtra("amount", 0f));
+                break;
+            case "leak":        // Stage B6: light leaks 0..1 (--ef amount X)
+                VulkanRenderer.nativeSetLightLeak(intent.getFloatExtra("amount", 0f));
+                break;
+            case "adjacency":   // Stage B4: development edge effects (--ez on true|false)
+                VulkanRenderer.nativeSetAdjacency(intent.getBooleanExtra("on", true));
+                break;
+            case "facemeter":   // Stage A6: face-priority metering (--ez on true|false)
+                engine.setFaceMetering(intent.getBooleanExtra("on", true));
+                break;
+            case "automerge":   // Stage A3: merge every photo (--ez on true|false)
+                engine.setAutoMerge(intent.getBooleanExtra("on", true));
                 break;
             case "night":
                 engine.setNightAuto(intent.getBooleanExtra("on", true));

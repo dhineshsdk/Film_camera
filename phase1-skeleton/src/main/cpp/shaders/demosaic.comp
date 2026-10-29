@@ -65,6 +65,7 @@ struct LookGpu {
     vec4 print0;    // xyz=printer-light logE offset per layer, w=print LUT row (< 0: no print stage)
     vec4 print1;    // xyz=print paper D-min, w=print exposure scale
     vec4 print2;    // xyz=rendered black (subtracted), w=mid-grey normalisation
+    vec4 grain;     // x=grain size multiplier, y=clump mix, z=dye-layer grain share, w=adjacency strength
 };
 
 layout(std430, binding = 5) readonly buffer LookBuffer {
@@ -85,9 +86,9 @@ layout(std140, binding = 6) uniform FrameParams {
     vec4 f_look2;    // x=LUT logE max, y=LUT rows, z=LUT cols, w=spectral crosstalk strength
     vec4 f_optics;   // x=halation threshold, y=halation strength, z=diffusion strength, w=diffusion threshold
     vec4 f_halW;     // halation weights for mip 1..4
-    vec4 f_halW2;    // x=halation weight for mip 5, y=film format blur sigma (px), z=gate vignette
+    vec4 f_halW2;    // x=halation weight for mip 5, y=film format blur sigma (px), z=gate vignette, w=B&W paper (B5)
     vec4 f_diffW;    // diffusion weights for mip 1..4
-    vec4 f_diffW2;   // x=diffusion weight for mip 5
+    vec4 f_diffW2;   // x=diffusion weight for mip 5, y=adjacency pyramid LOD, z=adjacency on (B4)
     vec4 f_bokeh;    // x=enable, y=CoC radius at infinity (output px), z=focus u, w=focus v
     vec4 f_bokeh2;   // x=in-focus radius, y=falloff radius (fraction of height), z=push(+)/pull(-) stops, w=tap count
     vec4 f_grain;    // x=luma sharpening amount, y=grain tile texel size in output px, z=strength, w=format grain gain
@@ -99,8 +100,9 @@ layout(std140, binding = 6) uniform FrameParams {
     vec4 f_lfx0;     // lens: x=ghosts, y=halo, z=anamorphic streak, w=streak length (uv)
     vec4 f_lfx1;     // lens: rgb=streak tint, w=veiling glare
     vec4 f_lfx2;     // lens: x=lateral CA, y=distortion k1, z=swirl, w=starburst
-    vec4 f_lfx3;     // lens: x=iris blades, y=f-number, z=anamorphic squeeze, w=unused
+    vec4 f_lfx3;     // lens: x=iris blades, y=f-number, z=anamorphic squeeze, w=scanner (B5)
     vec4 f_lfx4;     // lens: rgb=coating tint, w=flare threshold (scene-linear)
+    vec4 f_entropy;  // B6: x=frame border style, y=ageing, z=light leak amount, w=leak seed
 };
 
 // ---------------------------------------------------------------- per-target images
@@ -159,7 +161,7 @@ layout(push_constant) uniform PushConstants {
     float u_halation_strength; // 96
     float u_exposure_scale;    // 100
     uint u_cam_matrix_idx;     // 104 (0=Wide, 1=Front, 2=UW, 3=Tele)
-    uint u_packed_ring_info;   // 108 (bits 0..1 slot, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave)
+    uint u_packed_ring_info;   // 108 (bits 0..3 slot, 4..7 ring slots, 8..15 burst, 16 mirror, 17..18 anamorphic, 19..20 gate, 21 weave, 22 HDR shoulder)
     uint u_level;              // 112 PYRAMID destination level (1..5)
     uint u_flags;              // 116 FLAG_*
     uint u_reserved0;          // 120 BOKEH (depth): first row of the band
@@ -208,15 +210,27 @@ ivec2 clampBayer(int x, int y) {
 float rawDN(int x, int y, uint slot) {
     ivec2 c = clampBayer(x, y);
     uint framePitch16 = u_stride * u_height;
-    uint idx16 = (slot & 3u) * framePitch16 + uint(c.y) * u_stride + uint(c.x);
+    uint idx16 = (slot & 0xFu) * framePitch16 + uint(c.y) * u_stride + uint(c.x);
     uint word = u_raw_data[idx16 >> 1u];
     uint val16 = ((idx16 & 1u) != 0u) ? (word >> 16u) : (word & 0xFFFFu);
     return float(val16);
 }
 
+// HDR merges (Stage A3) store radiance above 0.6 of range through a shoulder that reaches 0.98;
+// PREP undoes it (Stage B2) so the film shoulder and halation see the real highlight values,
+// up to about 2x the sensor clip.
+const float HDR_CLIP_SCALE = 2.0;
+bool hdrShoulder() { return ((u_packed_ring_info >> 22u) & 1u) != 0u; }
+float hdrUnshoulder(float x) {
+    if (x <= 0.6) return x;
+    float t = min((x - 0.6) / 0.38, 0.9868);   // 0.975 of range: the top of what was merged
+    return 0.6 - 0.38 * log(1.0 - t);
+}
+
 float rawNorm(int x, int y, uint slot) {
     float bl = f_noise.z;
-    return (rawDN(x, y, slot) - bl) / max(u_white_level - bl, 1.0);
+    float v = (rawDN(x, y, slot) - bl) / max(u_white_level - bl, 1.0);
+    return hdrShoulder() ? hdrUnshoulder(v) : v;
 }
 
 // Forward GAT for var(x) = S*x + O (Camera2 SENSOR_NOISE_PROFILE convention):
@@ -257,8 +271,9 @@ void stagePrep() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(u_width) || p.y >= int(u_height)) return;
 
-    uint activeSlot = u_packed_ring_info & 3u;
-    uint burstCount = max((u_packed_ring_info >> 8u) & 0xFFu, 1u);
+    uint activeSlot = u_packed_ring_info & 0xFu;
+    uint ringSlots = max((u_packed_ring_info >> 4u) & 0xFu, 1u);
+    uint burstCount = min(max((u_packed_ring_info >> 8u) & 0xFFu, 1u), ringSlots);
     float xRef = rawNorm(p.x, p.y, activeSlot);
     float outVal = xRef;
 
@@ -273,7 +288,7 @@ void stagePrep() {
         float wSum = 1.0;
         float w2Sum = 1.0;
         for (uint s = 1u; s < burstCount; ++s) {
-            float z = gatForward(rawNorm(p.x, p.y, (activeSlot + s) & 3u), alpha, s2);
+            float z = gatForward(rawNorm(p.x, p.y, (activeSlot + ringSlots - s) % ringSlots), alpha, s2);
             float d = z - zRef;
             float w = exp(-(d * d) / (4.0 * tol * tol));   // diff of two unit-variance samples: var 2
             zSum += w * z;
@@ -557,6 +572,7 @@ void stageIsp() {
                          0.5 * (lscGainAt(pos, 1u) + lscGainAt(pos, 2u)),
                          lscGainAt(pos, 3u));
     }
+    if (hdrShoulder()) clipLevel *= HDR_CLIP_SCALE;
     vec3 clipFrac = camRgb / (clipLevel * 0.985);
     bool gClipped = clipFrac.g >= 1.0;
 
@@ -836,11 +852,18 @@ vec3 applyDensityGrain(vec2 coord, vec3 D, vec3 dMax, float strength) {
 // Film grain from the tileable noise texture (unit variance per channel). R is shared across
 // the dye layers (luminance grain), G/B/A add a smaller independent part per layer. Amplitude
 // is in density units and peaks in the mid-tones, like real emulsion granularity.
-vec3 filmGrain(vec2 coord, vec3 D, vec3 dMax, float strength, bool mono) {
+vec3 filmGrain(vec2 coord, vec3 D, vec3 dMax, float strength, bool mono, vec4 gc) {
     if (strength <= 0.001) return D;
     vec2 jitter = hash3f(uvec3(u_frame_seed, 911u, 3571u)).xy * 512.0;
-    vec4 n = textureLod(u_grain_tile, (coord / max(f_grain.y, 1.0) + jitter) / 512.0, 0.0);
-    vec3 g = mono ? vec3(n.r) : (0.88 * vec3(n.r) + 0.47 * n.gba);
+    // Stage B3: per-stock grain size, plus a coarser second scale (clumps) mixed in by gc.y.
+    float texel = max(f_grain.y * max(gc.x, 0.5), 1.0);
+    vec4 n = textureLod(u_grain_tile, (coord / texel + jitter) / 512.0, 0.0);
+    if (gc.y > 0.01) {
+        vec4 nc = textureLod(u_grain_tile, (coord / (texel * 2.3) + jitter.yx + 173.0) / 512.0, 0.0);
+        n = (n + gc.y * 0.8 * nc) * inversesqrt(1.0 + 0.64 * gc.y * gc.y);
+    }
+    float share = gc.z > 0.0 ? gc.z : 0.47;
+    vec3 g = mono ? vec3(n.r) : (sqrt(1.0 - share * share) * vec3(n.r) + share * n.gba);
     vec3 normD = clamp(D / max(dMax, vec3(0.1)), 0.0, 1.0);
     vec3 env = 0.35 + 2.6 * normD * (1.0 - normD);
     return D + g * env * (strength * 0.045 * max(f_grain.w, 0.1));
@@ -889,7 +912,126 @@ vec3 printNegative(LookGpu L, vec3 Dn) {
     return max(pow(vec3(10.0), -(Dp - L.print1.xyz)) - L.print2.xyz, vec3(0.0));
 }
 
-vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, out bool printed) {
+// Stage B5: B&W darkroom print on Ilford Multigrade. The scan is linear in negative density,
+// so log10(lin / 0.18) is the printing exposure; the paper's characteristic curve (logistic in
+// log exposure, D-max ~2.1) gives the deep blacks and compressed highlights of a wet print.
+// 1 = MG RC neutral, grade 3; 2 = MG FB warmtone, grade 2.5 with a warm image tone.
+vec3 bwPaperPrint(vec3 lin, int paper) {
+    float y = max(dot(lin, vec3(1.0 / 3.0)), 1e-6);
+    float x = log(y / 0.18) * 0.4342945;
+    const float dBase = 0.05;
+    float dMax = paper == 2 ? 2.2 : 2.05;
+    float slope = paper == 2 ? 2.8 : 3.0;
+    float x0 = -log((dMax - dBase) / (0.745 - dBase) - 1.0) * 0.4342945 / slope;
+    float d = dBase + (dMax - dBase) / (1.0 + pow(10.0, slope * (x - x0)));
+    float r = pow(10.0, -(d - dBase)) * (0.18 / pow(10.0, -(0.745 - dBase)));
+    vec3 outc = vec3(r);
+    if (paper == 2) {
+        // Warmtone: the silver image is brown-black in the shadows and mids, paper base cream.
+        float t = clamp(1.0 - r / 0.9, 0.0, 1.0);
+        outc *= mix(vec3(1.0, 0.985, 0.955), vec3(1.0, 0.95, 0.86), t);
+    }
+    return outc;
+}
+
+// Stage B5: lab scanner renditions applied to the scanned or printed film image.
+// 1 = Fujifilm Frontier: punchier mid contrast, richer greens and cyans, slightly cool-green
+//     shadows. 2 = Noritsu: softer, warmer and more neutral, gentler highlights (skin tones).
+vec3 scannerRendition(vec3 lin, int scanner, bool mono) {
+    float y = max(dot(lin, vec3(0.2627, 0.6780, 0.0593)), 1e-6);
+    float contrast = scanner == 1 ? 1.07 : 0.95;
+    float y2 = 0.18 * pow(y / 0.18, contrast);
+    if (scanner == 2) y2 = y2 / (1.0 + 0.06 * max(y2 - 0.5, 0.0));   // softer highlight roll
+    vec3 c = lin * (y2 / y);
+    if (mono) return c;
+    float sat = scanner == 1 ? 1.08 : 0.97;
+    c = max(vec3(y2) + sat * (c - vec3(y2)), vec3(0.0));
+    if (scanner == 1) {
+        // Greens toward cyan-green, and a faint green-cyan cast in the shadows.
+        c.g *= 1.0 + 0.04 * clamp((c.g - max(c.r, c.b)) / max(c.g, 1e-4), 0.0, 1.0);
+        float sh = clamp(1.0 - y2 / 0.18, 0.0, 1.0);
+        c *= mix(vec3(1.0), vec3(0.975, 1.005, 1.01), sh);
+    } else {
+        float mid = clamp(1.0 - abs(log2(y2 / 0.18)) / 3.0, 0.0, 1.0);
+        c *= mix(vec3(1.0), vec3(1.02, 1.0, 0.975), mid);
+    }
+    return c;
+}
+
+// Stage B6: expired / aged film. Base fog lifts and tints the blacks, contrast drops and the
+// colour balance drifts (C-41 toward magenta-brown, slides toward a cool cast as the
+// yellow dye fades, B&W stays neutral). Grain goes up on the C++ side.
+vec3 ageFilm(vec3 lin, float a, int category) {
+    vec3 fog = category == 3 ? vec3(1.0) : category == 2 ? vec3(0.85, 0.95, 1.12) : vec3(1.08, 0.86, 0.96);
+    vec3 drift = category == 3 ? vec3(1.0) : category == 2 ? vec3(0.97, 0.99, 1.05) : vec3(1.04, 0.95, 0.97);
+    vec3 c = 0.18 * pow(max(lin, vec3(0.0)) / 0.18, vec3(1.0 - 0.28 * a));
+    c *= mix(vec3(1.0), drift, a);
+    return c * (1.0 - 0.15 * a) + a * 0.03 * fog;
+}
+
+// Stage B6: light leak, warm light fogging the film from one or two edges (a loose back or a
+// gap at the cassette lip). Additive exposure, red-orange at the rim with a yellow core.
+vec3 lightLeak(vec2 uv, ivec2 size, float amount, float seed, bool mono) {
+    vec3 acc = vec3(0.0);
+    for (int k = 0; k < 2; ++k) {
+        vec3 h = hash3f(uvec3(uint(seed), 7u + uint(k) * 31u, 4049u));
+        if (k == 1 && h.z < 0.5) break;          // a second leak on about half the frames
+        int edge = int(h.x * 4.0);               // 0 left, 1 right, 2 top, 3 bottom
+        float along = (edge < 2) ? uv.y : uv.x;
+        float depth = edge == 0 ? uv.x : edge == 1 ? 1.0 - uv.x : edge == 2 ? uv.y : 1.0 - uv.y;
+        float centre = 0.15 + 0.7 * h.y;
+        float width = 0.12 + 0.25 * fract(h.y * 7.31);
+        float reach = 0.10 + 0.25 * fract(h.z * 3.17);
+        float m = exp(-depth / reach) * exp(-0.5 * pow((along - centre) / width, 2.0));
+        vec3 col = mix(vec3(1.0, 0.25, 0.05), vec3(1.0, 0.75, 0.25), m * m);
+        acc += m * col;
+    }
+    acc *= 1.6 * amount;
+    return mono ? vec3(dot(acc, vec3(0.3, 0.59, 0.11))) : acc;
+}
+
+// Stage B6: frame edges drawn over the graded (display-referred) output. 1 = filed-out
+// negative carrier: black border with a rough, slightly uneven edge. 2 = 35 mm rebate: thin
+// black film edge along the long sides with the perforations showing through as light.
+vec3 frameBorder(vec3 graded, ivec2 p, ivec2 size, int style) {
+    vec2 sz = vec2(size);
+    float s = min(sz.x, sz.y);
+    bool landscape = sz.x >= sz.y;
+    vec2 q = landscape ? vec2(p) + 0.5 : vec2(float(p.y) + 0.5, sz.x - float(p.x) - 0.5);
+    vec2 dims = landscape ? sz : sz.yx;           // frame in landscape terms: x along the film
+    if (style == 1) {
+        float edge = 0.022 * s;
+        float along = min(q.x, dims.x - q.x) < min(q.y, dims.y - q.y) ? q.y : q.x;
+        float rough = (hash3f(uvec3(uint(along * 0.35), 99u, 7u)).x - 0.5) * 0.004 * s
+                    + sin(along / s * 9.0 + f_entropy.w) * 0.003 * s;
+        float d = min(min(q.x, dims.x - q.x), min(q.y, dims.y - q.y)) - (edge + rough);
+        float t = smoothstep(-1.5, 1.5, d);
+        return mix(vec3(0.012), graded, t);
+    }
+    if (style == 2) {
+        // Image area 24 mm high; show the inner 1.2 mm of rebate and the perforations' inner ends.
+        float mm = dims.y / 26.4;
+        float band = 1.2 * mm;
+        float dEdge = min(q.y, dims.y - q.y);
+        if (dEdge < band) {
+            // KS perforations: 4.75 mm pitch, 2.8 mm long, rounded; their inner end reaches 0.45 mm into the band.
+            float pitch = 4.75 * mm;
+            float u = mod(q.x + 0.5 * pitch, pitch) - 0.5 * pitch;
+            vec2 hole = vec2(abs(u) - 1.0 * mm, dEdge - 0.45 * mm);
+            float r = 0.35 * mm;
+            float sd = length(max(hole + r, 0.0)) + min(max(hole.x + r, hole.y + r), 0.0) - r;
+            vec3 rebate = vec3(0.015);
+            vec3 light = vec3(0.92, 0.9, 0.86);
+            float inHole = 1.0 - smoothstep(-1.0, 1.0, sd);
+            vec3 c = mix(rebate, light, inHole);
+            float toImage = smoothstep(band - 1.5, band + 0.5, dEdge);
+            return mix(c, graded, toImage);
+        }
+    }
+    return graded;
+}
+
+vec3 emulsion120(int idx, vec3 scene, vec3 sceneLocal, ivec2 p, bool master, out bool encoded, out bool printed) {
     LookGpu L = u_looks[idx];
     encoded = false;
     printed = false;
@@ -904,6 +1046,17 @@ vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, ou
     M_look = mat3(1.0) + clamp(f_look2.w, 0.0, 1.0) * (M_look - mat3(1.0));
     vec3 e = max(M_look * scene, vec3(1e-6));
     vec3 logE = log2(e / 0.18) * 0.30102999566 + L.misc2.w;   // misc2.w: slide exposure offset
+    // Stage B4: development adjacency effects. Developer exhausts next to heavily exposed areas
+    // and stays fresh next to light ones, so density is pushed away from its ~0.1 mm
+    // neighbourhood: a thin dark/light rim along edges (Eberhard / Mackie lines) and more
+    // local contrast in fine detail. Per layer, so colour edges also get the spatial part of
+    // the DIR inter-image effect. Capped at +-0.12 log E to keep it a rim, not a halo.
+    if (f_diffW2.z > 0.5 && L.grain.w > 0.0 && int(L.misc.y + 0.5) != 2) {
+        vec3 local = int(L.misc.x + 0.5) == 3 ? vec3(max(luminanceAP1(sceneLocal), 0.0)) : sceneLocal;
+        vec3 eL = max(M_look * local, vec3(1e-6));
+        float k = L.grain.w * max(1.0 + 0.25 * f_bokeh2.z, 0.5);
+        logE += clamp(k * log2(e / eL) * 0.30102999566, vec3(-0.12), vec3(0.12));
+    }
 
     vec3 D = sampleLookLut(L.misc.w, logE);
     int mode = int(L.misc.y + 0.5);
@@ -937,7 +1090,7 @@ vec3 emulsion120(int idx, vec3 scene, ivec2 p, bool master, out bool encoded, ou
     float devContrast = 1.0 + 0.12 * push;
     D = dMid + (D - dMid) * devContrast;
     float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
-    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono, L.grain);
 
     if (mode == 0 && !mono && L.print0.w >= 0.0) {
         vec3 lin = printNegative(L, D);
@@ -1052,7 +1205,7 @@ vec3 srgbEotf(vec3 v) {
     return mix(v / 12.92, pow((v + 0.055) / 1.055, vec3(2.4)), greaterThan(v, vec3(0.04045)));
 }
 
-vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
+vec3 spectralEmulsion(int idx, vec3 scene, vec3 sceneLocal, ivec2 p) {
     LookGpu L = u_looks[idx];
     int type = int(u_spec[1] + 0.5);
     bool mono = type == 2;
@@ -1062,6 +1215,15 @@ vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
     vec3 E = s * specCamera(rgb.rg / s);
     float offset = u_spec[2];
     vec3 logE = log2(max(E, vec3(1e-9)) / 0.18) * 0.30102999566 + offset;
+    // Development adjacency effects (B4), same as the curve model, on the spectral layer exposures.
+    if (f_diffW2.z > 0.5 && L.grain.w > 0.0) {
+        vec3 rl = max(sceneLocal, vec3(1e-6));
+        float sl = rl.r + rl.g + rl.b;
+        vec3 EL = sl * specCamera(rl.rg / sl);
+        if (mono) { E = vec3(dot(E, vec3(1.0 / 3.0))); EL = vec3(dot(EL, vec3(1.0 / 3.0))); }
+        float k = L.grain.w * max(1.0 + 0.25 * f_bokeh2.z, 0.5);
+        logE += clamp(k * log2(max(E, vec3(1e-9)) / max(EL, vec3(1e-9))) * 0.30102999566, vec3(-0.12), vec3(0.12));
+    }
     vec3 D = specCurves(logE);
     vec3 dMid = specCurves(vec3(offset));
     vec3 dMax = max(specVec3(4) / 1.05, vec3(0.1));
@@ -1071,7 +1233,7 @@ vec3 spectralEmulsion(int idx, vec3 scene, ivec2 p) {
     float push = f_bokeh2.z;
     D = dMid + (D - dMid) * (1.0 + 0.12 * push);
     float gStrength = f_grain.z * L.misc2.z * max(1.0 + 0.35 * push, 0.4);
-    D = filmGrain(vec2(p), D, dMax, gStrength, mono);
+    D = filmGrain(vec2(p), D, dMax, gStrength, mono, L.grain);
     D = max(D, vec3(0.0));
 
     if (mono) return vec3(specBwPrint(D.g));
@@ -1396,6 +1558,9 @@ void stageFilm() {
     vec3 halSrc = f_halW.x * max(m1 - thr, 0.0) + f_halW.y * max(m2 - thr, 0.0)
                 + f_halW.z * max(m3 - thr, 0.0) + f_halW.w * max(m4 - thr, 0.0)
                 + f_halW2.x * max(m5 - thr, 0.0);
+    // Unclipped HDR highlights (B2) can sit far over the threshold: a soft cap keeps a street lamp's
+    // ring from swamping the frame while still glowing more than a clipped one.
+    halSrc = halSrc / (1.0 + 0.5 * halSrc);
     if (f_optics.y > 0.0) {
         const mat3 M_hal = transpose(mat3(
             1.35, 0.12, 0.00,
@@ -1421,13 +1586,26 @@ void stageFilm() {
     bool encoded = false;
     bool printed = false;
     vec3 linearOut;
-    if (lookIdx >= 0 && int(u_spec[0] + 0.5) == lookIdx && u_spec[0] >= 0.0) {
-        linearOut = spectralEmulsion(lookIdx, scene, p);
+    vec3 sceneLocal = (lookIdx >= 0 && f_diffW2.z > 0.5) ? textureLod(u_aces_pyramid, uv, f_diffW2.y).rgb : scene;
+    bool spectral = lookIdx >= 0 && int(u_spec[0] + 0.5) == lookIdx && u_spec[0] >= 0.0;
+    if (spectral) {
+        linearOut = spectralEmulsion(lookIdx, scene, sceneLocal, p);
         printed = true;
     } else if (lookIdx >= 0) {
-        linearOut = emulsion120(lookIdx, scene, p, master, encoded, printed);
+        linearOut = emulsion120(lookIdx, scene, sceneLocal, p, master, encoded, printed);
     } else {
         linearOut = legacyEmulsion(scene, p);
+    }
+    if (lookIdx >= 0 && !encoded) {
+        bool monoLook = int(u_looks[lookIdx].misc.x + 0.5) == 3;
+        // The spectral B&W path already prints on its own paper model.
+        if (monoLook && !spectral && f_halW2.w > 0.5) linearOut = bwPaperPrint(linearOut, int(f_halW2.w + 0.5));
+        if (f_lfx3.w > 0.5) linearOut = scannerRendition(linearOut, int(f_lfx3.w + 0.5), monoLook);
+    }
+    if (lookIdx >= 0 && !encoded) {
+        bool monoLook = int(u_looks[lookIdx].misc.x + 0.5) == 3;
+        if (f_entropy.y > 0.001) linearOut = ageFilm(linearOut, f_entropy.y, int(u_looks[lookIdx].misc.x + 0.5));
+        if (f_entropy.z > 0.001) linearOut += lightLeak(uv, size, f_entropy.z, f_entropy.w, monoLook);
     }
 
     float hdrRatio = max(f_hdr.x, 1.0);
@@ -1489,6 +1667,8 @@ void stageFilm() {
         bool slideStock = (u_stock_type == 1u);
         graded = mix(vec3(yG), graded, mix(slideStock ? 0.1 : 0.2, 1.0, smoothstep(0.0, slideStock ? 0.3 : 0.07, yG)));
     }
+
+    if (f_entropy.x > 0.5) graded = frameBorder(graded, p, size, int(f_entropy.x + 0.5));
 
     if (master) {
         imageStore(u_out_rgba8, p, vec4(graded, gainEnc));
