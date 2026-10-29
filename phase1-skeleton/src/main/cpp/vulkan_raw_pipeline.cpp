@@ -2127,7 +2127,15 @@ void VulkanRawPipeline::fillFrameParams(FrameTargets& t, int camMatrixIdx) {
     // Grain tile texel size in output pixels: same grain-to-frame ratio in preview and master.
     u.grain[1] = std::max(1.0f, outLong / fmt.frameLongMm * kGrainClumpMm);
     u.grain[3] = fmt.grainAmp;
-    u.grain[2] = grainMult;
+    // Stage B6: expired film is grainier; light leaks change on every photo (the preview shows
+    // the pattern the next photo will get).
+    const float ageing = std::clamp(mAgeing.load(), 0.0f, 1.0f);
+    u.grain[2] = grainMult * (1.0f + 1.2f * ageing);
+    u.entropy[0] = static_cast<float>(mFrameBorder.load());
+    u.entropy[1] = ageing;
+    u.entropy[2] = std::clamp(mLightLeak.load(), 0.0f, 1.0f);
+    u.entropy[3] = static_cast<float>(mLeakSeed.load() % 4096u);
+    if (t.master && u.entropy[2] > 0.0f) mLeakSeed.fetch_add(1u);
 
     u.hdr[0] = kHdrSdrRatio;
     u.hdr[1] = t.master ? 1.0f : 0.0f;
@@ -3933,6 +3941,21 @@ Java_com_s24film_camera_VulkanRenderer_nativeSetScanner(JNIEnv* /*env*/, jobject
 JNIEXPORT void JNICALL
 Java_com_s24film_camera_VulkanRenderer_nativeSetBwPaper(JNIEnv* /*env*/, jobject /*thiz*/, jint idx) {
     if (gPipeline) gPipeline->setBwPaper(idx);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetFrameBorder(JNIEnv* /*env*/, jobject /*thiz*/, jint style) {
+    if (gPipeline) gPipeline->setFrameBorder(style);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetAgeing(JNIEnv* /*env*/, jobject /*thiz*/, jfloat amount) {
+    if (gPipeline) gPipeline->setAgeing(amount);
+}
+
+JNIEXPORT void JNICALL
+Java_com_s24film_camera_VulkanRenderer_nativeSetLightLeak(JNIEnv* /*env*/, jobject /*thiz*/, jfloat amount) {
+    if (gPipeline) gPipeline->setLightLeak(amount);
 }
 
 JNIEXPORT void JNICALL

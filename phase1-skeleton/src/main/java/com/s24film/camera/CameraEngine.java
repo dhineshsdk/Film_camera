@@ -734,7 +734,7 @@ public class CameraEngine {
         if (modes != null) for (int m : modes) if (m == CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE) simple = true;
         if (simple && faceMetering) builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE);
         VulkanRenderer.nativeSetFaceRect(0f, 0f, 0f, 0f);
-        Log.i(TAG, "Face metering: " + (simple ? "HAL face detect on" : "no HAL face detect"));
+        Log.i(TAG, "Face metering: " + (!faceMetering ? "off" : simple ? "HAL face detect on" : "no HAL face detect"));
     }
 
     private void applyManualExposure() {
@@ -1180,6 +1180,24 @@ public class CameraEngine {
         }
     }
 
+    // Logs the state if a shot has not saved 6 s after the press (diagnostics for stalls).
+    private volatile long framesSeen = 0L;
+    private volatile int shotSeq = 0;
+    private volatile int shotSaved = 0;
+    private final Handler watchdogHandler = new Handler(android.os.Looper.getMainLooper());
+
+    private void armShotWatchdog() {
+        final int seq = ++shotSeq;
+        final long frames0 = framesSeen;
+        watchdogHandler.postDelayed(() -> {
+            if (shotSaved >= seq) return;
+            Log.w(TAG, "Shot " + seq + " not saved after 6 s: frames since press " + (framesSeen - frames0)
+                + ", stack mode " + stackMode + " active " + stackActive + " begun " + stackBegun
+                + " phase " + stackPhase + " frames " + stackFrames + " wait " + stackWait
+                + " capture pending " + captureRequested.get() + " slow " + slowGot + "/" + slowFrames);
+        }, 6000L);
+    }
+
     private void recordFrameMeta(long ts, int iso, long exp) {
         synchronized (metaLock) {
             metaTs[metaNext] = ts;
@@ -1251,6 +1269,9 @@ public class CameraEngine {
             burstTarget = (iso <= 200) ? 4 : (iso <= 800) ? 6 : BURST_FRAMES;
         }
         if (stackMode == STACK_HDR) burstTarget = HDR_BASE_FRAMES;
+        Log.i(TAG, "Shot: stack " + stackMode + " target " + burstTarget + " active " + stackActive
+            + " ISO " + resultIso + " " + (resultExposureNs / 1000) + " us, " + String.format(java.util.Locale.US, "%.1f", underexposureEv) + " EV under");
+        armShotWatchdog();
         if (stackMode != STACK_OFF && !stackActive && (stackMode != STACK_HDR || manualAeActive)) {
             // Multi-frame shot: the frame listener collects the frames, then takes the normal capture path.
             // A burst (and a GPU HDR's base burst) starts from the frames already in the ring, up to
@@ -1291,6 +1312,7 @@ public class CameraEngine {
     private final long[] slowTs = new long[8];   // sensor timestamps of the long frames, from onCaptureStarted
     private int slowTsNext = 0;
     private volatile long lastImageTs = 0L;
+    private int lastStabState = -1;
     private volatile int burstTarget = BURST_FRAMES;   // 12 when the night push is 3 or more stops
     private static final int MAX_STACK_FRAMES = 600;
     private static final int STACK_SETTLE_FRAMES = 5;
@@ -1807,8 +1829,12 @@ public class CameraEngine {
             if (engine.frameCount == 1) {
                 Integer oisState = result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE);
                 Integer vsState = result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE);
-                Log.i(TAG, "HAL active stabilization: OIS=" + (oisState != null && oisState == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON)
-                    + ", VideoEIS=" + (vsState != null && vsState == CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON));
+                int stab = ((oisState != null && oisState == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON) ? 1 : 0)
+                    | ((vsState != null && vsState == CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON) ? 2 : 0);
+                if (stab != engine.lastStabState) {   // log changes only, not once a second
+                    engine.lastStabState = stab;
+                    Log.i(TAG, "HAL active stabilization: OIS=" + ((stab & 1) != 0) + ", VideoEIS=" + ((stab & 2) != 0));
+                }
             }
 
             Integer aeState = result.get(CaptureResult.CONTROL_AE_STATE);
@@ -1926,6 +1952,7 @@ public class CameraEngine {
 
             long now = System.nanoTime();
             engine.frameCount++;
+            engine.framesSeen++;
             if (now - engine.fpsStartTimeNs >= 1_000_000_000L) {
                 engine.currentCameraFps = (engine.frameCount * 1_000_000_000.0) / (now - engine.fpsStartTimeNs);
                 engine.frameCount = 0;
@@ -1989,6 +2016,7 @@ public class CameraEngine {
             engine.updateAutoIso();
 
             if (capture) {
+                engine.shotSaved = engine.shotSeq;
                 Log.i(TAG, "Capture grip " + activeOrient + " (render " + renderOrient + ", ROT +" + engine.manualRotationOffset + ")");
                 // Depth bokeh: the first half of the master render runs here, the depth network and the
                 // second half on a worker, which also hands the Image to the saver.

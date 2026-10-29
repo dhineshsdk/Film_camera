@@ -100,4 +100,7 @@ public class VulkanRenderer {
     public static native void nativeSetPrintPaper(int idx);
     public static native void nativeSetScanner(int idx);
     public static native void nativeSetBwPaper(int idx);
+    public static native void nativeSetFrameBorder(int style);
+    public static native void nativeSetAgeing(float amount);
+    public static native void nativeSetLightLeak(float amount);
 }
